@@ -1,0 +1,29 @@
+# dsh-plugin-market bundle patch: the default activation layer applied when the
+# package is installed into a profile through `dsh plugin add` (the package
+# declares dsh.bundle.patch -> ./cordis.patch.yml).
+#
+# Row ids are stable and never carry the loader-forbidden colon. `name`
+# references this package's own entry points (package main, or a planned
+# export subpath). A source/dev profile appends the same rows as relative file
+# rows instead; see scripts/install-profile.mjs and README "Profile self-load".
+#
+# Entry ownership (business modules land the code, framework owns the rows):
+# - plugin-market-host    Host plugin  - package main (lib/index.js from
+#                         src/index.ts). Placeholder today.
+# - plugin-market-control Control plugin - planned sub-entry ./control (lib/
+#                         control.js from src/host/control). Disabled until the
+#                         plugin-control-service module ships that entry.
+# - plugin-market-ui      UI plugin - planned sub-entry ./ui (a Host no-op row;
+#                         its browser half ships through dsh.client ./client).
+#                         Disabled until plugin-market-ui lands it.
+- insert:
+    - id: plugin-market-host
+      name: dsh-plugin-market
+
+    - id: plugin-market-control
+      name: dsh-plugin-market/control
+      disabled: true
+
+    - id: plugin-market-ui
+      name: dsh-plugin-market/ui
+      disabled: true

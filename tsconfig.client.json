@@ -1,0 +1,15 @@
+{
+  // Client leaf: browser half. DOM + React JSX; no node ambient types.
+  // src/types.ts is the cross-face shared file and is compiled under this
+  // leaf too (same rootDir/outDir as the Host leaf, identical output).
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "tsBuildInfoFile": "lib/tsconfig.client.tsbuildinfo"
+  },
+  "include": ["src/client", "src/types.ts"]
+}

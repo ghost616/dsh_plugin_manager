@@ -1,0 +1,13 @@
+{
+  // Host leaf: node-only runtime half. No DOM ambient; no client sources.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
+  },
+  "include": ["src"],
+  "exclude": ["src/client"]
+}

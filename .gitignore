@@ -1,0 +1,7 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.log
+.demo-profile/
+.dsh-profile-*/
+tests/.tmp/

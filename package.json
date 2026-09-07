@@ -1,0 +1,94 @@
+{
+  "name": "dsh-plugin-market",
+  "description": "Single-package distributable dsh bundle: Web Plugins-market UI plus its Host (GitHub search / install pipeline / manifest store / TrustGate) and Control (loader lifecycle + Remote gateway) halves",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "plugin-market"
+  ],
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./types": {
+      "types": "./lib/types/types.d.ts",
+      "default": "./lib/types/types.js"
+    },
+    "./control": {
+      "types": "./lib/types/host/control/index.d.ts",
+      "default": "./lib/control.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": []
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/control.js",
+    "lib/types/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json && tsdown",
+    "build:types": "tsc -b tsconfig.json",
+    "bundle": "tsdown",
+    "clean": "node scripts/clean.mjs",
+    "prepare": "tsdown --config tsdown.prepare.config.ts",
+    "verify": "node scripts/verify-load.mjs",
+    "install-profile": "node scripts/install-profile.mjs",
+    "test": "tsc -b tsconfig.json && vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.2-alpha.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.7",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
+    "@deepseek-ai/dsh-client-locale": "0.1.2-alpha.5",
+    "@deepseek-ai/dsh-client-store": "0.1.2-alpha.5",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-alpha.5",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.2-alpha.5",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.5",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.2-alpha.5",
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
+    "jsdom": "29.1.1",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "0.22.2",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
