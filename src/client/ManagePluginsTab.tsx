@@ -638,6 +638,8 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   const [dragging, setDragging] = useState(false)
   const dragAnchor = useRef<MarketDragAnchor | null>(null)
   const detachDrag = useRef<(() => void) | null>(null)
+  /** One empty-keyword auto browse per mounted dialog (never on later clears). */
+  const autoBrowsed = useRef(false)
 
   useEffect(() => {
     mounted.current = true
@@ -712,6 +714,16 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
       )
   }
 
+  // One-shot browse: on the very first mount with an empty search box, list
+  // every dsh plugin (empty keyword = Host topic:dsh-plugin search). Later
+  // edits/clears never auto-resubmit; only an explicit submit (or retry) does.
+  useEffect(() => {
+    if (autoBrowsed.current) return
+    autoBrowsed.current = true
+    if (query.trim().length === 0) runSearch('', 1)
+    // Deliberately mount-only; a reopened dialog mounts fresh and browses again.
+  }, [])
+
   const submit = (event: FormEvent): void => {
     event.preventDefault()
     const keywords = query.trim()
@@ -735,7 +747,7 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   return (
     <div className={css.backdrop}>
       <section
-        className={dragging ? `${css.dialog} ${css.marketDragging}` : css.dialog}
+        className={`${css.dialog} ${css.marketDialog}${dragging ? ` ${css.marketDragging}` : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={t('marketDialogTitle')}
@@ -782,19 +794,27 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
           </button>
         </form>
 
-        {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
-        {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
-        {searchState.phase === 'error' ? (
-          <p className={css.dialogError} role="alert" data-market-error data-error-code={searchState.failure.code}>
-            {failureText(searchState.failure, t)}
-          </p>
-        ) : null}
-        {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
-          <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
-        ) : null}
+        <div className={css.marketScroll} data-market-scroll>
+          {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
+          {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
+          {searchState.phase === 'error' ? (
+            <div className={css.marketError} role="alert" data-market-error data-error-code={searchState.failure.code}>
+              <p>{failureText(searchState.failure, t)}</p>
+              <button
+                type="button"
+                className={css.textButton}
+                data-market-retry
+                onClick={() => { runSearch(searchState.keywords, searchState.page) }}
+              >
+                {t('retry')}
+              </button>
+            </div>
+          ) : null}
+          {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
+            <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
+          ) : null}
 
-        {ready !== undefined && ready.pageData.items.length > 0 ? (
-          <>
+          {ready !== undefined && ready.pageData.items.length > 0 ? (
             <ul className={css.resultList} data-market-results>
               {ready.pageData.items.map(item => {
                 const managed = installed.has(item.repository)
@@ -843,35 +863,37 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
                 )
               })}
             </ul>
+          ) : null}
+        </div>
 
-            <footer className={css.pagination} data-pagination>
-              <button
-                type="button"
-                className={css.textButton}
-                data-page-prev
-                disabled={ready.page <= 1 || searchState.phase === 'loading'}
-                onClick={() => { goPage(ready.page - 1) }}
-              >
-                {t('prevPage')}
-              </button>
-              <p className={css.count} data-page-count>
-                {t('pagination', {
-                  current: String(ready.page),
-                  total: String(Math.max(totalPages, 1)),
-                  count: String(ready.pageData.totalCount),
-                })}
-              </p>
-              <button
-                type="button"
-                className={css.textButton}
-                data-page-next
-                disabled={totalPages === 0 || ready.page >= totalPages || searchState.phase === 'loading'}
-                onClick={() => { goPage(ready.page + 1) }}
-              >
-                {t('nextPage')}
-              </button>
-            </footer>
-          </>
+        {ready !== undefined && ready.pageData.items.length > 0 ? (
+          <footer className={css.pagination} data-pagination>
+            <button
+              type="button"
+              className={css.textButton}
+              data-page-prev
+              disabled={ready.page <= 1 || searchState.phase === 'loading'}
+              onClick={() => { goPage(ready.page - 1) }}
+            >
+              {t('prevPage')}
+            </button>
+            <p className={css.count} data-page-count>
+              {t('pagination', {
+                current: String(ready.page),
+                total: String(Math.max(totalPages, 1)),
+                count: String(ready.pageData.totalCount),
+              })}
+            </p>
+            <button
+              type="button"
+              className={css.textButton}
+              data-page-next
+              disabled={totalPages === 0 || ready.page >= totalPages || searchState.phase === 'loading'}
+              onClick={() => { goPage(ready.page + 1) }}
+            >
+              {t('nextPage')}
+            </button>
+          </footer>
         ) : null}
 
         {installing ? (

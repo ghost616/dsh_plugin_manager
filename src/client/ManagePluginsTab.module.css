@@ -456,6 +456,12 @@
   box-shadow: var(--dsw-elevation-stroke);
 }
 
+/* Market dialog variant: its middle result zone scrolls (three-zone layout),
+   so the dialog shell itself never scrolls as a whole. */
+.marketDialog {
+  overflow: hidden;
+}
+
 .dialogHeader {
   display: flex;
   align-items: baseline;
@@ -471,6 +477,35 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   color: var(--dsw-alias-label-secondary);
+}
+
+/* Three-zone market dialog: the search header (above) and the pagination
+   (below) are fixed; only this middle result zone scrolls, so the dialog
+   itself never scrolls as a whole. */
+.marketScroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Search error zone inside the scroll body: localized message + retry. */
+.marketError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.marketError p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .dialogBody {

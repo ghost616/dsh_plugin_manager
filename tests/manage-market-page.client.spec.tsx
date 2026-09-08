@@ -93,14 +93,18 @@ describe('ManagePluginsTab GitHub browse modal', () => {
     expect(host.querySelector('[data-market-status="idle"]')).not.toBeNull()
   })
 
-  it('opens the modal with the browse button and closes it again', async () => {
-    const { props } = managePageHarness()
+  it('opens the modal with the browse button, auto-browses once, and closes it again', async () => {
+    const { props, mocks } = managePageHarness()
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
 
     const dialog = await openMarket(host)
     expect(dialog.textContent).toContain(zh.marketDialogTitle)
-    expect(dialog.querySelector('[data-market-idle]')).not.toBeNull()
+    // On mount with an empty box the dialog browses all dsh plugins once
+    // (empty keyword); the default mock returns no hits.
+    expect(mocks.search).toHaveBeenCalledTimes(1)
+    expect(mocks.search).toHaveBeenCalledWith('', 1)
+    expect(dialog.querySelector('[data-market-empty]')).not.toBeNull()
 
     await click(dialog.querySelector('[data-market-close]'))
     expect(host.querySelector('[data-dialog="market"]')).toBeNull()
@@ -478,6 +482,102 @@ describe('ManagePluginsTab GitHub modal drag & close affordances', () => {
     expect(glyph).not.toBeNull()
     expect(glyph?.getAttribute('aria-hidden')).toBe('true')
     expect(glyph?.getAttribute('viewBox')).toBe('0 0 16 16')
+  })
+})
+describe('ManagePluginsTab GitHub modal auto browse & scroll zones', () => {
+  it('browses once per mount when the search box is empty', async () => {
+    const search = vi.fn(async (_keywords: string, _page: number) => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    let dialog = await openMarket(host)
+
+    expect(search).toHaveBeenCalledTimes(1)
+    expect(search).toHaveBeenCalledWith('', 1)
+    expect(dialog.querySelector('[data-market-loading]')).toBeNull()
+    expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
+    expect(dialog.textContent).toContain('helper')
+
+    // Closing and reopening mounts a fresh dialog, which browses once again.
+    await click(dialog.querySelector('[data-market-close]'))
+    dialog = await openMarket(host)
+    expect(search).toHaveBeenCalledTimes(2)
+    expect(search).toHaveBeenLastCalledWith('', 1)
+    expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
+  })
+
+  it('does not auto re-browse when the box is cleared after a manual search', async () => {
+    const search = vi.fn(async (_keywords: string, page: number) => makeSearchPage([
+      { repository: `acme/p${String(page)}`, name: `p${String(page)}` },
+    ]))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    expect(search).toHaveBeenCalledTimes(1)
+
+    const input = dialog.querySelector<HTMLInputElement>('[data-market-search-input]')!
+    await typeInto(input, 'agents')
+    submitForm(input)
+    await flush()
+    expect(search).toHaveBeenCalledTimes(2)
+    expect(search).toHaveBeenLastCalledWith('agents', 1)
+
+    // Clearing must not resubmit: previous results stay and no call is added.
+    await typeInto(input, '')
+    await flush()
+    expect(search).toHaveBeenCalledTimes(2)
+    expect(dialog.querySelector('[data-market-card]')).not.toBeNull()
+  })
+
+  it('localizes and retries a mount auto-browse failure', async () => {
+    const search = vi.fn()
+      .mockRejectedValueOnce(new MarketCallFailure({
+        code: 'github/rate-limit',
+        message: 'limited',
+        details: {},
+      }))
+      .mockResolvedValueOnce(makeSearchPage([{ repository: 'acme/helper', name: 'helper' }]))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+
+    const error = dialog.querySelector('[data-market-error]')
+    expect(error).not.toBeNull()
+    expect(error?.getAttribute('data-error-code')).toBe('github/rate-limit')
+    expect(error?.textContent).toContain(zh.rateLimited)
+
+    await click(dialog.querySelector('[data-market-retry]'))
+    await flush()
+    expect(search).toHaveBeenCalledTimes(2)
+    expect(search).toHaveBeenLastCalledWith('', 1)
+    expect(dialog.querySelector('[data-market-error]')).toBeNull()
+    expect(dialog.querySelector('[data-market-card]')).not.toBeNull()
+  })
+
+  it('keeps the search header and pagination outside the scrolling result zone', async () => {
+    const seed = Array.from({ length: 10 }, (_, index) => ({
+      repository: `acme/plugin-${String(index + 1)}`,
+      name: `plugin-${String(index + 1)}`,
+    }))
+    const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, seed, 25))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+
+    const scrollZone = dialog.querySelector('[data-market-scroll]')
+    expect(scrollZone).not.toBeNull()
+    expect(scrollZone?.querySelector('[data-market-results]')).not.toBeNull()
+    expect(scrollZone?.querySelector('[data-market-search-input]')).toBeNull()
+    const pagination = dialog.querySelector('[data-pagination]')
+    expect(pagination).not.toBeNull()
+    expect(scrollZone?.contains(pagination)).toBe(false)
+    const form = dialog.querySelector('form')
+    expect(scrollZone?.contains(form)).toBe(false)
   })
 })
 
