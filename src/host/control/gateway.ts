@@ -3,12 +3,15 @@
  * control service, following the shipped plugin-inventory gateway pattern
  * (TypertRemoteService + @Remote markers).
  *
- * A dsh composition routes this service automatically through its source-mode
- * Gateway discovery: `collectSrcClaims()` enumerates every live Service that
- * carries a `typertRemote` binding, so no generated descriptor artifact is
- * required on the Host. Every public method throws {@link RemoteError} with
- * the merged market wire codes (see `src/types.ts`), which keeps failures
- * identical across the native Remote carrier and the external web channel.
+ * The gateway stays mounted while the market is idle and answers
+ * `market/idle` for every repository-backed operation (configure
+ * Config.repositoryPath on plugin-market-host to use them). A dsh composition
+ * routes this service automatically through its source-mode Gateway
+ * discovery (`collectSrcClaims` enumerates live Services carrying a
+ * `typertRemote` binding), so no generated descriptor artifact is required on
+ * the Host. Every public method throws {@link RemoteError} with the merged
+ * market wire codes (see `src/types.ts`), keeping failures identical across
+ * the native Remote carrier and the external web channel.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,18 +22,34 @@ import {
   remoteErrorOf,
 } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  GitHubSearchPage,
   ManagedPluginList,
+  MarketStatus,
+  PluginInstallOutcome,
+  PluginInstallReview,
   PluginMarketKey,
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
 } from '../../types.ts'
+import type { MarketRepository } from '../market/index.ts'
 import { parsePluginKey } from '../market/keys.ts'
 import { MarketError } from '../market/errors.ts'
 import { MarketControlError, type MarketPluginController } from './controller.ts'
+import type { MarketSourceOperations } from './source.ts'
 
 /** The Cordis service key (and wire namespace) of the gateway. */
 export const MARKET_CONTROL_SERVICE_KEY = 'marketControl'
+
+/** Live access the gateway needs from its activation context. */
+export interface MarketControllerGatewayDeps {
+  /** The record-driven controller, or null while the market is idle. */
+  readonly controller: () => MarketPluginController | null
+  /** The active repository, or null while the market is idle. */
+  readonly repository: () => MarketRepository | null
+  /** Source operations (search / preview / install). */
+  readonly source: MarketSourceOperations
+}
 
 /**
  * Prefixes owned by the market wire vocabulary; structural recognition keeps
@@ -38,6 +57,7 @@ export const MARKET_CONTROL_SERVICE_KEY = 'marketControl'
  */
 const MARKET_WIRE_CODE_PREFIXES = [
   'market/', 'record/', 'repository/', 'harness/', 'config/',
+  'github/', 'install/', 'gate/', 'registry/',
 ] as const
 
 function isWireErrorLike(error: unknown): error is { code: string; message: string; details?: unknown } {
@@ -80,8 +100,9 @@ export function toRemoteError(error: unknown): RemoteError {
     )
   }
   if (isWireErrorLike(error)) {
-    // A market/record/repository failure thrown from another copy of this
-    // package (e.g. src code under a compiled gateway) still maps by shape.
+    // A market/record/repository/github/install failure thrown from another
+    // copy of this package (e.g. src code under a compiled gateway) still maps
+    // by shape.
     return new RemoteError(
       error.code as never,
       error.message,
@@ -100,20 +121,41 @@ export function toRemoteError(error: unknown): RemoteError {
   return new RemoteError('gateway/internal', String(error), {})
 }
 
-/** Remote exposure of the record-driven controller. */
+/** Remote exposure of the market control service. */
 export class MarketControllerGateway extends TypertRemoteService {
   constructor(
     ctx: Context,
-    private readonly controller: MarketPluginController,
+    private readonly deps: MarketControllerGatewayDeps,
   ) {
     super(ctx, MARKET_CONTROL_SERVICE_KEY)
+  }
+
+  /** Resolve the active controller; repository-backed ops idle otherwise. */
+  private requireController(): MarketPluginController {
+    const controller = this.deps.controller()
+    if (controller === null) {
+      throw new MarketControlError(
+        'market/idle',
+        'The plugin market is idle: configure Config.repositoryPath on plugin-market-host to manage plugins.',
+      )
+    }
+    return controller
+  }
+
+  /** Read-only activation facts (configured flag + repository root). */
+  @Remote('status')
+  async status(): Promise<MarketStatus> {
+    const repository = this.deps.repository()
+    return repository === null
+      ? { configured: false, repositoryPath: null }
+      : { configured: true, repositoryPath: repository.root }
   }
 
   /** Records merged with the live loader projection, in stable key order. */
   @Remote('listManaged')
   async listManaged(): Promise<ManagedPluginList> {
     try {
-      return await this.controller.list()
+      return await this.requireController().list()
     } catch (error) {
       throw toRemoteError(error)
     }
@@ -123,7 +165,7 @@ export class MarketControllerGateway extends TypertRemoteService {
   @Remote('setEnabled')
   async setEnabled(key: string, enabled: boolean): Promise<PluginMarketRecord> {
     try {
-      return await this.controller.setEnabled(wireKey(key), enabled)
+      return await this.requireController().setEnabled(wireKey(key), enabled)
     } catch (error) {
       throw toRemoteError(error)
     }
@@ -133,7 +175,7 @@ export class MarketControllerGateway extends TypertRemoteService {
   @Remote('requestRemove')
   async requestRemove(key: string): Promise<RemoveRequest> {
     try {
-      return await this.controller.requestRemove(wireKey(key))
+      return await this.requireController().requestRemove(wireKey(key))
     } catch (error) {
       throw toRemoteError(error)
     }
@@ -143,7 +185,40 @@ export class MarketControllerGateway extends TypertRemoteService {
   @Remote('confirmRemove')
   async confirmRemove(key: string, token: string): Promise<RemoveOutcome> {
     try {
-      return await this.controller.confirmRemove(wireKey(key), token)
+      return await this.requireController().confirmRemove(wireKey(key), token)
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** GitHub topic search (dsh-plugin). */
+  @Remote('search')
+  async search(keywords: string | null, perPage: number | null): Promise<GitHubSearchPage> {
+    try {
+      return await this.deps.source.search({
+        ...(keywords === null || keywords === undefined ? {} : { keywords }),
+        ...(perPage === null || perPage === undefined ? {} : { perPage }),
+      })
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** Review one repository and mint its single-use install confirmation. */
+  @Remote('previewInstall')
+  async previewInstall(repository: string, version: string | null): Promise<PluginInstallReview> {
+    try {
+      return await this.deps.source.previewInstall(repository, version ?? null)
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** Run the double-confirmed install for a reviewed repository. */
+  @Remote('install')
+  async install(repository: string, confirmToken: string, version: string | null): Promise<PluginInstallOutcome> {
+    try {
+      return await this.deps.source.install(repository, confirmToken, version ?? null)
     } catch (error) {
       throw toRemoteError(error)
     }

@@ -15,13 +15,41 @@ const DEFAULT_MESSAGE: Record<PluginMarketErrorCode, string> = {
   'record/exists': 'A plugin with this key is already recorded.',
   'record/not-found': 'No plugin record exists for the requested key.',
   'record/corrupt':
-    'The plugin records file is corrupted. It was left untouched — fix or remove it manually so it can be re-initialized.',
+    'The plugin records file is corrupted. It was left untouched; fix or remove it manually so it can be re-initialized.',
   'record/io': 'An I/O error occurred while reading or writing the plugin records file.',
+  'record/invalid': 'The plugin record carries an invalid field value.',
   'harness/resolve-failed':
     'A shared harness package could not be resolved in the running dsh instance.',
   'harness/link-conflict':
     'A conflicting file already occupies a shared harness link path.',
   'harness/io': 'An I/O error occurred while preparing the shared harness links.',
+  'github/auth':
+    'The GitHub request was rejected for missing or invalid credentials.',
+  'github/rate-limit':
+    'The GitHub API rate limit was exceeded. Retry later or configure a token.',
+  'github/network':
+    'The GitHub request failed at the network level. Check connectivity and retry.',
+  'github/not-found':
+    'The GitHub repository or resource was not found.',
+  'github/bad-response':
+    'The GitHub response could not be understood.',
+  'github/bad-request':
+    'The requested GitHub resource is invalid.',
+  'install/dir-exists':
+    'A directory already occupies the install target and is not a managed checkout.',
+  'install/dir-in-use':
+    'The install target directory is already used by another managed plugin.',
+  'install/entry-missing':
+    'The resolved plugin entry file does not exist inside the checkout.',
+  'install/package-invalid':
+    'The checkout package.json could not be read or parsed.',
+  'install/git-failed':
+    'The git clone or checkout step failed.',
+  'install/deps-failed':
+    'Installing the checkout dependencies failed.',
+  'install/io': 'An I/O error occurred during the plugin install.',
+  'gate/consent-required':
+    'Installing a plugin requires explicit TrustGate confirmation.',
 }
 
 /** Optional context attached to a {@link MarketError}. */

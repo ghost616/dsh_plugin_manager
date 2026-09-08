@@ -7,10 +7,12 @@
 
 import type { Plugin } from '@deepseek-ai/cordis'
 import type {
+  GitHubSearchPage,
   ManagedPluginPhase,
   PluginMarketGithubSource,
   PluginMarketKey,
   PluginMarketRecord,
+  PluginPreviewOutcome,
 } from '../../src/types.ts'
 import { parsePluginKey } from '../../src/host/market/keys.ts'
 import {
@@ -24,6 +26,14 @@ import type {
   LoaderEntryView,
 } from '../../src/host/control/loader-adapter.ts'
 import { isProtectedRecordKey } from '../../src/host/control/protect.ts'
+import type { MarketRepository } from '../../src/host/market/index.ts'
+import {
+  MarketSourceOperations,
+  type InstallerPort,
+  type MarketSourceDeps,
+  type PreviewEnginePort,
+  type SearchEnginePort,
+} from '../../src/host/control/source.ts'
 import type { PluginMarketSource } from '../../src/types.ts'
 
 /** Scripted loader adapter with real create/update/remove/rollback shape. */
@@ -126,7 +136,10 @@ export interface Testbed {
   readonly records: FakeRecords
   readonly loader: FakeLoader
   readonly remover: FakeRemover
+  readonly engines: FakeEngines
   readonly now: () => Date
+  /** Fake opened repository over {@link records}. */
+  readonly repository: MarketRepository
   controller(): MarketPluginController
   deps(): MarketControllerDeps
 }
@@ -136,6 +149,7 @@ export function testbed(clock: { now?: () => Date } = {}): Testbed {
   const records = new FakeRecords()
   const loader = new FakeLoader()
   const remover = new FakeRemover()
+  const engines = new FakeEngines()
   const now = clock.now ?? (() => new Date(0))
   const deps = (): MarketControllerDeps => ({
     repositoryRoot: '/repo',
@@ -155,7 +169,9 @@ export function testbed(clock: { now?: () => Date } = {}): Testbed {
     records,
     loader,
     remover,
+    engines,
     now,
+    repository: fakeRepository(records),
     controller: () => new MarketPluginController(deps()),
     deps,
   }
@@ -169,6 +185,127 @@ export function entryModuleNameFor(record: PluginMarketRecord): string {
 /** Valid brand-free key helper for tests. */
 export function key(raw: string): PluginMarketKey {
   return parsePluginKey(raw)
+}
+
+/** A fake opened repository over an in-memory records store. */
+export function fakeRepository(records: FakeRecords, root = '/repo'): MarketRepository {
+  return {
+    root,
+    records,
+    harnessLinks: { scopePath: `${root}/node_modules/@deepseek-ai`, links: [] },
+    harnessVerified: null,
+  }
+}
+
+/** Scriptable source engines for source-operation and channel specs. */
+export class FakeEngines {
+  searchResult: GitHubSearchPage = { totalCount: 0, items: [] }
+  searchError: unknown = undefined
+  searchCalls: { keywords?: string; perPage?: number }[] = []
+  previewResult: PluginPreviewOutcome = {
+    status: 'ready',
+    summary: { name: 'demo-plugin', version: '1.0.0', dependencies: { dependencies: ['@deepseek-ai/cordis'], peerDependencies: [] } },
+  }
+  previewCalls: string[] = []
+  installCalls: { repositoryRoot: string; key: string; repository: string; version: string | null }[] = []
+  /** Returned record; built on demand unless preset. */
+  installedRecord: PluginMarketRecord | null = null
+  installError: unknown = undefined
+  synced: PluginMarketRecord[] = []
+
+  searchEngine: SearchEnginePort = {
+    search: async (options) => {
+      this.searchCalls.push(options)
+      if (this.searchError !== undefined) throw this.searchError
+      return this.searchResult
+    },
+  }
+
+  previewEngine: PreviewEnginePort = {
+    preview: async (repository) => {
+      this.previewCalls.push(repository)
+      return this.previewResult
+    },
+  }
+
+  installer(records: FakeRecords): InstallerPort {
+    return {
+      install: async (input) => {
+        this.installCalls.push(input)
+        if (this.installError !== undefined) throw this.installError
+        const record = this.installedRecord ?? makeRecord(input.key, {
+          source: makeSource(input.repository),
+          localDirName: input.key,
+          entry: 'index.js',
+          trusted: 'trusted',
+          trustedAt: '2026-01-01T00:00:00.000Z',
+        })
+        records.seed(input.key, {
+          ...record,
+          key: record.key,
+          source: record.source,
+          localDirName: record.localDirName,
+          entry: record.entry,
+          enabled: false,
+          trusted: 'trusted',
+          trustedAt: record.trustedAt,
+        })
+        return { record, checkoutDir: `${input.repositoryRoot}/${input.key}` }
+      },
+    }
+  }
+
+  syncRecord: (record: PluginMarketRecord) => Promise<void> = async (record) => {
+    this.synced.push(record)
+  }
+}
+
+/** Build a MarketSourceOperations over a repository (null ⇒ idle). */
+export function makeSourceOps(
+  repository: MarketRepository | null,
+  records: FakeRecords,
+  engines: FakeEngines = new FakeEngines(),
+  options: {
+    now?: () => Date
+    confirmTtlMs?: number
+    isProtectedKey?: (key: string) => boolean
+    isSelfModule?: (moduleName: string) => boolean
+  } = {},
+): MarketSourceOperations {
+  const deps: MarketSourceDeps = {
+    repository: () => repository,
+    searchEngine: engines.searchEngine,
+    previewEngine: engines.previewEngine,
+    installer: () => engines.installer(records),
+    protection: {
+      isProtectedKey: options.isProtectedKey ?? isProtectedRecordKey,
+      isSelfModule: options.isSelfModule ?? (() => false),
+    },
+    syncRecord: engines.syncRecord,
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.confirmTtlMs === undefined ? {} : { confirmTtlMs: options.confirmTtlMs }),
+    logger: { warn: () => {}, error: () => {} },
+  }
+  return new MarketSourceOperations(deps)
+}
+
+/** Controller env of the source specs (same shape as {@link testbed}). */
+export function sourceTestbed(): {
+  records: FakeRecords
+  repository: MarketRepository
+  engines: FakeEngines
+  now(): Date
+  source(clock?: { now?: () => Date }): MarketSourceOperations
+} {
+  const records = new FakeRecords()
+  const engines = new FakeEngines()
+  return {
+    records,
+    repository: fakeRepository(records),
+    engines,
+    now: () => new Date(0),
+    source: (clock = {}) => makeSourceOps(fakeRepository(records), records, engines, clock),
+  }
 }
 
 export function makeSource(repository = 'octocat/demo-plugin'): PluginMarketGithubSource {

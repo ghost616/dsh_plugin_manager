@@ -6,11 +6,13 @@
  *
  * Wire shape:
  *   POST /api/plugins-market
- *   { "method": "listManaged" | "setEnabled" | "requestRemove" | "confirmRemove",
+ *   { "method": "status" | "listManaged" | "setEnabled" | "requestRemove"
+ *       | "confirmRemove" | "search" | "previewInstall" | "install",
  *     "args": { ... } }
  *   200 → { "ok": true, "value": ... }
  *        | { "ok": false, "error": { "code", "message", "details" } }
- *   Non-POST → 405, malformed body / unknown method → 400 (same envelope).
+ *   Non-POST → 405, malformed body / unknown method / bad args → 400 (same
+ *   envelope).
  *
  * The envelope mirrors the native Remote result so consumers branch on
  * `ok`/`error.code` exactly as they would on the Remote carrier.
@@ -19,7 +21,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  GitHubSearchPage,
   ManagedPluginList,
+  MarketStatus,
+  PluginInstallOutcome,
+  PluginInstallReview,
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
@@ -50,13 +56,18 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** One server-side method: wire parameters and the gateway call. */
+/** One server-side method: required/optional wire parameters and the call. */
 interface MethodMeta {
   readonly parameters: readonly string[]
+  readonly optional?: readonly string[]
   readonly call: (gateway: MarketControllerGateway, args: Record<string, unknown>) => Promise<unknown>
 }
 
 const METHODS: Record<string, MethodMeta> = {
+  status: {
+    parameters: [],
+    call: (gateway) => gateway.status(),
+  },
   listManaged: {
     parameters: [],
     call: (gateway) => gateway.listManaged(),
@@ -72,6 +83,29 @@ const METHODS: Record<string, MethodMeta> = {
   confirmRemove: {
     parameters: ['key', 'token'],
     call: (gateway, args) => gateway.confirmRemove(String(args.key), String(args.token)),
+  },
+  search: {
+    parameters: [],
+    optional: ['keywords', 'perPage'],
+    call: (gateway, args) => {
+      const keywords = optionalString(args.keywords)
+      const perPage = optionalNumber(args.perPage)
+      return gateway.search(keywords, perPage)
+    },
+  },
+  previewInstall: {
+    parameters: ['repository'],
+    optional: ['version'],
+    call: (gateway, args) => gateway.previewInstall(String(args.repository), optionalVersion(args.version)),
+  },
+  install: {
+    parameters: ['repository', 'confirmToken'],
+    optional: ['version'],
+    call: (gateway, args) => gateway.install(
+      String(args.repository),
+      String(args.confirmToken),
+      optionalVersion(args.version),
+    ),
   },
 }
 
@@ -156,6 +190,9 @@ async function dispatch(payload: unknown, gateway: MarketControllerGateway): Pro
     }
     args[name] = rawArgs[name]
   }
+  for (const name of meta.optional ?? []) {
+    if (Object.hasOwn(rawArgs, name)) args[name] = rawArgs[name]
+  }
   return meta.call(gateway, args)
 }
 
@@ -206,9 +243,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function optionalString(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') throw new HttpRefusal(400, 'The argument must be a string.')
+  return value
+}
+
+function optionalNumber(value: unknown): number | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new HttpRefusal(400, 'The argument must be a positive integer.')
+  }
+  return value
+}
+
+function optionalVersion(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') throw new HttpRefusal(400, 'The "version" argument must be a string or null.')
+  return value
+}
+
 /** Value exports of the channel, typed for future consumers. */
 export type MarketChannelValue =
+  | MarketStatus
   | ManagedPluginList
   | PluginMarketRecord
   | RemoveRequest
   | RemoveOutcome
+  | GitHubSearchPage
+  | PluginInstallReview
+  | PluginInstallOutcome

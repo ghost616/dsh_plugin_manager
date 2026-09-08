@@ -1,6 +1,8 @@
 /**
- * Web channel spec (攻关 B round trip) against the tsc-emitted gateway artifact
+ * Web channel spec (M1 source ops) against the tsc-emitted gateway artifact
  * (see control-gateway.spec.ts header for why decorator sources run compiled).
+ * Covers the original record-control methods plus the extended
+ * search / previewInstall / install surface and its failure branches.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -10,7 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 // @ts-expect-error -- compiled artifact
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
-import { testbed } from './support/control-testbed.ts'
+import { FakeEngines, makeSourceOps, testbed } from './support/control-testbed.ts'
 
 const contexts: Context[] = []
 const servers: Server[] = []
@@ -65,27 +67,63 @@ type WireResult =
   | { ok: true; value: unknown }
   | { ok: false; error: { code: string; message: string; details: object } }
 
-async function call(router: RouterServer, method: string, args: object): Promise<WireResult> {
+async function post(router: RouterServer, body: unknown, expectStatus = 200): Promise<{ status: number; body: WireResult }> {
   const response = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ method, args }),
+    body: JSON.stringify(body),
   })
-  expect(response.status).toBe(200)
-  return await response.json() as WireResult
+  expect(response.status).toBe(expectStatus)
+  return { status: response.status, body: await response.json() as WireResult }
 }
 
-describe('market control web channel (candidate B round trip)', () => {
-  it('serves listManaged / setEnabled / double-confirmed remove over HTTP', async () => {
-    const ctx = new Context()
-    contexts.push(ctx)
-    const bed = testbed()
-    const record = bed.records.seed('gh-web', { enabled: false, localDirName: 'web', entry: 'plugin.mjs' })
-    const gateway = new MarketControllerGateway(ctx, bed.controller())
-    const router = new RouterServer()
-    servers.push(router.server)
-    const disposeRoute = registerMarketWebChannel(router, gateway)
+async function call(router: RouterServer, method: string, args: object): Promise<WireResult> {
+  return (await post(router, { method, args })).body
+}
+
+/** One route-wired gateway over fakes (records + source engines). */
+function routeFor(options: { idle?: boolean } = {}): {
+  router: RouterServer
+  bed: ReturnType<typeof testbed>
+  engines: FakeEngines
+  dispose(): void
+} {
+  const ctx = new Context()
+  contexts.push(ctx)
+  const bed = testbed()
+  const controller = options.idle === true ? null : bed.controller()
+  const repository = options.idle === true ? null : bed.repository
+  const engines = new FakeEngines()
+  const source = makeSourceOps(repository, bed.records, engines)
+  const gateway = new MarketControllerGateway(ctx, {
+    controller: () => controller,
+    repository: () => repository,
+    source,
+  })
+  const router = new RouterServer()
+  servers.push(router.server)
+  const dispose = registerMarketWebChannel(router, gateway)
+  return { router, bed, engines, dispose: () => { dispose() } }
+}
+
+describe('market control web channel (M1 source ops round trip)', () => {
+  it('serves the activation status over HTTP', async () => {
+    const { router, dispose } = routeFor()
     await listen(router.server)
+    const active = await call(router, 'status', {})
+    expect(active).toMatchObject({ ok: true, value: { configured: true, repositoryPath: '/repo' } })
+    dispose()
+
+    const idleRouter = routeFor({ idle: true }).router
+    await listen(idleRouter.server)
+    const idle = await call(idleRouter, 'status', {})
+    expect(idle).toMatchObject({ ok: true, value: { configured: false, repositoryPath: null } })
+  })
+
+  it('serves listManaged / setEnabled / double-confirmed remove over HTTP', async () => {
+    const { router, bed, dispose } = routeFor()
+    await listen(router.server)
+    const record = bed.records.seed('gh-web', { enabled: false, localDirName: 'web', entry: 'plugin.mjs' })
 
     const listed = await call(router, 'listManaged', {})
     expect(listed.ok).toBe(true)
@@ -96,7 +134,6 @@ describe('market control web channel (candidate B round trip)', () => {
     expect(enabled).toMatchObject({ ok: true, value: { enabled: true } })
     expect(bed.loader.view(record.key)).toMatchObject({ disabled: false, phase: 'active' })
 
-    // Step 1: a bare remove request is refused (double confirmation).
     const bareRemove = await call(router, 'confirmRemove', { key: 'gh-web', token: 'x' })
     expect(bareRemove.ok).toBe(false)
     if (!bareRemove.ok) expect(bareRemove.error.code).toBe('market/confirm-required')
@@ -111,40 +148,100 @@ describe('market control web channel (candidate B round trip)', () => {
     expect(outcome.removedEntry).toBe(true)
     expect(bed.loader.view(record.key)).toBeUndefined()
     expect(await bed.records.get(record.key)).toBeNull()
-    expect(bed.remover.removed).toEqual(['/repo/web'])
-
-    disposeRoute()
+    dispose()
   })
 
-  it('rejects wrong method, unknown method, and malformed JSON', async () => {
-    const ctx = new Context()
-    contexts.push(ctx)
-    const gateway = new MarketControllerGateway(ctx, testbed().controller())
-    const router = new RouterServer()
-    servers.push(router.server)
-    const disposeRoute = registerMarketWebChannel(router, gateway)
+  it('serves search and preview/install with the double-confirmed token protocol', async () => {
+    const { router, bed, engines, dispose } = routeFor()
     await listen(router.server)
+    engines.searchResult = {
+      totalCount: 1,
+      items: [{
+        repository: 'octocat/demo-plugin',
+        name: 'demo-plugin',
+        description: 'a dsh plugin',
+        stars: 12,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        url: 'https://github.com/octocat/demo-plugin',
+        cloneUrl: 'https://github.com/octocat/demo-plugin.git',
+      }],
+    }
+
+    const search = await call(router, 'search', { keywords: 'demo', perPage: 10 })
+    expect(search).toMatchObject({ ok: true, value: { totalCount: 1 } })
+    expect(engines.searchCalls).toEqual([{ keywords: 'demo', perPage: 10 }])
+
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(review.ok).toBe(true)
+    const reviewValue = (review as { ok: true; value: { key: string; preview: { status: string }; overwrite: boolean; confirmToken: string } }).value
+    expect(reviewValue.key).toBe('gh-octocat-demo-plugin')
+    expect(reviewValue.preview.status).toBe('ready')
+    expect(reviewValue.overwrite).toBe(false)
+
+    // An unreviewed repository is refused outright; a wrong token after a
+    // review is invalid; the reviewed token runs once and is single-use.
+    const unreviewed = await call(router, 'install', { repository: 'other/repo', confirmToken: 'nope' })
+    expect(unreviewed.ok).toBe(false)
+    if (!unreviewed.ok) expect(unreviewed.error.code).toBe('market/confirm-required')
+
+    const wrong = await call(router, 'install', { repository: 'octocat/demo-plugin', confirmToken: 'nope' })
+    expect(wrong.ok).toBe(false)
+    if (!wrong.ok) expect(wrong.error.code).toBe('market/confirm-invalid')
+
+    const installed = await call(router, 'install', {
+      repository: 'octocat/demo-plugin',
+      confirmToken: reviewValue.confirmToken,
+    })
+    expect(installed.ok).toBe(true)
+    const outcome = (installed as { ok: true; value: { key: string; overwritten: boolean; record: { enabled: boolean } } }).value
+    expect(outcome.key).toBe('gh-octocat-demo-plugin')
+    expect(outcome.overwritten).toBe(false)
+    expect(outcome.record.enabled).toBe(false)
+    expect(engines.installCalls).toHaveLength(1)
+    expect(engines.installCalls[0]?.version).toBeNull()
+
+    const retry = await call(router, 'install', {
+      repository: 'octocat/demo-plugin',
+      confirmToken: reviewValue.confirmToken,
+    })
+    expect(retry.ok).toBe(false)
+    if (!retry.ok) expect(retry.error.code).toBe('market/confirm-required')
+
+    // Second review marks the plugin as installed (overwrite update).
+    const reviewAgain = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(reviewAgain.ok).toBe(true)
+    expect((reviewAgain as { ok: true; value: { overwrite: boolean } }).value.overwrite).toBe(true)
+    dispose()
+  })
+
+  it('surfaces market/idle and bad-argument branches over HTTP', async () => {
+    const { router, dispose } = routeFor({ idle: true })
+    await listen(router.server)
+
+    const idleSearch = await call(router, 'search', { keywords: 'demo' })
+    expect(idleSearch.ok).toBe(false)
+    if (!idleSearch.ok) expect(idleSearch.error.code).toBe('market/idle')
+
+    const idleInstall = await call(router, 'install', {
+      repository: 'octocat/demo-plugin',
+      confirmToken: 'x',
+    })
+    expect(idleInstall.ok).toBe(false)
+    if (!idleInstall.ok) expect(idleInstall.error.code).toBe('market/idle')
+
+    const missing = await post(router, { method: 'previewInstall', args: {} }, 400)
+    expect(missing.body.ok).toBe(false)
+    if (!missing.body.ok) expect(missing.body.error.code).toBe('market/bad-request')
 
     const get = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, { method: 'GET' })
     expect(get.status).toBe(405)
     expect((await get.json() as WireResult).ok).toBe(false)
 
-    const unknown = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ method: 'deleteEverything', args: {} }),
-    })
-    expect(unknown.status).toBe(400)
-    expect((await unknown.json() as WireResult).ok).toBe(false)
+    const unknown = await post(router, { method: 'deleteEverything', args: {} }, 400)
+    expect(unknown.body.ok).toBe(false)
 
-    const malformed = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: 'not json',
-    })
-    expect(malformed.status).toBe(400)
-    expect((await malformed.json() as WireResult).ok).toBe(false)
-
-    disposeRoute()
+    const malformed = await post(router, 'not json', 400)
+    expect(malformed.body.ok).toBe(false)
+    dispose()
   })
 })

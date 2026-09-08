@@ -1,6 +1,6 @@
-﻿/**
- * dsh-plugin-market browser half: the localized "managed plugins" Settings
- * tab (M0 of the plugin-market UI).
+/**
+ * dsh-plugin-market browser half: the localized plugin-market settings page
+ * (M1: repository status, GitHub search/install, managed roster).
  *
  * Activation contract:
  * - Requires the browser platform services `slots` (SlotRegistry) and
@@ -23,11 +23,27 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {
+  GitHubSearchPage,
   ManagedPluginList,
+  MarketStatus,
+  PluginInstallOutcome,
+  PluginInstallReview,
   PluginMarketKey,
   PluginMarketRecord,
+  RemoveOutcome,
+  RemoveRequest,
 } from '../types.ts'
-import { listManaged, setEnabled, unwrap } from './channel.ts'
+import {
+  confirmRemove as channelConfirmRemove,
+  install as channelInstall,
+  listManaged,
+  previewInstall as channelPreviewInstall,
+  requestRemove as channelRequestRemove,
+  search as channelSearch,
+  setEnabled,
+  status as channelStatus,
+  unwrap,
+} from './channel.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import { en, zh } from './locales.ts'
 import { ManagePluginsTab, type ManagePluginsTabInjected } from './ManagePluginsTab.tsx'
@@ -53,6 +69,9 @@ export function apply(ctx: Context): void {
 
   // Lazy channel closures: nothing is read from the wire during apply or
   // registration; only the tab's effects call these and branch on the result.
+  const status: ManagePluginsTabInjected['status'] = async (): Promise<MarketStatus> => {
+    return unwrap(await channelStatus())
+  }
   const list: ManagePluginsTabInjected['list'] = async (): Promise<ManagedPluginList> => {
     return unwrap(await listManaged())
   }
@@ -60,7 +79,36 @@ export function apply(ctx: Context): void {
     async (key: PluginMarketKey, enabled: boolean): Promise<PluginMarketRecord> => {
       return unwrap(await setEnabled(key, enabled))
     }
-  const injected = (): ManagePluginsTabInjected => ({ list, setEnabled: setEnabledRecord })
+  const requestRemoveRecord: ManagePluginsTabInjected['requestRemove'] =
+    async (key: PluginMarketKey): Promise<RemoveRequest> => {
+      return unwrap(await channelRequestRemove(key))
+    }
+  const confirmRemoveRecord: ManagePluginsTabInjected['confirmRemove'] =
+    async (key: PluginMarketKey, token: string): Promise<RemoveOutcome> => {
+      return unwrap(await channelConfirmRemove(key, token))
+    }
+  const searchRecord: ManagePluginsTabInjected['search'] =
+    async (keywords: string): Promise<GitHubSearchPage> => {
+      return unwrap(await channelSearch(keywords))
+    }
+  const previewInstallRecord: ManagePluginsTabInjected['previewInstall'] =
+    async (repository: string): Promise<PluginInstallReview> => {
+      return unwrap(await channelPreviewInstall(repository))
+    }
+  const installRecord: ManagePluginsTabInjected['install'] =
+    async (repository: string, confirmToken: string): Promise<PluginInstallOutcome> => {
+      return unwrap(await channelInstall(repository, confirmToken))
+    }
+  const injected = (): ManagePluginsTabInjected => ({
+    status,
+    list,
+    setEnabled: setEnabledRecord,
+    requestRemove: requestRemoveRecord,
+    confirmRemove: confirmRemoveRecord,
+    search: searchRecord,
+    previewInstall: previewInstallRecord,
+    install: installRecord,
+  })
 
   ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
     name: 'settings.plugins.tab',

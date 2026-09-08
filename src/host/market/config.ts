@@ -18,6 +18,21 @@ export interface MarketConfig {
   readonly linkSharedHarness: boolean
 }
 
+/**
+ * User-facing plugin Config of the plugin-market Host row (also the raw input
+ * accepted by {@link normalizeMarketConfig}). Only `repositoryPath` is a user
+ * setting; activation defaults (create-if-missing, harness linking) are
+ * decided by the repository layer.
+ */
+export interface Config {
+  /**
+   * Directory of the local third-party plugin source repository (absolute, or
+   * relative to the process cwd; a leading `~` expands to the home
+   * directory). Omit it to keep the plugin market idle.
+   */
+  readonly repositoryPath?: string
+}
+
 /** Path-resolution environment supplied by the caller (injectable for tests). */
 export interface ResolveEnvironment {
   /** Working directory used to absolutize relative paths. */

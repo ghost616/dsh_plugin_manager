@@ -2,14 +2,15 @@
 
 Single-package, distributable **dsh bundle + plugin** for the DeepSeek Harness
 (dsh): a Web Plugins-settings "market" tab plus its Host and Control halves,
-skeletonized here as a self-contained engineering baseline.
+converged onto a **single loader row** whose package main composes all Host
+behavior.
 
 This repository is a single npm package that is simultaneously:
 
 - a **plugin package** exposing Host and browser halves (`dsh.client`,
   `./client` export, `lib/client.js`);
 - a **bundle** whose `dsh.bundle.patch` (`cordis.patch.yml`) is the default
-  activation layer enabling its own plugin rows after `dsh plugin add`.
+  activation layer enabling its own plugin row after `dsh plugin add`.
 
 Target dsh: `0.1.2-alpha.5` line (`@deepseek-ai/cordis` 4.x, published loader
 `@deepseek-ai/cordis-plugin-loader` 1.x). Shared-identity packages are listed
@@ -20,24 +21,33 @@ owns exactly one Cordis instance at runtime.
 
 | Path | Purpose | Owner |
 | --- | --- | --- |
-| `package.json` | ESM-only manifest: `exports` (`.`/`./client`/`./types`/`./src/*`/`./package.json`), `dsh.bundle`, `dsh.client`, peer/dev mirror, publish `files` | framework |
-| `cordis.patch.yml` | Bundle patch rows: `plugin-market-host` (enabled), `plugin-market-control` / `plugin-market-ui` (declared, disabled until their modules land) | framework |
+| `package.json` | ESM-only manifest: `exports` (`.`/`./client`/`./types`/`./control`/`./src/*`/`./package.json`), `dsh.bundle`, `dsh.client`, peer/dev mirror, publish `files` | framework |
+| `cordis.patch.yml` | Bundle patch layer: exactly one loader row, `plugin-market-host` | framework |
 | `tsconfig.json` + `tsconfig.base.json` + `tsconfig.host.json` + `tsconfig.client.json` | Solution root with **separate Host and Client leaves** (Cordis `Context` declaration merges never share one Program); tsc emits `lib/types` | framework |
 | `tsdown.config.ts` / `tsdown.prepare.config.ts` / `tsdown.shared.ts` | Self-contained tsdown replication of the dsh artifact contracts (Node ESM externalizing production deps; browser lazy-CJS closure factory with `window.__ModuleLoader__.load`, baked `NODE_ENV`, inlined CSS) | framework |
-| `src/index.ts` | Host loader entry - `plugin-market-host` placeholder (`name`/`inject`/`apply`) | framework placeholder; plugin-market-host later |
-| `src/client/index.ts` | Browser-half registration point (placeholder; built to `lib/client.js`) | framework placeholder; plugin-market-ui later |
+| `src/index.ts` | Host package main / single-row composer: normalizes Config, opens the repository (`marketRepository` service), activates the embedded control in the same context | framework |
+| `src/host/market/` | plugin-market-host business: repository validation/layout, records store v1 (enabled/trusted/trustedAt record fields), shared-harness linking - an independent manifest/TrustGate surface is planned, not yet shipped | plugin-market-host |
+| `src/host/control/` | plugin-control-service business: record-driven controller, loader adapter, protection, Remote gateway + web channel (composable activation, not a row) | plugin-control-service |
+| `src/client/` | Browser half (settings tab, locales, channel) built to `lib/client.js`; delivered via `dsh.client` | plugin-market-ui |
 | `src/types.ts` | Cross-face shared types (`import type` only) | framework |
-| `scripts/install-profile.mjs` | Idempotent profile self-load recipe (junction/copy + patch rows) | framework |
-| `scripts/verify-load.mjs` | Demo verification: real Loader activation + artifact checks | framework |
-| `tests/` | Test home (vitest specs land with the business modules) | all modules |
+| `scripts/install-profile.mjs` | Idempotent profile self-load recipe (junction/copy + the single patch row) | framework |
+| `scripts/verify-load.mjs` | Demo verification: real Loader activation of the single row + artifact checks | framework |
+| `tests/` | Vitest suites for all modules (business tests live with their module owners) | all modules |
 
-Entry ownership contract (row ids are stable):
+### Row contract (single-row convergence)
 
-| Row id | Entry | Status |
+| Row id | Entry | What activates |
 | --- | --- | --- |
-| `plugin-market-host` | package main (`lib/index.js`, `src/index.ts`) | placeholder |
-| `plugin-market-control` | planned `./control` (`lib/control.js`) | disabled until plugin-control-service lands |
-| `plugin-market-ui` | planned `./ui` (Host no-op; browser half via `./client`) | disabled until plugin-market-ui lands |
+| `plugin-market-host` | package main (`lib/index.js` from `src/index.ts`) | Config normalization + repository open + `marketRepository` service + the **embedded** market control (`ctx.plugin`) in the same context; the browser half is delivered via `dsh.client` and needs no row |
+
+There are deliberately **no** `plugin-market-control` / `plugin-market-ui`
+loader rows: the control is a composable activation (`ctx.plugin(marketControlPlugin)`,
+still exported as `./control` for hosts that embed it directly) and the UI is a
+client half. One row means one package, one client-bundle source, and one
+lifecycle: an unconfigured market stays idle without failing, a configured
+`repositoryPath` that fails directory validation fails the row loudly at boot,
+and teardown of the row tears down the repository service, the controller and
+any loader rows it created.
 
 ## Build
 
@@ -46,15 +56,17 @@ Requires Node `^22.19.0 || >=24` and pnpm.
 ```sh
 pnpm install
 pnpm build        # tsc -b (types to lib/types) && tsdown (lib/index.js, lib/client.js)
-pnpm verify       # demo profile + real Loader activation of the placeholder
+pnpm verify       # demo profile + real single-row Loader activation
+pnpm test         # tsc -b + vitest run
 ```
 
 - `tsc -b` type-checks both leaves and emits `lib/types`.
 - `tsdown` bundles the tsc emission: the Node half (`lib/index.js`) keeps
   production-section specifiers external; the browser half (`lib/client.js`)
   is the lazy-CJS closure factory whose externals resolve through the loader
-  module table (react, cordis, … platform specifiers plus anything declared in
-  `dsh.client.external`), with everything else inlined.
+  module table (react, cordis, platform specifiers plus anything declared in
+  `dsh.client.external`), with everything else inlined. The composable control
+  sub-entry is additionally emitted as `lib/control.js`.
 - Client code never value-imports another plugin: the tsdown purity gate
   rejects cross-plugin `@deepseek-ai/*` value imports (types are erased).
 
@@ -73,23 +85,20 @@ The script (idempotent; safe to re-run):
 1. creates `plugins/dsh-plugin-market` in the profile - a **junction** to this
    repository (or a recursive copy with `--mode copy`); the link is skipped
    when it already points at this repository;
-2. appends the managed rows to the profile's `cordis.patch.yml`, resolving
-   relative to the profile directory:
+2. appends the single managed row to the profile's `cordis.patch.yml`,
+   resolving relative to the profile directory:
 
    ```yaml
    - insert:
        - id: plugin-market-host
          name: './plugins/dsh-plugin-market/lib/index.js'
-       - id: plugin-market-control
-         name: './plugins/dsh-plugin-market/lib/control.js'
-         disabled: true
-       - id: plugin-market-ui
-         name: './plugins/dsh-plugin-market/lib/ui.js'
-         disabled: true
    ```
 
-   plugin-market-control/ui stay disabled until their entries ship, so the
-   layer is loadable from day one.
+   One row is all the package needs: the main entry composes the repository
+   service and activates the embedded control in the same context, and the
+   browser half is provided with the package through its `dsh.client`
+   declaration. When the profile should manage a repository, add
+   `repositoryPath` to the row's config.
 
 Undo with `node scripts/install-profile.mjs "$DSH_HOME/profiles/<name>" --uninstall`.
 
@@ -130,11 +139,13 @@ hand out a tarball from `pnpm pack`.
 
 ## Boundaries and conventions
 
-- `framework` owns the root scaffolding only; business logic lives with the
-  plugin-market-host / plugin-control-service / plugin-market-ui modules under
-  `src` and `tests/`, each of which consumes this build chain unchanged.
-- Cross-module collaboration goes through cordis services or loader rows;
-  browser `inject` is a pure data contract.
+- `framework` owns the root scaffolding, the single-row contract and the
+  profile recipe; business logic lives with the plugin-market-host /
+  plugin-control-service / plugin-market-ui modules under `src` and `tests/`,
+  each of which consumes this build chain unchanged.
+- Cross-module collaboration goes through cordis services; the embedded
+  control resolves `marketRepository`/`loader` from the composing context
+  chain, and the browser `inject` is a pure data contract.
 - See the workspace module specs and code conventions for the full contract
   (function/service plugin shapes, context keys, event naming, client bundle
   purity, remote wire rules, test patterns).

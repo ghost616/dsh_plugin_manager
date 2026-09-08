@@ -224,3 +224,330 @@
   white-space: nowrap;
   clip-path: inset(50%);
 }
+/* --- full page layout --- */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 860px;
+}
+
+.repoHeader {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+
+.repoLabel {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.repoPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+}
+
+.idleCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+}
+
+.idleCard p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.heading {
+  margin: 4px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.searchForm {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 560px;
+}
+
+.searchForm input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 10px;
+  padding: 0 12px;
+  outline: none;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.searchForm input::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.searchForm input:focus-visible {
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}
+
+.primaryButton,
+.textButton {
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.primaryButton {
+  border: 0.5px solid var(--dsw-alias-state-business-primary);
+  padding: 6px 14px;
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-bg-layer-3);
+}
+
+.primaryButton:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.textButton {
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+
+.textButton:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.primaryButton:focus-visible,
+.textButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+/* --- search results --- */
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.resultList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.resultCard {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.resultMain {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.resultName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  text-decoration: none;
+}
+
+.resultName:hover {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.resultDescription {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.resultMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.externalLink {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: none;
+}
+
+/* --- dialogs --- */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--dsw-static-black-900) 35%, transparent);
+}
+
+.dialog {
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 14px;
+  padding: 16px;
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-elevation-stroke);
+}
+
+.dialogHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dialogHeader strong {
+  font-size: 14px;
+}
+
+.dialogHeader code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dialogBody {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dialogError {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dialogOk {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.warning {
+  margin: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 20px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.deps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.depsTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.depsGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.depsGroups div {
+  display: flex;
+  gap: 10px;
+}
+
+.depsGroups dt {
+  flex: none;
+  width: 140px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.depsGroups dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.depsGroups ul {
+  margin: 0;
+  padding: 0 0 0 16px;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

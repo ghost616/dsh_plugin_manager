@@ -1,23 +1,42 @@
-/** Managed-plugins Settings tab: read-only M0 of the plugin-market surface. */
+﻿/** Full plugin-market settings page: repository status, GitHub search +
+ *  install confirmation, and the managed roster with enable/remove. */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
+  GitHubSearchPage,
   ManagedPluginList,
   ManagedPluginPhase,
   ManagedPluginView,
+  MarketStatus,
+  PluginInstallOutcome,
+  PluginInstallReview,
   PluginMarketKey,
   PluginMarketRecord,
+  RemoveOutcome,
+  RemoveRequest,
 } from '../types.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
 
 /** Registration-side channel face (lazy closures, wired by apply()). */
 export interface ManagePluginsTabInjected {
-  /** Read the record × loader projection of the managed plugins. */
+  /** Read the market activation facts. */
+  status: () => Promise<MarketStatus>
+  /** Read the record x loader projection of the managed plugins. */
   list: () => Promise<ManagedPluginList>
-  /** Persist and apply one record's enablement through the control channel. */
+  /** Persist and apply one record's enablement. */
   setEnabled: (key: PluginMarketKey, enabled: boolean) => Promise<PluginMarketRecord>
+  /** Removal step 1: mint a single-use confirmation token. */
+  requestRemove: (key: PluginMarketKey) => Promise<RemoveRequest>
+  /** Removal step 2: confirm and run the removal. */
+  confirmRemove: (key: PluginMarketKey, token: string) => Promise<RemoveOutcome>
+  /** GitHub topic search for dsh plugins. */
+  search: (keywords: string) => Promise<GitHubSearchPage>
+  /** Review one repository and mint its single-use install confirmation. */
+  previewInstall: (repository: string) => Promise<PluginInstallReview>
+  /** Run the double-confirmed install for a reviewed repository. */
+  install: (repository: string, confirmToken: string) => Promise<PluginInstallOutcome>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -39,6 +58,18 @@ type ViewState =
   | { readonly status: 'error'; readonly failure: ManageUiFailure }
   | { readonly status: 'ready'; readonly snapshot: ManagedPluginList }
 
+type StatusState =
+  | { readonly status: 'loading' }
+  | { readonly status: 'error'; readonly failure: ManageUiFailure }
+  | { readonly status: 'idle' }
+  | { readonly status: 'configured'; readonly path: string }
+
+type SearchState =
+  | { readonly phase: 'idle' }
+  | { readonly phase: 'loading' }
+  | { readonly phase: 'error'; readonly failure: ManageUiFailure }
+  | { readonly phase: 'ready'; readonly page: GitHubSearchPage }
+
 const PHASE_KEYS = {
   pending: 'phasePending',
   loading: 'phaseLoading',
@@ -46,29 +77,6 @@ const PHASE_KEYS = {
   failed: 'phaseFailed',
   unloading: 'phaseUnloading',
 } satisfies Record<Exclude<ManagedPluginPhase, null>, MarketManageLocaleKey>
-
-/** Localized accessible label of one live loader phase. */
-function phaseLabel(phase: ManagedPluginPhase, t: Translate): string {
-  return phase === null ? t('unobserved') : t(PHASE_KEYS[phase])
-}
-
-/** Row failure: an enabled record whose loader fiber failed this session. */
-function rowFailed(view: ManagedPluginView): boolean {
-  return view.record.enabled
-    && (view.runtime.phase === 'failed' || view.runtime.lastError !== null)
-}
-
-/** Display name: the GitHub `owner/repo` slug when the source is GitHub. */
-function displayName(view: ManagedPluginView): string {
-  const source = view.record.source
-  return source.kind === 'github' ? source.repository : view.key
-}
-
-/** Whether one row matches the local filter query. */
-function matches(view: ManagedPluginView, normalizedQuery: string): boolean {
-  if (normalizedQuery.length === 0) return true
-  return [displayName(view), view.key].some(value => value.toLocaleLowerCase().includes(normalizedQuery))
-}
 
 /** Normalize any thrown value into the stable UI failure shape. */
 function toUiFailure(error: unknown): ManageUiFailure {
@@ -84,54 +92,293 @@ function toUiFailure(error: unknown): ManageUiFailure {
   }
 }
 
-/** Inline enable/disable switch of one managed plugin row. */
-function EnableSwitch({ view, busy, failure, t, onToggle }: {
-  readonly view: ManagedPluginView
-  readonly busy: boolean
-  readonly failure: ManageUiFailure | undefined
+/** Localized copy for the stable failure families; others show the code. */
+export function failureText(failure: ManageUiFailure, t: Translate): string {
+  switch (failure.code) {
+    case 'github/rate-limit': return t('rateLimited')
+    case 'github/network':
+    case 'market/unreachable': return t('networkError')
+    case 'github/auth':
+    case 'github/not-found': return t('githubAuthError')
+    case 'market/confirm-expired': return t('confirmExpired')
+    case 'market/confirm-required': return t('confirmRequired')
+    case 'market/protected': return t('protectedEntry')
+    default: return t('failedWithCode', { code: failure.code })
+  }
+}
+
+/** Localized accessible label of one live loader phase. */
+function phaseLabel(phase: ManagedPluginPhase, t: Translate): string {
+  return phase === null ? t('unobserved') : t(PHASE_KEYS[phase])
+}
+
+/** Row failure: an enabled record whose loader fiber failed this session. */
+function rowFailed(view: ManagedPluginView): boolean {
+  return view.record.enabled
+    && (view.runtime.phase === 'failed' || view.runtime.lastError !== null)
+}
+
+/** Display name of a managed row: the GitHub slug when the source is GitHub. */
+function displayName(view: ManagedPluginView): string {
+  const source = view.record.source
+  return source.kind === 'github' ? source.repository : view.key
+}
+
+/** Whether one managed row matches the local filter query. */
+function matches(view: ManagedPluginView, normalizedQuery: string): boolean {
+  if (normalizedQuery.length === 0) return true
+  return [displayName(view), view.key].some(value => value.toLocaleLowerCase().includes(normalizedQuery))
+}
+
+/** Short display date of an ISO-8601 timestamp (or '' when absent). */
+function shortDate(iso: string | null): string {
+  return iso === null ? '' : iso.slice(0, 10)
+}
+
+/* ------------------------------------------------------------------------ */
+/* Repository status header                                                 */
+/* ------------------------------------------------------------------------ */
+
+function StatusHeader({ state, t, onRetry }: {
+  readonly state: StatusState
   readonly t: Translate
-  readonly onToggle: (view: ManagedPluginView) => void
+  readonly onRetry: () => void
 }): ReactNode {
-  const name = displayName(view)
-  const switching = busy ? t('switching', { name }) : ''
-  const actionLabel = view.record.enabled ? t('switchDisable', { name }) : t('switchEnable', { name })
+  if (state.status === 'loading') {
+    return <p className={css.status} role="status">{t('loading')}</p>
+  }
+  if (state.status === 'error') {
+    return (
+      <div className={css.failure} data-market-status-error data-error-code={state.failure.code}>
+        <p role="alert">{failureText(state.failure, t)}</p>
+        <button type="button" onClick={onRetry}>{t('retry')}</button>
+      </div>
+    )
+  }
+  if (state.status === 'idle') {
+    return (
+      <aside className={css.idleCard} data-market-status="idle" role="status">
+        <strong>{t('idleTitle')}</strong>
+        <p>{t('idleBody')}</p>
+      </aside>
+    )
+  }
   return (
-    <>
-      <button
-        type="button"
-        role="switch"
-        className={css.switch}
-        aria-checked={view.record.enabled}
-        aria-label={busy ? switching : actionLabel}
-        aria-busy={busy}
-        data-plugin-toggle
-        data-busy={busy ? 'true' : undefined}
-        disabled={busy}
-        onClick={() => { onToggle(view) }}
-      />
-      {failure === undefined ? null : (
-        <p
-          className={css.rowFailure}
-          role="alert"
-          data-toggle-error
-          data-error-code={failure.code}
-          title={failure.message}
-        >
-          {t('toggleFailed', { code: failure.code })}
+    <p className={css.repoHeader} data-market-status="configured">
+      <span className={css.repoLabel}>{t('repoLabel')}</span>
+      <code className={css.repoPath} data-market-path title={state.path}>{state.path}</code>
+    </p>
+  )
+}
+/* ------------------------------------------------------------------------ */
+/* Managed roster section                                                   */
+/* ------------------------------------------------------------------------ */
+
+function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onToggle, onRemove }: {
+  readonly snapshot: ManagedPluginList | undefined
+  readonly busyKeys: ReadonlySet<string>
+  readonly rowFailures: ReadonlyMap<string, ManageUiFailure>
+  readonly query: string
+  readonly t: Translate
+  readonly onQuery: (query: string) => void
+  readonly onToggle: (view: ManagedPluginView) => void
+  readonly onRemove: (view: ManagedPluginView) => void
+}): ReactNode {
+  const normalized = query.trim().toLocaleLowerCase()
+  const searching = normalized.length > 0
+  const entries = snapshot?.entries ?? []
+  const visible = entries.filter(view => matches(view, normalized))
+
+  // The caller owns the loading surface; an empty ready list is the only
+  // empty state drawn here.
+  if (snapshot === undefined) return null
+
+  return (
+    <section className={css.section} data-managed-section>
+      {entries.length === 0 ? <p className={css.status} role="status">{t('empty')}</p> : null}
+      {searching && entries.length > 0 && visible.length === 0 ? (
+        <p className={css.status} role="status">{t('emptySearch')}</p>
+      ) : null}
+      <div className={css.toolbar}>
+        <label className={css.search}>
+          <span className={css.visuallyHidden}>{t('search')}</span>
+          <input
+            type="search"
+            value={query}
+            placeholder={t('search')}
+            aria-label={t('search')}
+            data-manage-filter
+            onChange={(event) => { onQuery(event.currentTarget.value) }}
+          />
+        </label>
+        <p className={css.count} data-manage-count>
+          {`${String(entries.length)} ${t('countUnit')}`}
         </p>
-      )}
-    </>
+      </div>
+
+      {visible.length > 0 ? (
+        <ul className={css.list} data-plugin-list>
+          {visible.map(view => {
+            const failed = rowFailed(view)
+            const stateKind = failed ? 'failed' : view.record.enabled ? 'enabled' : 'disabled'
+            const stateText = failed
+              ? t('stateFailed')
+              : view.record.enabled ? t('stateEnabled') : t('stateDisabled')
+            const runtimeError = view.runtime.lastError
+            const name = displayName(view)
+            return (
+              <li
+                key={view.key}
+                className={css.row}
+                data-plugin-row
+                data-plugin-key={view.key}
+                data-plugin-state={stateKind}
+                data-phase={view.runtime.phase ?? undefined}
+                data-failed={failed ? 'true' : undefined}
+                title={failed && runtimeError !== null ? runtimeError : undefined}
+              >
+                <div className={css.rowMain}>
+                  <strong className={css.rowName}>{name}</strong>
+                  <span className={css.rowMeta}>
+                    <span data-source-kind>{view.record.source.kind === 'github' ? t('kindGithub') : view.record.source.kind}</span>
+                    <code data-plugin-key-value>{view.key}</code>
+                  </span>
+                </div>
+                <div className={css.rowSide}>
+                  {view.record.enabled && view.runtime.phase !== null && !failed ? (
+                    <span
+                      className={css.phaseDot}
+                      role="img"
+                      aria-label={phaseLabel(view.runtime.phase, t)}
+                      title={phaseLabel(view.runtime.phase, t)}
+                    />
+                  ) : null}
+                  <span className={css.stateTag} data-state-tag data-kind={stateKind}>{stateText}</span>
+                  <button
+                    type="button"
+                    className={css.textButton}
+                    data-remove-trigger
+                    onClick={() => { onRemove(view) }}
+                  >
+                    {t('removeButton')}
+                  </button>
+                  <button
+                    type="button"
+                    role="switch"
+                    className={css.switch}
+                    aria-checked={view.record.enabled}
+                    aria-label={view.record.enabled ? t('switchDisable', { name }) : t('switchEnable', { name })}
+                    aria-busy={busyKeys.has(view.key)}
+                    data-plugin-toggle
+                    data-busy={busyKeys.has(view.key) ? 'true' : undefined}
+                    disabled={busyKeys.has(view.key)}
+                    onClick={() => { onToggle(view) }}
+                  />
+                </div>
+                {rowFailures.get(view.key) === undefined ? null : (
+                  <p
+                    className={css.rowFailure}
+                    role="alert"
+                    data-toggle-error
+                    data-error-code={rowFailures.get(view.key)!.code}
+                    title={rowFailures.get(view.key)!.message}
+                  >
+                    {t('toggleFailed', { code: rowFailures.get(view.key)!.code })}
+                  </p>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+    </section>
   )
 }
 
-/** Render the read-only managed-plugin roster with an inline enable switch. */
-export function ManagePluginsTab({ list, setEnabled, t }: ManagePluginsTabProps): ReactNode {
+/* ------------------------------------------------------------------------ */
+/* Search results                                                           */
+/* ------------------------------------------------------------------------ */
+
+function SearchResults({ page, managedRepositories, t, onInstall }: {
+  readonly page: GitHubSearchPage
+  readonly managedRepositories: ReadonlySet<string>
+  readonly t: Translate
+  readonly onInstall: (repository: string) => void
+}): ReactNode {
+  if (page.items.length === 0) {
+    return <p className={css.status} role="status" data-search-empty>{t('searchEmpty')}</p>
+  }
+  return (
+    <div className={css.results} data-search-results>
+      <p className={css.count} data-result-count>
+        {`${String(page.totalCount)} ${t('countUnit')}`}
+      </p>
+      <ul className={css.resultList} data-result-list>
+        {page.items.map(item => (
+          <li key={item.repository} className={css.resultCard} data-result-card data-repository={item.repository}>
+            <div className={css.resultMain}>
+              <a
+                className={css.resultName}
+                href={item.url}
+                target="_blank"
+                rel="noreferrer"
+                data-result-link
+                title={item.repository}
+              >
+                {item.name}
+              </a>
+              {item.description === null ? null : (
+                <p className={css.resultDescription} data-result-description>{item.description}</p>
+              )}
+              <span className={css.resultMeta}>
+                <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
+                {item.updatedAt === null ? null : (
+                  <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
+                )}
+                <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
+                  {t('repoLinkLabel')}
+                </a>
+              </span>
+            </div>
+            <button
+              type="button"
+              className={css.primaryButton}
+              data-install-trigger
+              data-install-repository={item.repository}
+              data-managed={managedRepositories.has(item.repository) ? 'true' : undefined}
+              onClick={() => { onInstall(item.repository) }}
+            >
+              {managedRepositories.has(item.repository) ? t('updateButton') : t('installButton')}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+/* ------------------------------------------------------------------------ */
+/* Install confirmation dialog                                              */
+/* ------------------------------------------------------------------------ */
+
+type InstallPhase =
+  | { readonly phase: 'preview' }
+  | { readonly phase: 'preview-error'; readonly failure: ManageUiFailure }
+  | { readonly phase: 'review'; readonly review: PluginInstallReview }
+  | { readonly phase: 'installing'; readonly review: PluginInstallReview }
+  | { readonly phase: 'install-error'; readonly review: PluginInstallReview; readonly failure: ManageUiFailure }
+  | { readonly phase: 'done'; readonly outcome: PluginInstallOutcome }
+
+function InstallDialog({ repository, previewInstall, install, t, onClose, onInstalled }: {
+  readonly repository: string
+  readonly previewInstall: ManagePluginsTabInjected['previewInstall']
+  readonly install: ManagePluginsTabInjected['install']
+  readonly t: Translate
+  readonly onClose: () => void
+  readonly onInstalled: (repository: string) => void
+}): ReactNode {
   const mounted = useRef(true)
-  const [request, setRequest] = useState(0)
-  const [query, setQuery] = useState('')
-  const [state, setState] = useState<ViewState>({ status: 'loading' })
-  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
-  const [rowFailures, setRowFailures] = useState<ReadonlyMap<string, ManageUiFailure>>(() => new Map())
+  const [previewTick, setPreviewTick] = useState(0)
+  const [phase, setPhase] = useState<InstallPhase>({ phase: 'preview' })
 
   useEffect(() => {
     mounted.current = true
@@ -140,24 +387,310 @@ export function ManagePluginsTab({ list, setEnabled, t }: ManagePluginsTabProps)
 
   useEffect(() => {
     let current = true
+    setPhase({ phase: 'preview' })
+    void Promise.resolve()
+      .then(() => previewInstall(repository))
+      .then(
+        (review) => { if (current) setPhase({ phase: 'review', review }) },
+        (error: unknown) => { if (current) setPhase({ phase: 'preview-error', failure: toUiFailure(error) }) },
+      )
+    return () => { current = false }
+  }, [previewInstall, install, previewTick, repository])
+
+  const confirm = (review: PluginInstallReview): void => {
+    if (phase.phase === 'installing') return
+    setPhase({ phase: 'installing', review })
+    void install(repository, review.confirmToken)
+      .then(
+        (outcome) => {
+          if (!mounted.current) return
+          setPhase({ phase: 'done', outcome })
+          onInstalled(repository)
+        },
+        (error: unknown) => {
+          if (!mounted.current) return
+          setPhase({ phase: 'install-error', review, failure: toUiFailure(error) })
+        },
+      )
+  }
+
+  const review = phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error'
+    ? phase.review
+    : undefined
+  const busy = phase.phase === 'installing' || phase.phase === 'preview'
+
+  return (
+    <div className={css.backdrop}>
+      <section
+        className={css.dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('installDialogTitle')}
+        data-dialog="install"
+      >
+        <header className={css.dialogHeader}>
+          <strong>{t('installDialogTitle')}</strong>
+          <code data-dialog-repository>{repository}</code>
+        </header>
+
+        {phase.phase === 'preview' ? <p className={css.status} role="status">{t('loading')}</p> : null}
+        {phase.phase === 'preview-error' ? (
+          <p className={css.dialogError} role="alert" data-preview-error data-error-code={phase.failure.code}>
+            {t('previewFailed')} {failureText(phase.failure, t)}
+          </p>
+        ) : null}
+
+        {review !== undefined ? (
+          <>
+            {review.preview.status === 'degraded' ? (
+              <p className={css.warning} data-degraded-notice data-degraded-code={review.preview.code}>
+                {t('degradedNotice', { code: review.preview.code })}
+              </p>
+            ) : null}
+            {review.exists ? (
+              <p className={css.warning} data-overwrite-notice>
+                {t('overwriteNotice')}
+              </p>
+            ) : null}
+            <div className={css.deps} data-deps data-preview-status={review.preview.status}>
+              <p className={css.depsTitle}>{t('depsTitle')}</p>
+              <dl className={css.depsGroups}>
+                <div>
+                  <dt>{t('depsLabel')}</dt>
+                  <dd>
+                    {review.preview.summary.dependencies.dependencies.length === 0
+                      ? <span data-deps-empty>{t('depsEmpty')}</span>
+                      : (
+                        <ul data-dep-list>
+                          {review.preview.summary.dependencies.dependencies.map(dep => <li key={dep}>{dep}</li>)}
+                        </ul>
+                      )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('peerDepsLabel')}</dt>
+                  <dd>
+                    {review.preview.summary.dependencies.peerDependencies.length === 0
+                      ? <span data-peers-empty>{t('depsEmpty')}</span>
+                      : (
+                        <ul data-peer-list>
+                          {review.preview.summary.dependencies.peerDependencies.map(dep => <li key={dep}>{dep}</li>)}
+                        </ul>
+                      )}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          </>
+        ) : null}
+
+        {phase.phase === 'install-error' ? (
+          <p className={css.dialogError} role="alert" data-install-error data-error-code={phase.failure.code}>
+            {t('installFailed')} {failureText(phase.failure, t)}
+          </p>
+        ) : null}
+        {phase.phase === 'done' ? (
+          <p className={css.dialogOk} role="status" data-install-done>
+            {t('installDone')}
+          </p>
+        ) : null}
+
+        <footer className={css.dialogActions}>
+          {phase.phase === 'preview-error' ? (
+            <button type="button" className={css.primaryButton} data-preview-retry onClick={() => { setPreviewTick(value => value + 1) }}>
+              {t('retry')}
+            </button>
+          ) : null}
+          {phase.phase === 'done' ? (
+            <button type="button" className={css.primaryButton} data-dialog-done onClick={onClose}>
+              {t('doneButton')}
+            </button>
+          ) : null}
+          {phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error' ? (
+            <>
+              <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
+                {busy ? t('installing') : t('installButton')}
+              </button>
+              {phase.phase === 'install-error' && phase.failure.code === 'market/confirm-expired' ? (
+                <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
+                  {t('retry')}
+                </button>
+              ) : null}
+              <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
+                {t('cancelButton')}
+              </button>
+            </>
+          ) : null}
+        </footer>
+      </section>
+    </div>
+  )
+}
+/* ------------------------------------------------------------------------ */
+/* Removal dialog (two-step double confirmation)                            */
+/* ------------------------------------------------------------------------ */
+
+type RemovePhase =
+  | { readonly phase: 'ask' }
+  | { readonly phase: 'requesting' }
+  | { readonly phase: 'second'; readonly request: RemoveRequest }
+  | { readonly phase: 'removing'; readonly request: RemoveRequest }
+
+function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
+  readonly view: ManagedPluginView
+  readonly injected: Pick<ManagePluginsTabInjected, 'requestRemove' | 'confirmRemove'>
+  readonly t: Translate
+  readonly onClose: () => void
+  readonly onRemoved: (key: PluginMarketKey) => void
+}): ReactNode {
+  const [phase, setPhase] = useState<RemovePhase>({ phase: 'ask' })
+  const [failure, setFailure] = useState<ManageUiFailure | undefined>(undefined)
+  const name = displayName(view)
+
+  const first = (): void => {
+    if (phase.phase === 'requesting') return
+    setFailure(undefined)
+    setPhase({ phase: 'requesting' })
+    void injected.requestRemove(view.key)
+      .then(
+        (request) => { setPhase({ phase: 'second', request }) },
+        (error: unknown) => {
+          setFailure(toUiFailure(error))
+          setPhase({ phase: 'ask' })
+        },
+      )
+  }
+
+  const second = (): void => {
+    const request = phase.phase === 'second' || phase.phase === 'removing' ? phase.request : undefined
+    if (request === undefined || phase.phase === 'removing') return
+    setFailure(undefined)
+    setPhase({ phase: 'removing', request })
+    void injected.confirmRemove(view.key, request.token)
+      .then(
+        () => { onRemoved(view.key) },
+        (error: unknown) => {
+          setFailure(toUiFailure(error))
+          setPhase({ phase: 'second', request })
+        },
+      )
+  }
+
+  const busy = phase.phase === 'requesting' || phase.phase === 'removing'
+  const secondVisible = phase.phase === 'second' || phase.phase === 'removing'
+
+  return (
+    <div className={css.backdrop}>
+      <section
+        className={css.dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('removeDialogTitle')}
+        data-dialog="remove"
+        data-remove-key={view.key}
+      >
+        <header className={css.dialogHeader}>
+          <strong>{t('removeDialogTitle')}</strong>
+          <code>{view.key}</code>
+        </header>
+
+        <p className={css.dialogBody}>{t('removeStep1', { name })}</p>
+        {secondVisible ? <p className={css.warning} data-remove-step2>{t('removeStep2')}</p> : null}
+        {failure === undefined ? null : (
+          <p className={css.dialogError} role="alert" data-remove-error data-error-code={failure.code}>
+            {failureText(failure, t)}
+          </p>
+        )}
+
+        <footer className={css.dialogActions}>
+          {secondVisible ? (
+            <button type="button" className={css.primaryButton} data-remove-confirm disabled={busy} onClick={second}>
+              {busy ? t('removing') : t('removeButton')}
+            </button>
+          ) : (
+            <button type="button" className={css.primaryButton} data-remove-continue disabled={busy} onClick={first}>
+              {busy ? t('removing') : t('continueButton')}
+            </button>
+          )}
+          <button type="button" className={css.textButton} data-remove-cancel disabled={busy} onClick={onClose}>
+            {t('cancelButton')}
+          </button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------------ */
+/* Page                                                                     */
+/* ------------------------------------------------------------------------ */
+
+/** Render the full managed-plugins settings page. */
+export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
+  const {
+    status: readStatus, list, setEnabled, requestRemove, confirmRemove,
+    search: runSearch, previewInstall, install, t,
+  } = props
+  const mounted = useRef(true)
+  const [statusState, setStatusState] = useState<StatusState>({ status: 'loading' })
+  const [listState, setListState] = useState<ViewState>({ status: 'loading' })
+  const [listRequest, setListRequest] = useState(0)
+  const [query, setQuery] = useState('')
+  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const [rowFailures, setRowFailures] = useState<ReadonlyMap<string, ManageUiFailure>>(() => new Map())
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchState, setSearchState] = useState<SearchState>({ phase: 'idle' })
+  const [installTarget, setInstallTarget] = useState<string | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<ManagedPluginView | null>(null)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  const loadStatus = (): void => {
+    setStatusState({ status: 'loading' })
+    void Promise.resolve()
+      .then(() => readStatus())
+      .then(
+        (statusValue) => {
+          if (!mounted.current) return
+          setStatusState(statusValue.configured
+            ? { status: 'configured', path: statusValue.repositoryPath ?? '' }
+            : { status: 'idle' })
+        },
+        (error: unknown) => {
+          if (!mounted.current) return
+          setStatusState({ status: 'error', failure: toUiFailure(error) })
+        },
+      )
+  }
+
+  useEffect(() => {
+    let current = true
     void Promise.resolve()
       .then(() => list())
       .then(
-        (snapshot) => {
-          if (!current) return
-          setState({ status: 'ready', snapshot })
-        },
-        (error: unknown) => {
-          if (!current) return
-          setState({ status: 'error', failure: toUiFailure(error) })
-        },
+        (snapshot) => { if (current) setListState({ status: 'ready', snapshot }) },
+        (error: unknown) => { if (current) setListState({ status: 'error', failure: toUiFailure(error) }) },
       )
     return () => { current = false }
-  }, [list, request])
+  }, [list, listRequest])
 
-  const retry = (): void => {
-    setState({ status: 'loading' })
-    setRequest(value => value + 1)
+  useEffect(() => { loadStatus() }, [readStatus])
+
+  const retryList = (): void => {
+    setListState({ status: 'loading' })
+    setListRequest(value => value + 1)
+  }
+
+  const reloadList = (): void => {
+    void Promise.resolve()
+      .then(() => list())
+      .then(
+        (snapshot) => { if (mounted.current) setListState({ status: 'ready', snapshot }) },
+        () => { if (mounted.current) retryList() },
+      )
   }
 
   const toggle = (view: ManagedPluginView): void => {
@@ -173,14 +706,13 @@ export function ManagePluginsTab({ list, setEnabled, t }: ManagePluginsTabProps)
       try {
         const record = await setEnabled(view.key, next)
         if (!mounted.current) return
-        // Resync the loader projection; a failed resync keeps the returned record.
         try {
           const snapshot = await list()
           if (!mounted.current) return
-          setState({ status: 'ready', snapshot })
+          setListState({ status: 'ready', snapshot })
         } catch {
           if (!mounted.current) return
-          setState(current => current.status === 'ready'
+          setListState(current => current.status === 'ready'
             ? {
               status: 'ready',
               snapshot: {
@@ -204,101 +736,131 @@ export function ManagePluginsTab({ list, setEnabled, t }: ManagePluginsTabProps)
     })()
   }
 
-  const normalizedQuery = query.trim().toLocaleLowerCase()
-  const searching = normalizedQuery.length > 0
-  const snapshot = state.status === 'ready' ? state.snapshot : undefined
-  const entries = snapshot?.entries ?? []
-  const visible = useMemo(
-    () => entries.filter(entry => matches(entry, normalizedQuery)),
-    [entries, normalizedQuery],
-  )
+  const submitSearch = (event: FormEvent): void => {
+    event.preventDefault()
+    const keywords = searchQuery.trim()
+    if (keywords.length === 0) return
+    setSearchState({ phase: 'loading' })
+    void Promise.resolve()
+      .then(() => runSearch(keywords))
+      .then(
+        (page) => { if (mounted.current) setSearchState({ phase: 'ready', page }) },
+        (error: unknown) => { if (mounted.current) setSearchState({ phase: 'error', failure: toUiFailure(error) }) },
+      )
+  }
+
+  const configured = statusState.status === 'configured'
+  const managedRepositories = useMemo(() => {
+    const found = new Set<string>()
+    if (listState.status !== 'ready') return found
+    for (const view of listState.snapshot.entries) {
+      const source = view.record.source
+      if (source.kind === 'github') found.add(source.repository)
+    }
+    return found
+  }, [listState])
 
   return (
-    <div className={css.section} data-manage-tab aria-busy={state.status === 'loading'}>
-      {state.status === 'loading' ? <p className={css.status} role="status">{t('loading')}</p> : null}
-      {state.status === 'error' ? (
-        <div className={css.failure} data-list-error data-error-code={state.failure.code}>
-          <p role="alert">{t('error')}</p>
-          <button type="button" onClick={retry}>{t('retry')}</button>
-        </div>
+    <div className={css.page} data-manage-tab>
+      <StatusHeader state={statusState} t={t} onRetry={loadStatus} />
+
+      {statusState.status === 'configured' || statusState.status === 'error' ? (
+        <section className={css.section} data-search-section>
+          <form className={css.searchForm} onSubmit={submitSearch}>
+            <input
+              type="search"
+              value={searchQuery}
+              placeholder={t('githubSearch')}
+              aria-label={t('githubSearch')}
+              data-search-input
+              onChange={(event) => { setSearchQuery(event.currentTarget.value) }}
+            />
+            <button
+              type="submit"
+              className={css.primaryButton}
+              data-search-submit
+              disabled={searchQuery.trim().length === 0 || searchState.phase === 'loading'}
+            >
+              {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
+            </button>
+          </form>
+
+          {searchState.phase === 'idle' ? <p className={css.hint} data-search-idle>{t('searchIdle')}</p> : null}
+          {searchState.phase === 'loading' ? <p className={css.status} role="status" data-search-loading>{t('searching')}</p> : null}
+          {searchState.phase === 'error' ? (
+            <p className={css.dialogError} role="alert" data-search-error data-error-code={searchState.failure.code}>
+              {failureText(searchState.failure, t)}
+            </p>
+          ) : null}
+          {searchState.phase === 'ready' ? (
+            <SearchResults
+              page={searchState.page}
+              managedRepositories={managedRepositories}
+              t={t}
+              onInstall={(repository) => { setInstallTarget(repository) }}
+            />
+          ) : null}
+        </section>
       ) : null}
 
-      {snapshot !== undefined ? (
+      {configured ? (
         <>
-          <div className={css.toolbar}>
-            <label className={css.search}>
-              <span className={css.visuallyHidden}>{t('search')}</span>
-              <input
-                type="search"
-                value={query}
-                placeholder={t('search')}
-                aria-label={t('search')}
-                data-manage-filter
-                onChange={(event) => { setQuery(event.currentTarget.value) }}
-              />
-            </label>
-            <p className={css.count} data-manage-count>
-              {`${String(entries.length)} ${t('countUnit')}`}
-            </p>
-          </div>
-
-          {entries.length === 0 ? <p className={css.status} role="status">{t('empty')}</p> : null}
-          {searching && entries.length > 0 && visible.length === 0 ? (
-            <p className={css.status} role="status">{t('emptySearch')}</p>
+          <h3 className={css.heading} data-managed-heading>{t('managedHeading')}</h3>
+          {listState.status === 'error' ? (
+            <div className={css.failure} data-list-error data-error-code={listState.failure.code}>
+              <p role="alert">{t('error')}</p>
+              <button type="button" onClick={retryList}>{t('retry')}</button>
+            </div>
           ) : null}
-
-          {visible.length > 0 ? (
-            <ul className={css.list} data-plugin-list>
-              {visible.map(view => {
-                const failed = rowFailed(view)
-                const stateKind = failed ? 'failed' : view.record.enabled ? 'enabled' : 'disabled'
-                const stateText = failed
-                  ? t('stateFailed')
-                  : view.record.enabled ? t('stateEnabled') : t('stateDisabled')
-                const runtimeError = view.runtime.lastError
-                return (
-                  <li
-                    key={view.key}
-                    className={css.row}
-                    data-plugin-row
-                    data-plugin-key={view.key}
-                    data-plugin-state={stateKind}
-                    data-phase={view.runtime.phase ?? undefined}
-                    data-failed={failed ? 'true' : undefined}
-                    title={failed && runtimeError !== null ? runtimeError : undefined}
-                  >
-                    <div className={css.rowMain}>
-                      <strong className={css.rowName}>{displayName(view)}</strong>
-                      <span className={css.rowMeta}>
-                        <span data-source-kind>{view.record.source.kind === 'github' ? t('kindGithub') : view.record.source.kind}</span>
-                        <code data-plugin-key-value>{view.key}</code>
-                      </span>
-                    </div>
-                    <div className={css.rowSide}>
-                      {view.record.enabled && view.runtime.phase !== null && !failed ? (
-                        <span
-                          className={css.phaseDot}
-                          role="img"
-                          aria-label={phaseLabel(view.runtime.phase, t)}
-                          title={phaseLabel(view.runtime.phase, t)}
-                        />
-                      ) : null}
-                      <span className={css.stateTag} data-state-tag data-kind={stateKind}>{stateText}</span>
-                      <EnableSwitch
-                        view={view}
-                        busy={busyKeys.has(view.key)}
-                        failure={rowFailures.get(view.key)}
-                        t={t}
-                        onToggle={toggle}
-                      />
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
+          {listState.status === 'loading' ? (
+            <p className={css.status} role="status" data-managed-loading>{t('loading')}</p>
           ) : null}
+          <ManagedList
+            snapshot={listState.status === 'ready' ? listState.snapshot : undefined}
+            busyKeys={busyKeys}
+            rowFailures={rowFailures}
+            query={query}
+            t={t}
+            onQuery={setQuery}
+            onToggle={toggle}
+            onRemove={(view) => { setRemoveTarget(view) }}
+          />
         </>
+      ) : null}
+
+      {installTarget !== null ? (
+        <InstallDialog
+          key={installTarget}
+          repository={installTarget}
+          previewInstall={previewInstall} install={install}
+          t={t}
+          onClose={() => { setInstallTarget(null) }}
+          onInstalled={(repository) => { reloadList(); void repository }}
+        />
+      ) : null}
+
+      {removeTarget !== null ? (
+        <RemoveDialog
+          key={removeTarget.key}
+          view={removeTarget}
+          injected={{ requestRemove, confirmRemove }}
+          t={t}
+          onClose={() => { setRemoveTarget(null) }}
+          onRemoved={(key) => {
+            setRemoveTarget(null)
+            // Drop the removed row locally; a full reload keeps phases fresh.
+            setListState(current => current.status === 'ready'
+              ? {
+                status: 'ready',
+                snapshot: { entries: current.snapshot.entries.filter(entry => entry.key !== key) },
+              }
+              : current)
+            reloadList()
+          }}
+        />
       ) : null}
     </div>
   )
 }
+
+

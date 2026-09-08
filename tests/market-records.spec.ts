@@ -1,7 +1,7 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { PluginMarketSource } from '../src/types.ts'
+import type { PluginMarketKey, PluginMarketSource } from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { NodeFs, type FsLike, type FsStat } from '../src/host/market/fs.ts'
 import { parsePluginKey } from '../src/host/market/keys.ts'
@@ -283,3 +283,102 @@ class RenameFailingFs extends RecordingFs {
     throw error
   }
 }
+
+describe('PluginRecordStore fail-fast input validation', () => {
+  let tmp: string
+  let filePath: string
+  beforeAll(async () => {
+    tmp = await makeSuiteTmp('records-validate')
+    filePath = join(tmp, 'plugins.json')
+  })
+  afterAll(async () => { await removeTmp(tmp) })
+
+  it('rejects a bad localDirName synchronously (record/invalid) and persists nothing', async () => {
+    const store = new PluginRecordStore(filePath)
+    await rejectCode(
+      store.add({ key: key('gh-owner-repo'), source: githubSource, localDirName: 'a/b' }),
+      'record/invalid',
+    )
+    // The bad value never lands: the file stays a clean empty document and a
+    // later load does not misreport the whole file as corrupt.
+    expect(await store.list()).toEqual([])
+    const raw = JSON.parse(await readFile(filePath, 'utf8')) as { records: Record<string, unknown> }
+    expect(raw.records).toEqual({})
+  })
+
+  it('rejects bad entry paths (record/invalid) and bad raw keys (record/key-invalid) up front', async () => {
+    const store = new PluginRecordStore(filePath)
+    for (const badEntry of ['../evil', 'a\\b', '/abs', '']) {
+      await rejectCode(
+        store.add({ key: key('gh-owner-repo'), source: githubSource, localDirName: 'gh-owner-repo', entry: badEntry }),
+        'record/invalid',
+      )
+    }
+    const badKey = 'a:b' as unknown as PluginMarketKey
+    await rejectCode(
+      store.add({ key: badKey, source: githubSource, localDirName: 'gh-owner-repo' }),
+      'record/key-invalid',
+    )
+    expect(await store.list()).toEqual([])
+  })
+
+  it('accepts a valid entry and persists it for reload', async () => {
+    const store = new PluginRecordStore(filePath)
+    const record = await store.add({
+      key: key('gh-owner-repo'),
+      source: githubSource,
+      localDirName: 'gh-owner-repo',
+      entry: 'lib/index.js',
+    })
+    expect(record.entry).toBe('lib/index.js')
+    expect((await new PluginRecordStore(filePath).get(key('gh-owner-repo')))?.entry).toBe('lib/index.js')
+  })
+})
+
+describe('PluginRecordStore.register (add-or-replace for install updates)', () => {
+  let tmp: string
+  let filePath: string
+  beforeAll(async () => {
+    tmp = await makeSuiteTmp('records-register')
+    filePath = join(tmp, 'plugins.json')
+  })
+  afterAll(async () => { await removeTmp(tmp) })
+
+  it('registers a record with defaults and replaces it on a second register', async () => {
+    const store = new PluginRecordStore(filePath)
+    const first = await store.register({
+      key: key('gh-owner-repo'), source: githubSource, localDirName: 'gh-owner-repo',
+    })
+    expect(first.enabled).toBe(false)
+    expect(first.trusted).toBe('untrusted')
+    const second = await store.register({
+      key: key('gh-owner-repo'),
+      source: githubSource,
+      localDirName: 'gh-owner-repo-v2',
+      entry: 'lib/main.js',
+    })
+    expect(second.localDirName).toBe('gh-owner-repo-v2')
+    expect(second.entry).toBe('lib/main.js')
+    expect((await store.list())).toHaveLength(1)
+    expect((await store.get(key('gh-owner-repo')))?.localDirName).toBe('gh-owner-repo-v2')
+  })
+
+  it('stamps trusted + trustedAt when a confirmed install registers', async () => {
+    const store = new PluginRecordStore(filePath)
+    const record = await store.register({
+      key: key('gh-owner-repo'), source: githubSource, localDirName: 'gh-owner-repo',
+    }, { trusted: true })
+    expect(record.enabled).toBe(false)
+    expect(record.trusted).toBe('trusted')
+    expect(record.trustedAt).not.toBeNull()
+    expect((await new PluginRecordStore(filePath).get(key('gh-owner-repo')))?.trusted).toBe('trusted')
+  })
+
+  it('fail-fast validation applies to register too', async () => {
+    const store = new PluginRecordStore(filePath)
+    await rejectCode(
+      store.register({ key: key('gh-owner-repo'), source: githubSource, localDirName: 'bad/name' }),
+      'record/invalid',
+    )
+  })
+})

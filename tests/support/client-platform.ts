@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Client-side fakes for plugin-market-ui specs.
  *
  * The dsh platform packages (dsh-client-ui-slots / dsh-client-ui-renderer /
@@ -10,6 +10,7 @@
  * the surface the plugin under test consumes is modelled.
  */
 
+import { vi } from 'vitest'
 import type {
   ManagedPluginPhase,
   ManagedPluginList,
@@ -379,4 +380,111 @@ export function makeView(seed: ManagedViewSeed): ManagedPluginView {
 /** Build the wire list payload of several views. */
 export function makeList(seeds: readonly ManagedViewSeed[]): ManagedPluginList {
   return { entries: seeds.map(makeView) }
+}
+/* ------------------------------------------------------------------------ */
+/* M1 page fixtures (search / status / install review / outcomes)           */
+/* ------------------------------------------------------------------------ */
+
+export interface SearchItemSeed {
+  repository: string
+  name?: string
+  description?: string | null
+  stars?: number
+  updatedAt?: string | null
+  url?: string
+}
+
+/** Build one GitHub search result summary from a compact seed. */
+export function makeRepoSummary(seed: SearchItemSeed) {
+  const fallbackUrl = `https://github.com/${seed.repository}`
+  return {
+    repository: seed.repository,
+    name: seed.name ?? seed.repository.split('/')[1] ?? seed.repository,
+    description: seed.description ?? 'a dsh plugin',
+    stars: seed.stars ?? 0,
+    updatedAt: seed.updatedAt ?? '2026-01-01T00:00:00.000Z',
+    url: seed.url ?? fallbackUrl,
+    cloneUrl: `${fallbackUrl}.git`,
+  }
+}
+
+/** Build a search page over compact seeds. */
+export function makeSearchPage(items: SearchItemSeed[]) {
+  return { totalCount: items.length, items: items.map(makeRepoSummary) }
+}
+
+/** Build market activation status. */
+export function makeStatus(configured: boolean, repositoryPath: string | null = configured ? '/repo' : null) {
+  return { configured, repositoryPath }
+}
+
+export interface InstallReviewSeed {
+  repository: string
+  exists?: boolean
+  degraded?: boolean
+  dependencies?: string[]
+  peerDependencies?: string[]
+}
+
+/** Build a PluginInstallReview-shaped fixture for one repository. */
+export function makeInstallReview(seed: InstallReviewSeed) {
+  const slug = seed.repository
+  const key = `gh-${slug.replace('/', '-')}`
+  const summary = {
+    name: slug.split('/')[1] ?? slug,
+    version: '1.0.0',
+    dependencies: {
+      dependencies: seed.dependencies ?? ['@deepseek-ai/cordis'],
+      peerDependencies: seed.peerDependencies ?? [],
+    },
+  }
+  const preview = seed.degraded === true
+    ? { status: 'degraded', summary, reason: 'manifest unreadable', code: 'github/bad-response' }
+    : { status: 'ready', summary }
+  return {
+    repository: slug,
+    key,
+    preview,
+    exists: seed.exists === true,
+    overwrite: seed.exists === true,
+    existing: null,
+    confirmToken: `token-${slug}`,
+    expiresAt: '2026-01-02T00:00:00.000Z',
+  }
+}
+
+/** Build a PluginInstallOutcome-shaped fixture. */
+export function makeInstallOutcome(seed: { repository: string; overwritten?: boolean }) {
+  const key = `gh-${seed.repository.replace('/', '-')}`
+  return {
+    key,
+    overwritten: seed.overwritten === true,
+    record: makeView({ key, repository: seed.repository }).record,
+    checkoutDir: `/repo/${key}`,
+  }
+}
+
+/** Build a removal request fixture. */
+export function makeRemoveRequest(key: string, token = 'rm-token') {
+  return { key, token, expiresAt: '2026-01-02T00:00:00.000Z' }
+}
+
+/** Default prop mocks for the full settings page (each override-able). */
+export function managePageHarness(overrides: Record<string, unknown> = {}) {
+  const mocks = {
+    status: vi.fn(async () => makeStatus(true)),
+    list: vi.fn(async () => makeList([])),
+    setEnabled: vi.fn(async () => { throw new Error('unused default setEnabled') }),
+    requestRemove: vi.fn(async () => { throw new Error('unused default requestRemove') }),
+    confirmRemove: vi.fn(async () => { throw new Error('unused default confirmRemove') }),
+    search: vi.fn(async () => makeSearchPage([])),
+    previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
+    install: vi.fn(async () => { throw new Error('unused default install') }),
+  }
+  const props = {
+    t: makeTranslator('zh'),
+    ...mocks,
+    ...overrides,
+  }
+  return { props, mocks }
 }

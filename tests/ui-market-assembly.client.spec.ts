@@ -7,14 +7,16 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ManagedPluginList, PluginMarketRecord } from '../src/types.ts'
 import { MARKET_CONTROL_WEB_PATH, MarketCallFailure } from '../src/client/channel.ts'
 import { apply, inject, NS } from '../src/client/index.ts'
 import { ManagePluginsTab } from '../src/client/ManagePluginsTab.tsx'
+import { en, zh } from '../src/client/locales.ts'
 import {
   FakeLocaleRuntime,
   FakeSlotRegistry,
   makeList,
+  makeSearchPage,
+  makeStatus,
   resolveSlotLabel,
   type FakeStoredEntry,
 } from './support/client-platform.ts'
@@ -71,13 +73,18 @@ function stubChannel(fetchMock: ReturnType<typeof vi.fn>): void {
 }
 
 type InjectedFace = {
-  list: () => Promise<ManagedPluginList>
-  setEnabled: (key: string, enabled: boolean) => Promise<PluginMarketRecord>
+  status: () => Promise<unknown>
+  list: () => Promise<unknown>
+  setEnabled: (key: string, enabled: boolean) => Promise<unknown>
+  requestRemove: (key: string) => Promise<unknown>
+  confirmRemove: (key: string, token: string) => Promise<unknown>
+  search: (keywords: string) => Promise<unknown>
+  previewInstall: (repository: string) => Promise<unknown>
+  install: (repository: string, confirmToken: string) => Promise<unknown>
 }
 
 function faceOf(entry: FakeStoredEntry): InjectedFace {
-  const face = (entry.inject as (() => InjectedFace))()
-  return face
+  return (entry.inject as () => InjectedFace)()
 }
 
 function tabEntry(slots: FakeSlotRegistry): FakeStoredEntry {
@@ -105,41 +112,55 @@ describe('plugin-market browser half assembly', () => {
     expect(entry.component).toBe(ManagePluginsTab)
     expect(entry.options).toMatchObject({ id: 'market', order: 20 })
     expect(entry.locale).toBe(NS)
-    expect(resolveSlotLabel(entry.options.label)).toBe('插件管理')
+    expect(resolveSlotLabel(entry.options.label)).toBe(zh.tab)
     expect(fetchMock).not.toHaveBeenCalled()
 
     const face = faceOf(entry)
-    expect(typeof face.list).toBe('function')
-    expect(typeof face.setEnabled).toBe('function')
-
-    const value = makeList([
-      { key: 'gh-octo-demo', repository: 'octocat/demo-plugin', enabled: true },
-    ])
-    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, value }))
-    await expect(face.list()).resolves.toEqual(value)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe(MARKET_CONTROL_WEB_PATH)
-    expect(JSON.parse(String(init.body))).toMatchObject({ method: 'listManaged', args: {} })
-    expect(fetchMock).not.toHaveBeenCalledTimes(2)
+    for (const member of [
+      'status', 'list', 'setEnabled', 'requestRemove', 'confirmRemove',
+      'search', 'previewInstall', 'install',
+    ]) {
+      expect(typeof (face as Record<string, unknown>)[member]).toBe('function')
+    }
 
     stop()
     expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
   })
 
-  it('translates a wire failure into a typed MarketCallFailure with the carrier code', async () => {
+  it('lazily maps every face member to its channel method on demand', async () => {
+    const { slots } = await bench()
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: makeList([]) }))
+    stubChannel(fetchMock)
+    declareTab(slots)
+    const face = faceOf(tabEntry(slots))
+
+    const pages = [
+      { call: () => face.status(), method: 'status', args: {} },
+      { call: () => face.search('agents'), method: 'search', args: { keywords: 'agents' } },
+      { call: () => face.previewInstall('octocat/demo'), method: 'previewInstall', args: { repository: 'octocat/demo' } },
+    ]
+    for (const page of pages) {
+      await page.call()
+      const [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit]
+      expect(url).toBe(MARKET_CONTROL_WEB_PATH)
+      expect(JSON.parse(String(init.body))).toMatchObject({ method: page.method, args: page.args })
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('translates wire failures into typed failures with the carrier code', async () => {
     const { slots } = await bench()
     const fetchMock = vi.fn(async () => jsonResponse({
       ok: false,
-      error: { code: 'market/protected', message: 'protected entry', details: { key: 'gh-x' } },
+      error: { code: 'github/rate-limit', message: 'limited', details: {} },
     }))
     stubChannel(fetchMock)
     declareTab(slots)
-
     const face = faceOf(tabEntry(slots))
-    const error = await face.list().catch((caught: unknown) => caught)
+
+    const error = await face.search('agents').catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
-    expect(error).toMatchObject({ code: 'market/protected', message: 'protected entry' })
+    expect(error).toMatchObject({ code: 'github/rate-limit', message: 'limited' })
   })
 
   it('normalizes a transport failure to the market/unreachable code', async () => {
@@ -149,9 +170,25 @@ describe('plugin-market browser half assembly', () => {
     declareTab(slots)
 
     const face = faceOf(tabEntry(slots))
-    const error = await face.setEnabled('gh-x', true).catch((caught: unknown) => caught)
+    const error = await face.install('octocat/demo', 'tok').catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
     expect(error).toMatchObject({ code: 'market/unreachable' })
+  })
+
+  it('passes decoded values through to the lazy closures', async () => {
+    const { slots } = await bench()
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { method: string }
+      if (body.method === 'status') return jsonResponse({ ok: true, value: makeStatus(false) })
+      return jsonResponse({ ok: true, value: makeSearchPage([{ repository: 'octocat/demo', name: 'demo' }]) })
+    })
+    stubChannel(fetchMock)
+    declareTab(slots)
+    const face = faceOf(tabEntry(slots))
+
+    await expect(face.status()).resolves.toEqual(makeStatus(false))
+    await expect(face.search('demo')).resolves.toMatchObject({ totalCount: 1 })
+    void fetchMock
   })
 
   it('follows locale switches and recovers across declaration collapse and remount', async () => {
@@ -161,10 +198,10 @@ describe('plugin-market browser half assembly', () => {
 
     expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
     const stop = declareTab(slots)
-    expect(resolveSlotLabel(tabEntry(slots).options.label)).toBe('插件管理')
+    expect(resolveSlotLabel(tabEntry(slots).options.label)).toBe(zh.tab)
 
     locale.setLocale('en')
-    expect(resolveSlotLabel(tabEntry(slots).options.label)).toBe('Managed plugins')
+    expect(resolveSlotLabel(tabEntry(slots).options.label)).toBe(en.tab)
 
     stop()
     expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
@@ -172,7 +209,7 @@ describe('plugin-market browser half assembly', () => {
     const remounted = tabEntry(slots)
     expect(remounted.component).toBe(ManagePluginsTab)
     expect(remounted.options).toMatchObject({ id: 'market', order: 20 })
-    expect(resolveSlotLabel(remounted.options.label)).toBe('Managed plugins')
+    expect(resolveSlotLabel(remounted.options.label)).toBe(en.tab)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -187,9 +224,7 @@ describe('plugin-market browser half assembly', () => {
     slots.disposeInjections()
     expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
     expect(locale.resolve(NS, 'tab')).toBe('tab')
-    expect(() => locale.register(NS, { zh: { tab: '插件管理' }, en: { tab: 'Managed plugins' } })).not.toThrow()
+    expect(() => locale.register(NS, { zh, en })).not.toThrow()
     await ctx.fiber.dispose()
   })
 })
-
-

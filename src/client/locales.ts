@@ -1,5 +1,6 @@
-﻿/**
- * Copy dictionaries of the plugin-market "managed plugins" Settings tab.
+/**
+ * Copy dictionaries of the plugin-market settings page (managed list +
+ * GitHub search/install M1 surface).
  *
  * The zh dictionary is the key source of truth; `en` is constrained to the
  * exact same key set (`satisfies Record<MarketManageLocaleKey, string>`), so a
@@ -10,17 +11,17 @@
 export const zh = {
   /** Plugins-section tab label. */
   tab: '插件管理',
-  /** Whole-list loading state. */
+  /** Whole-page/list loading state. */
   loading: '正在读取已管理插件…',
   /** Whole-list load failure (channel unreachable or a wire failure). */
   error: '暂时无法读取插件。',
-  /** Retry the failed list load. */
+  /** Retry a failed load. */
   retry: '重试',
-  /** Filter input label and placeholder. */
+  /** Managed-list filter label and placeholder. */
   search: '搜索插件',
   /** No managed plugin records exist at all. */
   empty: '暂无已管理插件。',
-  /** The filter matched no rows. */
+  /** The managed-list filter matched no rows. */
   emptySearch: '没有匹配的插件。',
   /** Item counter unit, e.g. "3 个". */
   countUnit: '个',
@@ -54,6 +55,92 @@ export const zh = {
   switching: '正在更新「{name}」…',
   /** Inline row failure after a toggle call, with the wire code. */
   toggleFailed: '切换失败（{code}）',
+  /** Repository header label when the market repository is configured. */
+  repoLabel: '当前插件源仓库',
+  /** Idle header title when no repository path is configured. */
+  idleTitle: '插件市场尚未激活',
+  /** Idle guidance: how to configure the repository (no write-back UI). */
+  idleBody: '在 dsh profile 的 cordis.patch.yml 中为 plugin-market-host 行配置 Config.repositoryPath，指向本地第三方插件源仓库目录；重启 dsh 后生效。',
+  /** GitHub search input label and placeholder. */
+  githubSearch: '搜索 GitHub 上的 dsh 插件',
+  /** GitHub search submit button. */
+  searchButton: '搜索',
+  /** Search zone idle hint. */
+  searchIdle: '输入关键词搜索 GitHub 上的 dsh 插件，找到后可直接安装到本地插件源仓库。',
+  /** Search in-flight state. */
+  searching: '正在搜索…',
+  /** Search completed with zero hits. */
+  searchEmpty: '没有找到匹配的插件。',
+  /** Generic search failure. */
+  searchFailed: '搜索失败。',
+  /** GitHub rate-limit failure. */
+  rateLimited: 'GitHub 限流，请稍后再试。',
+  /** Network/transport failure. */
+  networkError: '网络错误，服务暂时不可达。',
+  /** GitHub auth/not-found failure. */
+  githubAuthError: 'GitHub 请求被拒绝（认证问题或仓库不存在）。',
+  /** Search results heading. */
+  searchResults: '搜索结果',
+  /** External repository link label on a result card. */
+  repoLinkLabel: '在 GitHub 打开',
+  /** Stargazer count of a search result. */
+  starsLabel: '{count} 星',
+  /** Last-update line of a search result. */
+  updatedLabel: '更新于 {date}',
+  /** Install action of an unmanaged result. */
+  installButton: '安装',
+  /** Update action of an already-managed result. */
+  updateButton: '更新',
+  /** Managed list section heading. */
+  managedHeading: '已管理插件',
+  /** Row action opening the two-step removal flow. */
+  removeButton: '删除',
+  /** Install confirmation dialog title. */
+  installDialogTitle: '安装插件',
+  /** Declared-dependency section title. */
+  depsTitle: '声明依赖',
+  /** dependencies list label. */
+  depsLabel: 'dependencies',
+  /** peerDependencies list label. */
+  peerDepsLabel: 'peerDependencies',
+  /** Empty dependency list placeholder. */
+  depsEmpty: '无',
+  /** Overwrite notice shown when the reviewed plugin is already managed. */
+  overwriteNotice: '该插件已管理，安装将覆盖其本地源码目录；启停记录保留。',
+  /** Degraded-preview notice (manifest unreadable but install possible). */
+  degradedNotice: '依赖清单不可读（{code}），仍可继续安装。',
+  /** Preview (manifest review) failure. */
+  previewFailed: '无法读取该仓库的插件清单。',
+  /** Install in-flight state. */
+  installing: '正在下载并安装…',
+  /** Install success message. */
+  installDone: '安装完成。插件默认停用，可在已管理列表中启用。',
+  /** Install failure heading. */
+  installFailed: '安装失败。',
+  /** Install confirmation expired (re-preview required). */
+  confirmExpired: '确认已过期，请重新确认。',
+  /** Confirmation missing. */
+  confirmRequired: '缺少确认信息。',
+  /** Protected-entry refusal. */
+  protectedEntry: '该条目受保护，无法操作。',
+  /** Generic failure with the wire code. */
+  failedWithCode: '操作失败（{code}）。',
+  /** Dismiss/close dialog action. */
+  closeButton: '关闭',
+  /** Success/done dismiss action. */
+  doneButton: '完成',
+  /** Generic cancel action. */
+  cancelButton: '取消',
+  /** First-step removal continuation. */
+  continueButton: '继续',
+  /** Removal dialog title. */
+  removeDialogTitle: '删除插件',
+  /** Removal step-1 explanation. */
+  removeStep1: '将从本地插件源仓库移除「{name}」的源码、记录，并立即停用其运行条目。',
+  /** Removal step-2 double confirmation. */
+  removeStep2: '再次确认删除？此操作不可撤销。',
+  /** Removal in-flight state. */
+  removing: '正在删除…',
 } satisfies Record<string, string>
 
 /** Plugin-market UI locale key union (zh is the key source). */
@@ -84,4 +171,47 @@ export const en: Record<MarketManageLocaleKey, string> = {
   switchDisable: 'Disable {name}',
   switching: 'Updating {name}…',
   toggleFailed: 'Toggle failed ({code})',
+  repoLabel: 'Plugin source repository',
+  idleTitle: 'The plugin market is not active',
+  idleBody: 'Add Config.repositoryPath to the plugin-market-host row in the dsh profile cordis.patch.yml, pointing at a local third-party plugin source repository, then restart dsh.',
+  githubSearch: 'Search GitHub for dsh plugins',
+  searchButton: 'Search',
+  searchIdle: 'Type a keyword to search dsh plugins on GitHub, then install one into the local plugin source repository.',
+  searching: 'Searching…',
+  searchEmpty: 'No matching plugins found.',
+  searchFailed: 'Search failed.',
+  rateLimited: 'GitHub rate limit reached; try again later.',
+  networkError: 'Network error; the service is unreachable.',
+  githubAuthError: 'GitHub request rejected (auth problem or missing repository).',
+  searchResults: 'Search results',
+  repoLinkLabel: 'Open on GitHub',
+  starsLabel: '{count} stars',
+  updatedLabel: 'Updated {date}',
+  installButton: 'Install',
+  updateButton: 'Update',
+  managedHeading: 'Managed plugins',
+  removeButton: 'Remove',
+  installDialogTitle: 'Install plugin',
+  depsTitle: 'Declared dependencies',
+  depsLabel: 'dependencies',
+  peerDepsLabel: 'peerDependencies',
+  depsEmpty: 'None',
+  overwriteNotice: 'This plugin is already managed; installing overwrites its local sources and keeps its enablement.',
+  degradedNotice: 'Dependency list unreadable ({code}); you can still install.',
+  previewFailed: 'Could not read the plugin manifest.',
+  installing: 'Downloading and installing…',
+  installDone: 'Installed. The plugin is disabled by default; enable it from the managed list.',
+  installFailed: 'Install failed.',
+  confirmExpired: 'The confirmation expired; please confirm again.',
+  confirmRequired: 'Confirmation is required.',
+  protectedEntry: 'This entry is protected and cannot be changed.',
+  failedWithCode: 'Operation failed ({code}).',
+  closeButton: 'Close',
+  doneButton: 'Done',
+  cancelButton: 'Cancel',
+  continueButton: 'Continue',
+  removeDialogTitle: 'Remove plugin',
+  removeStep1: 'Removes {name} sources and record from the local repository and stops its running entry.',
+  removeStep2: 'Remove again? This cannot be undone.',
+  removing: 'Removing…',
 }

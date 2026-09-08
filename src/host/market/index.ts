@@ -91,3 +91,54 @@ export async function openMarketRepository(
 }
 
 export { createNodePackageResolver }
+
+// --- Public reuse surface -------------------------------------------------
+// Single import for the framework composer and consumer rows: the host entry
+// (src/index.ts) is framework-owned and composes these exports instead of
+// re-implementing activation. Behavior and stable error codes are unchanged.
+
+export {
+  normalizeMarketConfig,
+  MARKET_CONFIG_DEFAULTS,
+  type Config,
+  type MarketConfig,
+  type ResolveEnvironment,
+} from './config.ts'
+
+export { MarketRepositoryService } from './service.ts'
+
+export {
+  GitHubMarket,
+  githubFetch,
+  envTokenProvider,
+  defaultFetchLike,
+  parseGitHubJson,
+  parseRepositorySlug,
+  isValidRepositorySlug,
+  type FetchLike,
+  type FetchResponse,
+  type TokenProvider,
+  type GitHubMarketOptions,
+  type GitHubSearchOptions,
+  type GitHubRepoMeta,
+  type GitHubResponseHeaders,
+  type GitHubRequestOptions,
+} from './github.ts'
+
+export {
+  PluginPreviewer,
+  type PluginPreviewerOptions,
+} from './preview.ts'
+
+export {
+  DEFAULT_CHECKOUT_ENTRY,
+  PluginInstaller,
+  nodeCommandRunner,
+  resolveCheckoutEntry,
+  type CommandOutcome,
+  type CommandRunner,
+  type InstallPluginInput,
+  type InstalledPlugin,
+  type PluginInstallerOptions,
+  type RunOptions,
+} from './install.ts'

@@ -91,10 +91,15 @@ export interface MarketControllerDeps {
   readonly removeDirectory: (directory: string) => Promise<void>
   /** Reserved-key / self-module policy. */
   readonly protection: ProtectionPolicy
-  /** Loader module specifier (absolute file URL) of one record. */
+  /** Entry-file resolver/cleanup paths (see entry-name.ts helpers). */
   readonly entryModuleOf: (record: PluginMarketRecord) => string
   /** Checkout directory of one record inside the repository. */
   readonly entryDirectoryOf: (record: PluginMarketRecord) => string
+  /**
+   * Removal confirmation validity window in milliseconds; defaults to
+   * {@link REMOVE_CONFIRM_TTL_MS} when omitted.
+   */
+  readonly confirmTtlMs?: number
   /** Injectable clock for confirmation expiry (defaults to `new Date`). */
   readonly now?: () => Date
   /** Optional structured logger. */
@@ -213,7 +218,8 @@ export class MarketPluginController {
     this.assertManageable(key, record)
     const token = randomBytes(16).toString('hex')
     const now = (this.deps.now ?? (() => new Date()))()
-    const expiresAt = new Date(now.getTime() + REMOVE_CONFIRM_TTL_MS)
+    const ttl = this.deps.confirmTtlMs ?? REMOVE_CONFIRM_TTL_MS
+    const expiresAt = new Date(now.getTime() + ttl)
     this.pending.set(key, { token, expiresAt: expiresAt.getTime() })
     return { key, token, expiresAt: expiresAt.toISOString() }
   }
@@ -294,6 +300,16 @@ export class MarketPluginController {
     const record = await this.deps.records.get(key)
     if (record === null) recordNotFound(key)
     return record
+  }
+
+  /**
+   * Align one record's loader row right away (used after an install/overwrite
+   * registers a record outside a full rebuild). A newly installed record is
+   * `enabled: false`, so its row is created disabled and any previously active
+   * row of an overwritten record is stopped.
+   */
+  async syncRecordRow(record: PluginMarketRecord): Promise<void> {
+    await this.ensureRow(record, indexEntries(this.deps.loader.entries()))
   }
 
   /** Create or align one loader row with the record's desired state. */

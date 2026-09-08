@@ -2,28 +2,21 @@
 # package is installed into a profile through `dsh plugin add` (the package
 # declares dsh.bundle.patch -> ./cordis.patch.yml).
 #
-# Row ids are stable and never carry the loader-forbidden colon. `name`
-# references this package's own entry points (package main, or a planned
-# export subpath). A source/dev profile appends the same rows as relative file
-# rows instead; see scripts/install-profile.mjs and README "Profile self-load".
+# Single-row convergence: the package activates through exactly ONE loader row.
+# - plugin-market-host (package main, lib/index.js from src/index.ts) is the
+#   package composer: it normalizes Config (optional repositoryPath), opens the
+#   plugin source repository and provides it as the `marketRepository` Cordis
+#   service, then activates the market control (record-driven controller +
+#   Remote/web gateway) in the SAME context via ctx.plugin. The control is NOT
+#   a standalone row: it inherits this row's lifecycle and loader chain.
+# - The browser half (settings tab, lib/client.js) is delivered through the
+#   package's dsh.client declaration (./client export) and needs no row.
+#   The composable control module stays reachable as the ./control export for
+#   hosts that want to embed it directly, but nothing mounts it as a row.
 #
-# Entry ownership (business modules land the code, framework owns the rows):
-# - plugin-market-host    Host plugin  - package main (lib/index.js from
-#                         src/index.ts). Placeholder today.
-# - plugin-market-control Control plugin - planned sub-entry ./control (lib/
-#                         control.js from src/host/control). Disabled until the
-#                         plugin-control-service module ships that entry.
-# - plugin-market-ui      UI plugin - planned sub-entry ./ui (a Host no-op row;
-#                         its browser half ships through dsh.client ./client).
-#                         Disabled until plugin-market-ui lands it.
+# Row ids are stable and never carry the loader-forbidden colon. A source/dev
+# profile appends the same single row as a relative file row instead; see
+# scripts/install-profile.mjs and README "Profile self-load".
 - insert:
     - id: plugin-market-host
       name: dsh-plugin-market
-
-    - id: plugin-market-control
-      name: dsh-plugin-market/control
-      disabled: true
-
-    - id: plugin-market-ui
-      name: dsh-plugin-market/ui
-      disabled: true

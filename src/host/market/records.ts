@@ -8,6 +8,7 @@ import type {
 import { MarketError } from './errors.ts'
 import { errorCode, NodeFs, type FsLike } from './fs.ts'
 import { isValidPluginKey } from './keys.ts'
+import { isCheckoutEntryPath, isLocalDirSegment } from './paths.ts'
 
 /** Schema version written by this store (`plugins.json` records file v1). */
 export const RECORDS_SCHEMA_VERSION = 1 as const
@@ -75,24 +76,36 @@ export class PluginRecordStore {
   /**
    * Add a plugin record. Activation defaults are enforced here: `enabled` is
    * always false and `trusted` always `'untrusted'` — downloading never
-   * activates or trusts a plugin.
+   * activates or trusts a plugin. Input fields are validated synchronously
+   * before anything touches the file (`record/key-invalid` for the key,
+   * `record/invalid` for `localDirName`/`entry`), so a bad value can never be
+   * persisted and later misreport the whole file as `record/corrupt`.
    */
   async add(input: NewPluginRecord): Promise<PluginMarketRecord> {
     return this.exclusive(async () => {
+      assertValidInput(input, this.filePath)
       const document = await this.readDocument()
       if (document.records[input.key] !== undefined) {
         throw new MarketError('record/exists', `A plugin record for "${input.key}" already exists.`, { path: this.filePath })
       }
-      const record: PluginMarketRecord = {
-        key: input.key,
-        source: input.source,
-        localDirName: input.localDirName,
-        entry: input.entry === undefined ? null : input.entry,
-        installedAt: new Date().toISOString(),
-        enabled: false,
-        trusted: 'untrusted',
-        trustedAt: null,
-      }
+      const record = buildRecord(input)
+      await this.persist(this.withRecord(document, record))
+      return record
+    })
+  }
+
+  /**
+   * Add-or-replace one plugin record (used by the install pipeline for
+   * same-key overwrite updates). Like {@link PluginRecordStore.add} the record
+   * is created with `enabled: false`; `trusted` stays `'untrusted'` unless a
+   * TrustGate-confirmed install passes `{ trusted: true }`, which stamps
+   * `trusted` and `trustedAt` in the same atomic write.
+   */
+  async register(input: NewPluginRecord, trust?: { readonly trusted: true }): Promise<PluginMarketRecord> {
+    return this.exclusive(async () => {
+      assertValidInput(input, this.filePath)
+      const document = await this.readDocument()
+      const record = buildRecord(input, trust)
       await this.persist(this.withRecord(document, record))
       return record
     })
@@ -283,25 +296,12 @@ function expectLocalDirName(value: unknown, filePath: string, key: PluginMarketK
   return value
 }
 
-function isLocalDirSegment(value: string): boolean {
-  if (value.length === 0 || value.length > 255) return false
-  if (value === '.' || value === '..') return false
-  return !/[\\/\u0000]/.test(value)
-}
-
 /**
  * A relative plugin-entry path inside a checkout: forward-slash segments, no
  * drive/absolute prefix, no empty or escaping (`..`) segment, no backslash.
  */
-function isEntryPath(value: string): boolean {
-  if (value.length === 0 || value.length > 512) return false
-  if (/^[/\\]/.test(value) || /^[A-Za-z]:/.test(value)) return false
-  const segments = value.split('/')
-  return segments.every(segment => segment.length > 0 && segment !== '.' && segment !== '..' && !/[\\\u0000]/.test(segment))
-}
-
 function expectEntry(value: unknown, filePath: string, key: PluginMarketKey): string {
-  if (typeof value !== 'string' || !isEntryPath(value)) {
+  if (typeof value !== 'string' || !isCheckoutEntryPath(value)) {
     corrupt(filePath, `record "${key}" has an invalid "entry": a relative forward-slash path inside the checkout, without escaping ".." or a backslash`)
   }
   return value
@@ -325,6 +325,43 @@ function expectTrustState(value: unknown, filePath: string, key: PluginMarketKey
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Fail-fast input guard shared by {@link PluginRecordStore.add} and `.register`. */
+function assertValidInput(input: NewPluginRecord, filePath: string): void {
+  if (!isValidPluginKey(input.key)) {
+    throw new MarketError('record/key-invalid', `"${input.key}" is not a valid stable plugin-market key.`, { path: filePath })
+  }
+  if (!isLocalDirSegment(input.localDirName)) {
+    throw new MarketError(
+      'record/invalid',
+      `localDirName "${input.localDirName}" is not a valid checkout directory name (a single path segment without separators).`,
+      { path: filePath },
+    )
+  }
+  if (input.entry !== undefined && !isCheckoutEntryPath(input.entry)) {
+    throw new MarketError(
+      'record/invalid',
+      `entry "${input.entry}" is not a valid checkout-relative entry path (forward-slash segments, no escaping ".." or backslash).`,
+      { path: filePath },
+    )
+  }
+}
+
+/** One persisted record with the enforced activation/trust defaults. */
+function buildRecord(input: NewPluginRecord, trust?: { readonly trusted: true }): PluginMarketRecord {
+  const now = new Date().toISOString()
+  const confirmed = trust !== undefined
+  return {
+    key: input.key,
+    source: input.source,
+    localDirName: input.localDirName,
+    entry: input.entry === undefined ? null : input.entry,
+    installedAt: now,
+    enabled: false,
+    trusted: confirmed ? 'trusted' : 'untrusted',
+    trustedAt: confirmed ? now : null,
+  }
 }
 
 /** Throw the stable corruption error; the file itself is never modified here. */

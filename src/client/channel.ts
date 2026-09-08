@@ -1,11 +1,13 @@
-﻿/**
+/**
  * Browser-half caller of the market control web channel (candidate B chosen by
  * the Host→Client channel spike): one same-origin `ctx.webServer` route
  * carrying a JSON envelope shaped like the native Remote result contract.
  *
  * Wire shape (see src/host/control/web-channel.ts):
  *   POST /api/plugins-market
- *   { "method": "listManaged" | "setEnabled", "args": { ... } }
+ *   { "method": "status" | "listManaged" | "setEnabled" | "requestRemove"
+ *       | "confirmRemove" | "search" | "previewInstall" | "install",
+ *     "args": { ... } }
  *   → { "ok": true, "value": ... }
  *   | { "ok": false, "error": { "code", "message", "details" } }
  *
@@ -17,10 +19,16 @@
  */
 
 import type {
+  GitHubSearchPage,
   ManagedPluginList,
+  MarketStatus,
   MarketWireErrorCode,
+  PluginInstallOutcome,
+  PluginInstallReview,
   PluginMarketKey,
   PluginMarketRecord,
+  RemoveOutcome,
+  RemoveRequest,
 } from '../types.ts'
 
 /** Exact route path registered by the Host control row. */
@@ -74,6 +82,11 @@ type WireEnvelope =
     readonly error: { readonly code: string; readonly message: string; readonly details: unknown }
   }
 
+/** Read the market activation facts (configured flag + repository root). */
+export async function status(): Promise<MarketCallResult<MarketStatus>> {
+  return post<MarketStatus>('status', {})
+}
+
 /** Read one managed-plugin list through the channel. */
 export async function listManaged(): Promise<MarketCallResult<ManagedPluginList>> {
   return post<ManagedPluginList>('listManaged', {})
@@ -85,6 +98,51 @@ export async function setEnabled(
   enabled: boolean,
 ): Promise<MarketCallResult<PluginMarketRecord>> {
   return post<PluginMarketRecord>('setEnabled', { key, enabled })
+}
+
+/** Step 1 of the double-confirmed removal protocol. */
+export async function requestRemove(key: PluginMarketKey): Promise<MarketCallResult<RemoveRequest>> {
+  return post<RemoveRequest>('requestRemove', { key })
+}
+
+/** Step 2 of the double-confirmed removal protocol. */
+export async function confirmRemove(
+  key: PluginMarketKey,
+  token: string,
+): Promise<MarketCallResult<RemoveOutcome>> {
+  return post<RemoveOutcome>('confirmRemove', { key, token })
+}
+
+/** GitHub topic search for dsh plugins. */
+export async function search(
+  keywords: string | null,
+  perPage?: number,
+): Promise<MarketCallResult<GitHubSearchPage>> {
+  const args: Record<string, unknown> = {}
+  if (keywords !== null && keywords !== undefined) args.keywords = keywords
+  if (perPage !== undefined) args.perPage = perPage
+  return post<GitHubSearchPage>('search', args)
+}
+
+/** Review one repository and mint its single-use install confirmation. */
+export async function previewInstall(
+  repository: string,
+  version?: string | null,
+): Promise<MarketCallResult<PluginInstallReview>> {
+  const args: { repository: string; version?: string } = { repository }
+  if (version !== undefined && version !== null) args.version = version
+  return post<PluginInstallReview>('previewInstall', args)
+}
+
+/** Run the double-confirmed install for a reviewed repository. */
+export async function install(
+  repository: string,
+  confirmToken: string,
+  version?: string | null,
+): Promise<MarketCallResult<PluginInstallOutcome>> {
+  const args: { repository: string; confirmToken: string; version?: string } = { repository, confirmToken }
+  if (version !== undefined && version !== null) args.version = version
+  return post<PluginInstallOutcome>('install', args)
 }
 
 async function post<T>(method: string, args: object): Promise<MarketCallResult<T>> {

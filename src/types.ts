@@ -43,9 +43,24 @@ export type PluginMarketErrorCode =
   | 'record/not-found'
   | 'record/corrupt'
   | 'record/io'
+  | 'record/invalid'
   | 'harness/resolve-failed'
   | 'harness/link-conflict'
   | 'harness/io'
+  | 'github/auth'
+  | 'github/rate-limit'
+  | 'github/network'
+  | 'github/not-found'
+  | 'github/bad-response'
+  | 'github/bad-request'
+  | 'install/dir-exists'
+  | 'install/dir-in-use'
+  | 'install/entry-missing'
+  | 'install/package-invalid'
+  | 'install/git-failed'
+  | 'install/deps-failed'
+  | 'install/io'
+  | 'gate/consent-required'
 
 /**
  * Supported plugin source kinds, keyed by their `kind` discriminant. The map
@@ -110,6 +125,57 @@ export interface PluginMarketRecordsFileV1 {
 }
 
 /* ------------------------------------------------------------------------ */
+/* plugin-market-host source contract (search / preview / trust preview)    */
+/* ------------------------------------------------------------------------ */
+
+/** One GitHub repository search hit (repo metadata only, no secrets). */
+export interface GitHubRepoSummary {
+  /** `owner/repo` slug that identifies the repository. */
+  readonly repository: string
+  readonly name: string
+  readonly description: string | null
+  /** Stargazer count. */
+  readonly stars: number
+  /** ISO-8601 last-push/update timestamp, when the API reported one. */
+  readonly updatedAt: string | null
+  /** Browser URL of the repository. */
+  readonly url: string
+  /** Clone URL used by the install pipeline. */
+  readonly cloneUrl: string
+}
+
+/** One search response page (never caches any credential). */
+export interface GitHubSearchPage {
+  readonly totalCount: number
+  readonly items: readonly GitHubRepoSummary[]
+}
+
+/** Dependency snapshot of one plugin manifest, shown by the TrustGate preview. */
+export interface PluginDependencyPreview {
+  readonly dependencies: readonly string[]
+  readonly peerDependencies: readonly string[]
+}
+
+/** Manifest summary of one plugin checkout, read before installation. */
+export interface PluginManifestPreview {
+  /** `name` from package.json when readable. */
+  readonly name: string | null
+  /** `version` from package.json when readable. */
+  readonly version: string | null
+  readonly dependencies: PluginDependencyPreview
+}
+
+/**
+ * Outcome of the pre-download preview. `ready` means the remote manifest was
+ * read and summarized; `degraded` means only repository metadata is available
+ * (raw manifest unreadable/unparsable) — confirmation stays possible, and the
+ * UI labels the reason ("依赖不可读"), carrying the underlying host code.
+ */
+export type PluginPreviewOutcome =
+  | { readonly status: 'ready'; readonly summary: PluginManifestPreview }
+  | { readonly status: 'degraded'; readonly summary: PluginManifestPreview; readonly reason: string; readonly code: PluginMarketErrorCode }
+
+/* ------------------------------------------------------------------------ */
 /* plugin-control-service cross-face contract (record-driven control)       */
 /* ------------------------------------------------------------------------ */
 
@@ -149,6 +215,44 @@ export interface ManagedPluginView {
 /** Result of the record-driven list. Entries sorted by stable key. */
 export interface ManagedPluginList {
   readonly entries: readonly ManagedPluginView[]
+}
+
+/** Read-only market activation facts for the settings page header. */
+export interface MarketStatus {
+  /** Whether the market repository is configured (not idle). */
+  readonly configured: boolean
+  /** Canonical repository root, or null while the market is idle. */
+  readonly repositoryPath: string | null
+}
+
+/** One pre-download review of a candidate GitHub plugin repository. */
+export interface PluginInstallReview {
+  /** Validated `owner/repo` slug of the reviewed repository. */
+  readonly repository: string
+  /** Stable loader-safe key derived from the slug (e.g. `gh-owner-repo`). */
+  readonly key: PluginMarketKey
+  /** Manifest summary (ready) or repository-metadata fallback (degraded). */
+  readonly preview: PluginPreviewOutcome
+  /** Whether a record already exists for this key (an overwrite update). */
+  readonly exists: boolean
+  /** Whether installing again would overwrite an existing checkout. */
+  readonly overwrite: boolean
+  /** The existing record when `exists` is true, otherwise null. */
+  readonly existing: PluginMarketRecord | null
+  /** Single-use confirmation token minted for this review. */
+  readonly confirmToken: string
+  /** ISO-8601 expiry of the confirmation token. */
+  readonly expiresAt: string
+}
+
+/** Outcome of a confirmed install. */
+export interface PluginInstallOutcome {
+  readonly key: PluginMarketKey
+  /** True when the install replaced an already-managed checkout. */
+  readonly overwritten: boolean
+  readonly record: PluginMarketRecord
+  /** Absolute checkout directory of the installed plugin. */
+  readonly checkoutDir: string
 }
 
 /** Step-1 answer of the two-step removal protocol (double confirmation). */
@@ -212,6 +316,21 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'harness/resolve-failed': MarketRemoteErrorDetails
     'harness/link-conflict': MarketRemoteErrorDetails
     'harness/io': MarketRemoteErrorDetails
+    'record/invalid': MarketRemoteErrorDetails
+    'github/auth': {}
+    'github/rate-limit': {}
+    'github/network': {}
+    'github/not-found': {}
+    'github/bad-response': {}
+    'github/bad-request': {}
+    'install/dir-exists': MarketRemoteErrorDetails
+    'install/dir-in-use': MarketRemoteErrorDetails
+    'install/entry-missing': MarketRemoteErrorDetails
+    'install/package-invalid': MarketRemoteErrorDetails
+    'install/git-failed': {}
+    'install/deps-failed': {}
+    'install/io': MarketRemoteErrorDetails
+    'gate/consent-required': { readonly key?: string }
     'market/idle': {}
     'market/not-found': { readonly key: string }
     'market/protected': { readonly key?: string }
