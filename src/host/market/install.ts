@@ -223,11 +223,15 @@ export class PluginInstaller {
     if (stat === null) return
     const existing = await store.get(key)
     if (existing?.localDirName === dirName) return // overwrite update of our own checkout
-    const hasGit = (await this.fs.lstat(join(root, dirName, '.git'))) !== null
-    if (!hasGit && !(await this.isEmptyDir(join(root, dirName)))) {
+    // Only an empty directory may be taken over. Anything else — including a
+    // directory holding its own `.git` — is treated as user-owned data (a
+    // hand-made git repository, sources, notes) and refused: the presence of
+    // `.git` alone is not proof of a managed checkout, and letting it through
+    // would make the swap step's rmrf delete it. Fail loudly instead.
+    if (!(await this.isEmptyDir(join(root, dirName)))) {
       throw new MarketError(
         'install/dir-exists',
-        `The directory "${dirName}" already exists and is not a managed checkout; refusing to overwrite it.`,
+        `The directory "${dirName}" already exists and is not a checkout managed by this plugin manager; refusing to overwrite it.`,
         { path: join(root, dirName) },
       )
     }

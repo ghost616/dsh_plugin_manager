@@ -140,6 +140,9 @@ describe('PluginInstaller.install', () => {
     // The checkout and conventions landed on disk; git/pnpm ran once each.
     const pkg = JSON.parse(await readFile(join(root, 'gh-owner-repo', 'package.json'), 'utf8')) as { main: string }
     expect(pkg.main).toBe('lib/index.js')
+    // The final directory is a managed checkout: it holds the `.git` created
+    // by the (fake) clone, not a leftover of any pre-existing data.
+    expect(await readdir(join(root, 'gh-owner-repo', '.git'))).toEqual([])
     expect(calls.some((call) => call.command === 'git' && call.args[0] === 'clone')).toBe(true)
     expect(calls.some((call) => call.command === 'pnpm')).toBe(true)
 
@@ -251,6 +254,78 @@ describe('PluginInstaller.install', () => {
     )
     expect(await readFile(join(occupied, 'notes.txt'), 'utf8')).toBe('user file')
     expect(await new PluginRecordStore(repositoryRecordsPath(root)).get(key('gh-occupied'))).toBeNull()
+  })
+
+  it('refuses an existing directory that holds its own .git but has no record (no hasGit pass-through)', async () => {
+    const root = await freshRepo('repo-gitlike')
+    const dir = join(root, 'gh-gitlike')
+    await mkdir(join(dir, '.git'), { recursive: true })
+    await writeFile(join(dir, 'README.md'), 'user repository', 'utf8')
+    const { run, calls } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+    await rejectCode(
+      new PluginInstaller({ run }).install({
+        repositoryRoot: root,
+        key: key('gh-gitlike'),
+        ownerRepo: 'owner/gitlike',
+        localDirName: 'gh-gitlike',
+        confirmed: true,
+      }),
+      'install/dir-exists',
+    )
+    // The user-owned git repository survives untouched and nothing was cloned
+    // into the repository root.
+    expect(await readFile(join(dir, 'README.md'), 'utf8')).toBe('user repository')
+    expect(await readdir(join(dir, '.git'))).toEqual([])
+    expect(calls).toEqual([])
+    expect(await new PluginRecordStore(repositoryRecordsPath(root)).get(key('gh-gitlike'))).toBeNull()
+  })
+
+  it('allows an existing empty directory and installs into it', async () => {
+    const root = await freshRepo('repo-empty')
+    const dir = join(root, 'gh-empty')
+    await mkdir(dir)
+    const { run } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-empty'),
+      ownerRepo: 'owner/empty',
+      localDirName: 'gh-empty',
+      confirmed: true,
+    })
+    expect(result.record.entry).toBe('index.js')
+    expect(result.record.localDirName).toBe('gh-empty')
+    expect(await readdir(join(dir, '.git'))).toEqual([])
+  })
+
+  it('overwrite-updates the same key into the very directory it already manages', async () => {
+    const root = await freshRepo('repo-self-dir')
+    const dirName = 'gh-same'
+    const first = fakeRunner({ manifest: { main: 'a.js' }, files: ['a.js'] })
+    await new PluginInstaller({ run: first.run }).install({
+      repositoryRoot: root,
+      key: key('gh-same'),
+      ownerRepo: 'owner/sample',
+      localDirName: dirName,
+      confirmed: true,
+    })
+    // The managed checkout physically holds a .git; a same-key same-directory
+    // re-install is this manager's own overwrite update and must still pass.
+    const second = fakeRunner({ manifest: { main: 'b.js' }, files: ['b.js'] })
+    const result = await new PluginInstaller({ run: second.run }).install({
+      repositoryRoot: root,
+      key: key('gh-same'),
+      ownerRepo: 'owner/sample',
+      localDirName: dirName,
+      confirmed: true,
+    })
+    expect(result.record.entry).toBe('b.js')
+    expect(result.record.localDirName).toBe(dirName)
+    const pkg = JSON.parse(await readFile(join(root, dirName, 'package.json'), 'utf8')) as { main: string }
+    expect(pkg.main).toBe('b.js')
+    expect(await readdir(join(root, dirName, '.git'))).toEqual([])
+    const store = new PluginRecordStore(repositoryRecordsPath(root))
+    expect(await store.list()).toHaveLength(1)
+    expect((await store.get(key('gh-same')))?.entry).toBe('b.js')
   })
 
   it('refuses a directory used by another managed plugin', async () => {
