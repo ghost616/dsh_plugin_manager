@@ -1,4 +1,4 @@
-﻿// @vitest-environment jsdom
+// @vitest-environment jsdom
 /**
  * Component spec of the GitHub browse modal and the full managed-plugins
  * page: open button, in-dialog search, pagination, installed markers,
@@ -31,6 +31,7 @@ afterEach(async () => {
     await act(async () => { root.unmount() })
   }
   document.body.innerHTML = ''
+  vi.restoreAllMocks()
 })
 
 async function renderInto(node: ReactElement): Promise<HTMLElement> {
@@ -361,6 +362,122 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     const after = dialog.querySelector('[data-market-card]')
     expect(after?.getAttribute('data-repository')).toBe('acme/new')
+  })
+})
+describe('ManagePluginsTab GitHub modal drag & close affordances', () => {
+  function dragRect(left: number, top: number, width: number, height: number): DOMRect {
+    return {
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    } as unknown as DOMRect
+  }
+
+  /** Dispatch one synthetic mouse event on a target inside act(). */
+  async function mouse(where: EventTarget, type: string, x: number, y: number): Promise<void> {
+    await act(async () => {
+      where.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: x,
+        clientY: y,
+      }))
+    })
+  }
+
+  it('exposes the title bar as a drag handle and moves the dialog with the pointer', async () => {
+    const { props } = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+
+    const handle = dialog.querySelector('[data-drag-handle]')
+    expect(handle).not.toBeNull()
+
+    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockReturnValue(dragRect(400, 250, 560, 400))
+    try {
+      await mouse(handle!, 'mousedown', 420, 280)
+      await mouse(window, 'mousemove', 470, 340)
+      expect(dialog.style.position).toBe('fixed')
+      expect(dialog.style.left).toBe('450px')
+      expect(dialog.style.top).toBe('310px')
+
+      // Release keeps the dragged origin (the dialog remembers its spot).
+      await mouse(window, 'mouseup', 470, 340)
+      expect(dialog.style.left).toBe('450px')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('clamps the dragged dialog inside the viewport', async () => {
+    const { props } = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+
+    const handle = dialog.querySelector('[data-drag-handle]')!
+    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockReturnValue(dragRect(100, 100, 560, 400))
+    try {
+      await mouse(handle, 'mousedown', 120, 120)
+      // Far beyond the bottom-right corner: clamped to the viewport inset.
+      await mouse(window, 'mousemove', window.innerWidth + 10_000, window.innerHeight + 10_000)
+      expect(dialog.style.left).toBe(`${window.innerWidth - 560 - 8}px`)
+      expect(dialog.style.top).toBe(`${window.innerHeight - 400 - 8}px`)
+      // Far beyond the top-left corner: clamped to the minimum edge inset.
+      await mouse(window, 'mousemove', -10_000, -10_000)
+      expect(dialog.style.left).toBe('8px')
+      expect(dialog.style.top).toBe('8px')
+      await mouse(window, 'mouseup', -10_000, -10_000)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('never starts a drag from the close button and close still works', async () => {
+    const { props } = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+
+    const close = dialog.querySelector('[data-market-close]')!
+    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockReturnValue(dragRect(400, 250, 560, 400))
+    try {
+      await mouse(close, 'mousedown', 400, 250)
+      await mouse(window, 'mousemove', 800, 600)
+      expect(dialog.style.position).toBe('')
+    } finally {
+      spy.mockRestore()
+    }
+
+    await click(dialog.querySelector('[data-market-close]'))
+    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
+  })
+
+  it('renders the dsh-chrome close button with a localized label and × glyph', async () => {
+    const { props } = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+
+    const close = dialog.querySelector('[data-market-close]')
+    expect(close).not.toBeNull()
+    expect(close?.getAttribute('aria-label')).toBe(zh.closeButton)
+    expect(close?.getAttribute('type')).toBe('button')
+    const glyph = close?.querySelector('svg')
+    expect(glyph).not.toBeNull()
+    expect(glyph?.getAttribute('aria-hidden')).toBe('true')
+    expect(glyph?.getAttribute('viewBox')).toBe('0 0 16 16')
   })
 })
 

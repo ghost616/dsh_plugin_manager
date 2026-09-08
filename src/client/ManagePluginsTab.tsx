@@ -1,7 +1,10 @@
-﻿/** Full plugin-market settings page: repository status, a "Browse GitHub"
+/** Full plugin-market settings page: repository status, a "Browse GitHub"
  *  modal (paginated plugin search + install), and the managed roster. */
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import {
+  useEffect, useMemo, useRef, useState,
+  type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode,
+} from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   GitHubSearchPage,
@@ -21,6 +24,9 @@ import css from './ManagePluginsTab.module.css'
 
 /** Fixed page size of the GitHub search dialog (mirrors the wire perPage). */
 export const SEARCH_PAGE_SIZE = 10
+
+/** id linking the managed-list filter input to its local-only hint line. */
+const MANAGE_FILTER_HINT_ID = 'plugin-market-filter-hint'
 
 /** Registration-side channel face (lazy closures, wired by apply()). */
 export interface ManagePluginsTabInjected {
@@ -196,12 +202,13 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
       ) : null}
       <div className={css.toolbar}>
         <label className={css.search}>
-          <span className={css.visuallyHidden}>{t('search')}</span>
+          <span className={css.visuallyHidden}>{t('filterPlaceholder')}</span>
           <input
             type="search"
             value={query}
-            placeholder={t('search')}
-            aria-label={t('search')}
+            placeholder={t('filterPlaceholder')}
+            aria-label={t('filterPlaceholder')}
+            aria-describedby={MANAGE_FILTER_HINT_ID}
             data-manage-filter
             onChange={(event) => { onQuery(event.currentTarget.value) }}
           />
@@ -210,6 +217,11 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
           {`${String(entries.length)} ${t('countUnit')}`}
         </p>
       </div>
+      {entries.length > 0 ? (
+        <p id={MANAGE_FILTER_HINT_ID} className={css.hint} data-manage-filter-hint>
+          {t('filterHint')}
+        </p>
+      ) : null}
 
       {visible.length > 0 ? (
         <ul className={css.list} data-plugin-list>
@@ -558,6 +570,49 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
 /* GitHub browse modal (search + pagination + install entry)                */
 /* ------------------------------------------------------------------------ */
 
+/** Minimum gap kept between a dragged dialog and the viewport edges. */
+const DRAG_VIEWPORT_EDGE = 8
+
+/** One in-flight pointer drag of the market dialog (desktop title bar). */
+interface MarketDragAnchor {
+  readonly pointerX: number
+  readonly pointerY: number
+  readonly left: number
+  readonly top: number
+  readonly width: number
+  readonly height: number
+}
+
+/** Clamp a dragged dialog origin so the whole box stays inside the viewport. */
+function clampToViewport(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): { left: number; top: number } {
+  const edge = DRAG_VIEWPORT_EDGE
+  return {
+    left: Math.min(Math.max(left, edge), Math.max(edge, window.innerWidth - width - edge)),
+    top: Math.min(Math.max(top, edge), Math.max(edge, window.innerHeight - height - edge)),
+  }
+}
+
+/** dsh close glyph (ic_ds_close_outline_16 rendered at 14px, × shape). */
+function CloseGlyph(): ReactNode {
+  return (
+    <svg width={14} height={14} viewBox="0 0 16 16" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+      <path d="M14.1168 13.197L13.197 14.1167L1.8833 2.80303L2.80309 1.88324L14.1168 13.197Z" fill="currentColor" />
+      <path d="M13.197 1.88326L14.1168 2.80305L2.80309 14.1168L1.8833 13.197L13.197 1.88326Z" fill="currentColor" />
+    </svg>
+  )
+}
+
+/** Whether an event target is an interactive child that must not start a drag. */
+function isInteractive(eventTarget: EventTarget): boolean {
+  return eventTarget instanceof Element
+    && eventTarget.closest('button, a, input, textarea, select, [role="switch"], [contenteditable="true"]') !== null
+}
+
 type MarketSearchState =
   | { readonly phase: 'idle' }
   | { readonly phase: 'loading'; readonly keywords: string; readonly page: number }
@@ -579,11 +634,66 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<MarketSearchState>({ phase: 'idle' })
   const [installTarget, setInstallTarget] = useState<string | null>(null)
+  const [dragPosition, setDragPosition] = useState<{ left: number; top: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const dragAnchor = useRef<MarketDragAnchor | null>(null)
+  const detachDrag = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     mounted.current = true
-    return () => { mounted.current = false }
+    return () => {
+      mounted.current = false
+      // Never leave move/up listeners behind when the dialog unmounts mid-drag.
+      detachDrag.current?.()
+    }
   }, [])
+
+  /**
+   * Begin dragging the dialog from its title bar. Interactive children (the
+   * close button) never start a drag, so close and drag stay conflict-free.
+   */
+  const beginDrag = (event: ReactMouseEvent<HTMLElement>): void => {
+    if (event.button !== 0 || dragAnchor.current !== null || isInteractive(event.target)) return
+    const dialog = event.currentTarget.closest('[data-dialog]')
+    if (!(dialog instanceof HTMLElement)) return
+    event.preventDefault()
+    const rect = dialog.getBoundingClientRect()
+    const anchor: MarketDragAnchor = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    }
+    dragAnchor.current = anchor
+    setDragging(true)
+    setDragPosition(clampToViewport(anchor.left, anchor.top, anchor.width, anchor.height))
+
+    const onMove = (moveEvent: MouseEvent): void => {
+      const start = dragAnchor.current
+      if (start === null) return
+      setDragPosition(clampToViewport(
+        start.left + moveEvent.clientX - start.pointerX,
+        start.top + moveEvent.clientY - start.pointerY,
+        start.width,
+        start.height,
+      ))
+    }
+    const finish = (): void => {
+      dragAnchor.current = null
+      setDragging(false)
+      detachDrag.current?.()
+    }
+    detachDrag.current = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', finish)
+      window.removeEventListener('blur', finish)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', finish)
+    window.addEventListener('blur', finish)
+  }
 
   const runSearch = (keywords: string, page: number): void => {
     const gen = ++generation.current
@@ -625,16 +735,31 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   return (
     <div className={css.backdrop}>
       <section
-        className={css.dialog}
+        className={dragging ? `${css.dialog} ${css.marketDragging}` : css.dialog}
         role="dialog"
         aria-modal="true"
         aria-label={t('marketDialogTitle')}
         data-dialog="market"
+        style={dragPosition === null ? undefined : {
+          position: 'fixed',
+          left: `${dragPosition.left}px`,
+          top: `${dragPosition.top}px`,
+        }}
       >
-        <header className={css.dialogHeader}>
+        <header
+          className={`${css.dialogHeader} ${css.dragHandle}`}
+          data-drag-handle
+          onMouseDown={beginDrag}
+        >
           <strong>{t('marketDialogTitle')}</strong>
-          <button type="button" className={css.textButton} data-market-close onClick={onClose}>
-            {t('closeButton')}
+          <button
+            type="button"
+            className={css.dialogClose}
+            data-market-close
+            aria-label={t('closeButton')}
+            onClick={onClose}
+          >
+            <CloseGlyph />
           </button>
         </header>
 

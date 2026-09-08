@@ -1,4 +1,4 @@
-﻿/* Managed-plugins tab styles: semantic dsw tokens only, no literal colors. */
+/* Managed-plugins tab styles: semantic dsw tokens only, no literal colors. */
 
 .section {
   display: flex;
@@ -595,4 +595,47 @@
 
 .pagination .count {
   text-align: center;
+}
+
+/* --- draggable GitHub dialog header + dsh settings-modal close button --- */
+
+/* Title row as the drag handle: never start a drag from interactive children
+   (the close button), and skip text selection while grabbing. */
+.dragHandle {
+  align-items: center;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Active drag: grabbing cursor over the whole dialog. */
+.marketDragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+/* Close button (dsh settings-modal chrome): 28x28 round, transparent, hover
+   tint, × glyph inherits label-primary from currentColor. */
+.dialogClose {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 28px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dialogClose:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dialogClose:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
 }

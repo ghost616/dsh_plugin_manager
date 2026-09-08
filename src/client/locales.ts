@@ -17,8 +17,10 @@ export const zh = {
   error: '暂时无法读取插件。',
   /** Retry a failed load. */
   retry: '重试',
-  /** Managed-list filter label and placeholder. */
-  search: '搜索插件',
+  /** Managed-list local filter placeholder (explicit local semantics). */
+  filterPlaceholder: '筛选已管理插件',
+  /** Auxiliary hint under the managed-list filter: local only, no network. */
+  filterHint: '仅本地过滤，不联网',
   /** No managed plugin records exist at all. */
   empty: '暂无已管理插件。',
   /** The managed-list filter matched no rows. */
@@ -164,7 +166,8 @@ export const en: Record<MarketManageLocaleKey, string> = {
   loading: 'Reading managed plugins…',
   error: 'Plugins are temporarily unavailable.',
   retry: 'Retry',
-  search: 'Search plugins',
+  filterPlaceholder: 'Filter managed plugins',
+  filterHint: 'Local filtering only, no network request',
   empty: 'No managed plugins yet.',
   emptySearch: 'No matching plugins.',
   countUnit: 'plugins',

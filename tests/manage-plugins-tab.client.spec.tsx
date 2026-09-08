@@ -1,4 +1,4 @@
-﻿// @vitest-environment jsdom
+// @vitest-environment jsdom
 /**
  * Component spec of the managed-roster part of the plugin-market page:
  * status header, enable toggles, roster states, and unmount hygiene.
@@ -133,6 +133,13 @@ describe('ManagePluginsTab managed roster', () => {
     await flush()
 
     const input = host.querySelector<HTMLInputElement>('[data-manage-filter]')!
+    expect(input.placeholder).toBe(zh.filterPlaceholder)
+    expect(input.getAttribute('aria-label')).toBe(zh.filterPlaceholder)
+    const hintId = input.getAttribute('aria-describedby')
+    const hint = hintId === null ? null : document.getElementById(hintId)
+    expect(hint?.getAttribute('data-manage-filter-hint')).not.toBeNull()
+    expect(hint?.textContent).toContain(zh.filterHint)
+
     await typeInto(input, 'demo')
     expect(rows(host)).toHaveLength(1)
     expect(rows(host)[0]?.getAttribute('data-plugin-key')).toBe('gh-a')
