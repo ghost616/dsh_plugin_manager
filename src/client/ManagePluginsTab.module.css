@@ -491,6 +491,11 @@
   max-height: 46vh;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* Comfortable breathing room between the content and the right-edge
+     scrollbar. The padding sits outside the bar's gutter (never underneath
+     it) for both the default 8px WebKit bar and Firefox's thin bar; the width
+     comes from ui-theme's --dsh-scrollbar-width instead of a hardcoded px. */
+  padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
 /* Search error zone inside the scroll body: localized message + retry. */
