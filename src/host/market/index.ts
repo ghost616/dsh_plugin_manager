@@ -123,6 +123,7 @@ export {
   type GitHubRepoMeta,
   type GitHubResponseHeaders,
   type GitHubRequestOptions,
+  SEARCH_EXCLUDED_REPOS,
 } from './github.ts'
 
 export {

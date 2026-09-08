@@ -19,8 +19,6 @@ export const zh = {
   retry: '重试',
   /** Managed-list local filter placeholder (explicit local semantics). */
   filterPlaceholder: '筛选已管理插件',
-  /** Auxiliary hint under the managed-list filter: local only, no network. */
-  filterHint: '仅本地过滤，不联网',
   /** No managed plugin records exist at all. */
   empty: '暂无已管理插件。',
   /** The managed-list filter matched no rows. */
@@ -95,6 +93,10 @@ export const zh = {
   nextPage: '下一页',
   /** Pagination status line. */
   pagination: '第 {current}/{total} 页 · 共 {count} 个结果',
+  /** Page-jump input accessible label. */
+  jumpToLabel: '跳转页码',
+  /** Page-jump go action. */
+  jumpGo: '跳转',
   /** External repository link label on a result card. */
   repoLinkLabel: '在 GitHub 打开',
   /** Stargazer count of a search result. */
@@ -167,7 +169,6 @@ export const en: Record<MarketManageLocaleKey, string> = {
   error: 'Plugins are temporarily unavailable.',
   retry: 'Retry',
   filterPlaceholder: 'Filter managed plugins',
-  filterHint: 'Local filtering only, no network request',
   empty: 'No managed plugins yet.',
   emptySearch: 'No matching plugins.',
   countUnit: 'plugins',
@@ -205,6 +206,8 @@ export const en: Record<MarketManageLocaleKey, string> = {
   prevPage: 'Previous page',
   nextPage: 'Next page',
   pagination: 'Page {current} of {total} · {count} results',
+  jumpToLabel: 'Jump to page',
+  jumpGo: 'Go',
   repoLinkLabel: 'Open on GitHub',
   starsLabel: '{count} stars',
   updatedLabel: 'Updated {date}',

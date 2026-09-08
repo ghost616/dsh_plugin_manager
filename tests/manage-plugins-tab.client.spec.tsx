@@ -135,10 +135,8 @@ describe('ManagePluginsTab managed roster', () => {
     const input = host.querySelector<HTMLInputElement>('[data-manage-filter]')!
     expect(input.placeholder).toBe(zh.filterPlaceholder)
     expect(input.getAttribute('aria-label')).toBe(zh.filterPlaceholder)
-    const hintId = input.getAttribute('aria-describedby')
-    const hint = hintId === null ? null : document.getElementById(hintId)
-    expect(hint?.getAttribute('data-manage-filter-hint')).not.toBeNull()
-    expect(hint?.textContent).toContain(zh.filterHint)
+    expect(input.getAttribute('aria-describedby')).toBeNull()
+    expect(host.querySelector('[data-manage-filter-hint]')).toBeNull()
 
     await typeInto(input, 'demo')
     expect(rows(host)).toHaveLength(1)

@@ -3,7 +3,8 @@
 
 import {
   useEffect, useMemo, useRef, useState,
-  type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode,
+  type FormEvent, type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent, type ReactNode,
 } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -24,9 +25,6 @@ import css from './ManagePluginsTab.module.css'
 
 /** Fixed page size of the GitHub search dialog (mirrors the wire perPage). */
 export const SEARCH_PAGE_SIZE = 10
-
-/** id linking the managed-list filter input to its local-only hint line. */
-const MANAGE_FILTER_HINT_ID = 'plugin-market-filter-hint'
 
 /** Registration-side channel face (lazy closures, wired by apply()). */
 export interface ManagePluginsTabInjected {
@@ -208,7 +206,6 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
             value={query}
             placeholder={t('filterPlaceholder')}
             aria-label={t('filterPlaceholder')}
-            aria-describedby={MANAGE_FILTER_HINT_ID}
             data-manage-filter
             onChange={(event) => { onQuery(event.currentTarget.value) }}
           />
@@ -217,11 +214,6 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
           {`${String(entries.length)} ${t('countUnit')}`}
         </p>
       </div>
-      {entries.length > 0 ? (
-        <p id={MANAGE_FILTER_HINT_ID} className={css.hint} data-manage-filter-hint>
-          {t('filterHint')}
-        </p>
-      ) : null}
 
       {visible.length > 0 ? (
         <ul className={css.list} data-plugin-list>
@@ -634,6 +626,7 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<MarketSearchState>({ phase: 'idle' })
   const [installTarget, setInstallTarget] = useState<string | null>(null)
+  const [jumpValue, setJumpValue] = useState('')
   const [dragPosition, setDragPosition] = useState<{ left: number; top: number } | null>(null)
   const [dragging, setDragging] = useState(false)
   const dragAnchor = useRef<MarketDragAnchor | null>(null)
@@ -743,6 +736,22 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
     ? 0
     : Math.ceil(ready.pageData.totalCount / SEARCH_PAGE_SIZE)
   const installing = installTarget !== null
+
+  /** Jump to an explicit page: clamp 1..totalPages; invalid input no-ops. */
+  const commitJump = (): void => {
+    if (ready === undefined || searchState.phase === 'loading') return
+    const parsed = Number.parseInt(jumpValue.trim(), 10)
+    setJumpValue('')
+    if (!Number.isFinite(parsed)) return
+    const target = Math.min(Math.max(parsed, 1), Math.max(totalPages, 1))
+    if (target !== ready.page) runSearch(ready.keywords, target)
+  }
+
+  const onJumpKey = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    commitJump()
+  }
 
   return (
     <div className={css.backdrop}>
@@ -884,6 +893,30 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
                 count: String(ready.pageData.totalCount),
               })}
             </p>
+            {totalPages > 1 ? (
+              <span className={css.pageJump}>
+                <input
+                  className={css.pageJumpInput}
+                  type="text"
+                  inputMode="numeric"
+                  value={jumpValue}
+                  placeholder={String(ready.page)}
+                  aria-label={t('jumpToLabel')}
+                  data-page-input
+                  onChange={(event) => { setJumpValue(event.currentTarget.value) }}
+                  onKeyDown={onJumpKey}
+                />
+                <button
+                  type="button"
+                  className={css.textButton}
+                  data-page-go
+                  disabled={searchState.phase === 'loading'}
+                  onClick={commitJump}
+                >
+                  {t('jumpGo')}
+                </button>
+              </span>
+            ) : null}
             <button
               type="button"
               className={css.textButton}

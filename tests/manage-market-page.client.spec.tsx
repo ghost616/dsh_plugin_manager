@@ -64,6 +64,12 @@ function submitForm(input: HTMLInputElement): void {
   act(() => { input.form?.requestSubmit() })
 }
 
+async function pressEnter(input: HTMLInputElement): Promise<void> {
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  })
+}
+
 function pageOf(page: number, items: SearchItemSeed[], totalCount: number) {
   const pageData = makeSearchPage(items)
   return { totalCount, items: pageData.items }
@@ -581,3 +587,84 @@ describe('ManagePluginsTab GitHub modal auto browse & scroll zones', () => {
   })
 })
 
+describe('ManagePluginsTab GitHub modal page jump', () => {
+  const seeded = (page: number): SearchItemSeed[] => Array.from({ length: 10 }, (_, i) => ({
+    repository: `acme/plugin-${String((page - 1) * 10 + i + 1)}`,
+    name: `plugin-${String((page - 1) * 10 + i + 1)}`,
+  }))
+
+  it('jumps to a typed page on Enter and keeps the current keywords', async () => {
+    const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, seeded(page), 25))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'agents')
+
+    const input = dialog.querySelector<HTMLInputElement>('[data-page-input]')
+    expect(input).not.toBeNull()
+    await typeInto(input!, '3')
+    await pressEnter(input!)
+    await flush()
+
+    expect(search).toHaveBeenLastCalledWith('agents', 3)
+    expect(dialog.querySelector('[data-page-count]')?.textContent)
+      .toContain(zh.pagination.replace('{current}', '3').replace('{total}', '3').replace('{count}', '25'))
+  })
+
+  it('clamps out-of-range jumps and ignores invalid input', async () => {
+    const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, seeded(page), 25))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'agents')
+
+    const input = dialog.querySelector<HTMLInputElement>('[data-page-input]')!
+    await typeInto(input, '99')
+    await pressEnter(input)
+    await flush()
+    expect(search).toHaveBeenLastCalledWith('agents', 3)
+    const expectedLast = zh.pagination.replace('{current}', '3').replace('{total}', '3').replace('{count}', '25')
+    expect(dialog.querySelector('[data-page-count]')?.textContent).toContain(expectedLast)
+
+    // Re-resolve the input: the jump re-renders the footer subtree.
+    const inputAfterJump = dialog.querySelector<HTMLInputElement>('[data-page-input]')!
+    await typeInto(inputAfterJump, '0')
+    await pressEnter(inputAfterJump)
+    await flush()
+    expect(search).toHaveBeenLastCalledWith('agents', 1)
+    const expectedFirst = zh.pagination.replace('{current}', '1').replace('{total}', '3').replace('{count}', '25')
+    expect(dialog.querySelector('[data-page-count]')?.textContent).toContain(expectedFirst)
+
+    const callsBefore = search.mock.calls.length
+    const inputAgain = dialog.querySelector<HTMLInputElement>('[data-page-input]')!
+    await typeInto(inputAgain, 'abc')
+    await pressEnter(inputAgain)
+    await flush()
+    expect(search.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('jumps via the go button and omits the control for a single page', async () => {
+    const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, seeded(page), 25))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'agents')
+
+    const input = dialog.querySelector<HTMLInputElement>('[data-page-input]')!
+    await typeInto(input, '2')
+    await click(dialog.querySelector('[data-page-go]'))
+    await flush()
+    expect(search).toHaveBeenLastCalledWith('agents', 2)
+
+    const single = vi.fn(async () => pageOf(1, seeded(1).slice(0, 10), 10))
+    const singleProps = managePageHarness({ search: single })
+    const host2 = await renderInto(<ManagePluginsTab {...singleProps.props} />)
+    await flush()
+    const dialog2 = await openMarket(host2)
+    await searchIn(dialog2, 'agents')
+    expect(dialog2.querySelector('[data-page-input]')).toBeNull()
+  })
+})

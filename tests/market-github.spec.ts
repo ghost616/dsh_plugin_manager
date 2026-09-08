@@ -111,6 +111,47 @@ describe('GitHubMarket.search', () => {
     expect(JSON.stringify(await market.search({}))).not.toContain('secret-token-abc')
   })
 
+  it('always sends the -repo exclusion for the harness repository (empty and keyword queries)', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, body: jsonBody(0, { items: [] }) }))
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    const exclusion = '-repo%3Adeepseek-ai%2Fdeepseek-harness'
+    await market.search({}) // browse-all
+    expect(calls[0]?.url).toContain('topic%3Adsh-plugin')
+    expect(calls[0]?.url).toContain(exclusion)
+    await market.search({ keywords: 'agent' })
+    expect(calls[1]?.url).toContain('topic%3Adsh-plugin+agent')
+    expect(calls[1]?.url).toContain(exclusion)
+    expect(calls[1]?.url).not.toContain('%20') // single-token q: encoded spaces are '+'
+  })
+
+  it('filters the harness repository out of items even when the server returns it', async () => {
+    const { fetchImpl } = stubGitHub(() => ({
+      status: 200,
+      body: {
+        total_count: 2,
+        items: [
+          { full_name: 'deepseek-ai/deepseek-harness', name: 'deepseek-harness', stargazers_count: 5 },
+          { full_name: 'owner/sample-plugin', name: 'sample-plugin', stargazers_count: 42 },
+        ],
+      },
+    }))
+    const page = await new GitHubMarket({ fetchImpl, tokenProvider: () => null }).search({ keywords: 'cool' })
+    expect(page.items.map((item) => item.repository)).toEqual(['owner/sample-plugin'])
+    expect(page.items.some((item) => item.repository === 'deepseek-ai/deepseek-harness')).toBe(false)
+    // The server counted the excluded repo; the page-level drop keeps counts consistent.
+    expect(page.totalCount).toBe(1)
+  })
+
+  it('keeps counts untouched when the server already honored the exclusion', async () => {
+    const { fetchImpl } = stubGitHub(() => ({
+      status: 200,
+      body: { total_count: 1, items: [{ full_name: 'owner/sample-plugin', name: 'sample-plugin' }] },
+    }))
+    const page = await new GitHubMarket({ fetchImpl, tokenProvider: () => null }).search({})
+    expect(page.totalCount).toBe(1)
+    expect(page.items).toHaveLength(1)
+  })
+
   it('maps 401 to github/auth', async () => {
     const { fetchImpl } = stubGitHub(() => ({ status: 401, body: { message: 'Bad credentials' } }))
     await rejectCode(new GitHubMarket({ fetchImpl, tokenProvider: () => null }).search({}), 'github/auth')

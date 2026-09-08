@@ -674,3 +674,29 @@
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 2px;
 }
+.pageJump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.pageJumpInput {
+  width: 64px;
+  height: 30px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 8px;
+  padding: 0 8px;
+  outline: none;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+}
+
+.pageJumpInput:focus-visible {
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}

@@ -184,7 +184,18 @@ export interface GitHubSearchOptions {
   readonly sort?: 'stars' | 'updated'
   readonly order?: 'desc' | 'asc'
   readonly signal?: AbortSignal
+  /**
+   * Repositories excluded from the results (always applied, whether or not a
+   * keyword is given). GitHub's repository search honors the negated
+   * `-repo:owner/name` qualifier, so the exclusion rides in the query string;
+   * a defensive item-level filter below keeps the guarantee even when a
+   * server variant ignores the qualifier.
+   */
+  readonly exclude?: readonly string[]
 }
+
+/** Repository never offered as an install source: the harness's own checkout. */
+export const SEARCH_EXCLUDED_REPOS: readonly string[] = ['deepseek-ai/deepseek-harness']
 
 /** Options for {@link GitHubMarket}. */
 export interface GitHubMarketOptions {
@@ -224,13 +235,20 @@ export class GitHubMarket {
 
   /**
    * Search repositories under `topic:dsh-plugin` (optionally narrowed by
-   * keywords). Result items carry repository metadata only.
+   * keywords), always excluding {@link SEARCH_EXCLUDED_REPOS} (and any
+   * caller-provided exclusions). Result items carry repository metadata only.
    */
   async search(options: GitHubSearchOptions = {}): Promise<GitHubSearchPage> {
     const perPage = clampInt(options.perPage, 1, 100, 20)
     const page = clampInt(options.page, 1, 1_000_000, 1)
     const keywords = options.keywords?.trim()
-    const q = keywords ? `topic:dsh-plugin ${keywords}` : 'topic:dsh-plugin'
+    const excludes = options.exclude ?? SEARCH_EXCLUDED_REPOS
+    // Query-level exclusion: GitHub repository search supports negated
+    // qualifiers (`-QUALIFIER`); this keeps counts and paging server-side.
+    const parts = ['topic:dsh-plugin']
+    if (keywords) parts.push(keywords)
+    for (const repo of excludes) parts.push(`-repo:${repo}`)
+    const q = parts.join(' ')
     const params = new URLSearchParams({
       q,
       per_page: String(perPage),
@@ -252,13 +270,23 @@ export class GitHubMarket {
     if (!Array.isArray(rawItems)) {
       throw new MarketError('github/bad-response', 'The GitHub search response carries no items array.', { path: url })
     }
+    const excluded = new Set<string>(excludes)
     const items: GitHubRepoSummary[] = []
+    let filteredOut = 0
     for (const raw of rawItems) {
       const item = toRepoSummary(raw)
+      if (item && excluded.has(item.repository)) {
+        filteredOut += 1
+        continue
+      }
       if (item) items.push(item)
     }
+    const serverTotal = typeof data.total_count === 'number' ? data.total_count : items.length
     return {
-      totalCount: typeof data.total_count === 'number' ? data.total_count : items.length,
+      // If a server variant ignored the exclusion qualifier, the single
+      // excluded repo may have been counted server-side; subtract what this
+      // page actually dropped so counts stay consistent.
+      totalCount: Math.max(0, serverTotal - filteredOut),
       items,
     }
   }
