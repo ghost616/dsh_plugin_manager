@@ -1,5 +1,5 @@
-﻿/** Full plugin-market settings page: repository status, GitHub search +
- *  install confirmation, and the managed roster with enable/remove. */
+﻿/** Full plugin-market settings page: repository status, a "Browse GitHub"
+ *  modal (paginated plugin search + install), and the managed roster. */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -19,6 +19,9 @@ import type {
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
 
+/** Fixed page size of the GitHub search dialog (mirrors the wire perPage). */
+export const SEARCH_PAGE_SIZE = 10
+
 /** Registration-side channel face (lazy closures, wired by apply()). */
 export interface ManagePluginsTabInjected {
   /** Read the market activation facts. */
@@ -31,8 +34,8 @@ export interface ManagePluginsTabInjected {
   requestRemove: (key: PluginMarketKey) => Promise<RemoveRequest>
   /** Removal step 2: confirm and run the removal. */
   confirmRemove: (key: PluginMarketKey, token: string) => Promise<RemoveOutcome>
-  /** GitHub topic search for dsh plugins. */
-  search: (keywords: string) => Promise<GitHubSearchPage>
+  /** One GitHub search page (1-based page, fixed page size). */
+  search: (keywords: string, page: number) => Promise<GitHubSearchPage>
   /** Review one repository and mint its single-use install confirmation. */
   previewInstall: (repository: string) => Promise<PluginInstallReview>
   /** Run the double-confirmed install for a reviewed repository. */
@@ -63,12 +66,6 @@ type StatusState =
   | { readonly status: 'error'; readonly failure: ManageUiFailure }
   | { readonly status: 'idle' }
   | { readonly status: 'configured'; readonly path: string }
-
-type SearchState =
-  | { readonly phase: 'idle' }
-  | { readonly phase: 'loading' }
-  | { readonly phase: 'error'; readonly failure: ManageUiFailure }
-  | { readonly phase: 'ready'; readonly page: GitHubSearchPage }
 
 const PHASE_KEYS = {
   pending: 'phasePending',
@@ -134,7 +131,6 @@ function matches(view: ManagedPluginView, normalizedQuery: string): boolean {
 function shortDate(iso: string | null): string {
   return iso === null ? '' : iso.slice(0, 10)
 }
-
 /* ------------------------------------------------------------------------ */
 /* Repository status header                                                 */
 /* ------------------------------------------------------------------------ */
@@ -170,6 +166,7 @@ function StatusHeader({ state, t, onRetry }: {
     </p>
   )
 }
+
 /* ------------------------------------------------------------------------ */
 /* Managed roster section                                                   */
 /* ------------------------------------------------------------------------ */
@@ -189,8 +186,6 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
   const entries = snapshot?.entries ?? []
   const visible = entries.filter(view => matches(view, normalized))
 
-  // The caller owns the loading surface; an empty ready list is the only
-  // empty state drawn here.
   if (snapshot === undefined) return null
 
   return (
@@ -294,70 +289,8 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
     </section>
   )
 }
-
 /* ------------------------------------------------------------------------ */
-/* Search results                                                           */
-/* ------------------------------------------------------------------------ */
-
-function SearchResults({ page, managedRepositories, t, onInstall }: {
-  readonly page: GitHubSearchPage
-  readonly managedRepositories: ReadonlySet<string>
-  readonly t: Translate
-  readonly onInstall: (repository: string) => void
-}): ReactNode {
-  if (page.items.length === 0) {
-    return <p className={css.status} role="status" data-search-empty>{t('searchEmpty')}</p>
-  }
-  return (
-    <div className={css.results} data-search-results>
-      <p className={css.count} data-result-count>
-        {`${String(page.totalCount)} ${t('countUnit')}`}
-      </p>
-      <ul className={css.resultList} data-result-list>
-        {page.items.map(item => (
-          <li key={item.repository} className={css.resultCard} data-result-card data-repository={item.repository}>
-            <div className={css.resultMain}>
-              <a
-                className={css.resultName}
-                href={item.url}
-                target="_blank"
-                rel="noreferrer"
-                data-result-link
-                title={item.repository}
-              >
-                {item.name}
-              </a>
-              {item.description === null ? null : (
-                <p className={css.resultDescription} data-result-description>{item.description}</p>
-              )}
-              <span className={css.resultMeta}>
-                <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
-                {item.updatedAt === null ? null : (
-                  <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
-                )}
-                <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
-                  {t('repoLinkLabel')}
-                </a>
-              </span>
-            </div>
-            <button
-              type="button"
-              className={css.primaryButton}
-              data-install-trigger
-              data-install-repository={item.repository}
-              data-managed={managedRepositories.has(item.repository) ? 'true' : undefined}
-              onClick={() => { onInstall(item.repository) }}
-            >
-              {managedRepositories.has(item.repository) ? t('updateButton') : t('installButton')}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-/* ------------------------------------------------------------------------ */
-/* Install confirmation dialog                                              */
+/* Install confirmation dialog (shared by the GitHub modal)                 */
 /* ------------------------------------------------------------------------ */
 
 type InstallPhase =
@@ -526,6 +459,7 @@ function InstallDialog({ repository, previewInstall, install, t, onClose, onInst
     </div>
   )
 }
+
 /* ------------------------------------------------------------------------ */
 /* Removal dialog (two-step double confirmation)                            */
 /* ------------------------------------------------------------------------ */
@@ -620,6 +554,216 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
     </div>
   )
 }
+/* ------------------------------------------------------------------------ */
+/* GitHub browse modal (search + pagination + install entry)                */
+/* ------------------------------------------------------------------------ */
+
+type MarketSearchState =
+  | { readonly phase: 'idle' }
+  | { readonly phase: 'loading'; readonly keywords: string; readonly page: number }
+  | { readonly phase: 'error'; readonly failure: ManageUiFailure; readonly keywords: string; readonly page: number }
+  | { readonly phase: 'ready'; readonly pageData: GitHubSearchPage; readonly keywords: string; readonly page: number }
+
+function GitHubDialog({ t, installed, search, previewInstall, install, onClose, onInstalled }: {
+  readonly t: Translate
+  readonly installed: ReadonlySet<string>
+  readonly search: ManagePluginsTabInjected['search']
+  readonly previewInstall: ManagePluginsTabInjected['previewInstall']
+  readonly install: ManagePluginsTabInjected['install']
+  readonly onClose: () => void
+  /** Notified after a successful install so the page can refresh the roster. */
+  readonly onInstalled: (repository: string) => void
+}): ReactNode {
+  const mounted = useRef(true)
+  const generation = useRef(0)
+  const [query, setQuery] = useState('')
+  const [searchState, setSearchState] = useState<MarketSearchState>({ phase: 'idle' })
+  const [installTarget, setInstallTarget] = useState<string | null>(null)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  const runSearch = (keywords: string, page: number): void => {
+    const gen = ++generation.current
+    setSearchState({ phase: 'loading', keywords, page })
+    void Promise.resolve()
+      .then(() => search(keywords, page))
+      .then(
+        (pageData) => {
+          if (!mounted.current || gen !== generation.current) return
+          setSearchState({ phase: 'ready', pageData, keywords, page })
+        },
+        (error: unknown) => {
+          if (!mounted.current || gen !== generation.current) return
+          setSearchState({ phase: 'error', failure: toUiFailure(error), keywords, page })
+        },
+      )
+  }
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault()
+    const keywords = query.trim()
+    if (keywords.length === 0) return
+    runSearch(keywords, 1)
+  }
+
+  const goPage = (next: number): void => {
+    const current = searchState
+    if (current.phase === 'ready' || current.phase === 'error' || current.phase === 'loading') {
+      runSearch(current.keywords, next)
+    }
+  }
+
+  const ready = searchState.phase === 'ready' ? searchState : undefined
+  const totalPages = ready === undefined || ready.pageData.totalCount === 0
+    ? 0
+    : Math.ceil(ready.pageData.totalCount / SEARCH_PAGE_SIZE)
+  const installing = installTarget !== null
+
+  return (
+    <div className={css.backdrop}>
+      <section
+        className={css.dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('marketDialogTitle')}
+        data-dialog="market"
+      >
+        <header className={css.dialogHeader}>
+          <strong>{t('marketDialogTitle')}</strong>
+          <button type="button" className={css.textButton} data-market-close onClick={onClose}>
+            {t('closeButton')}
+          </button>
+        </header>
+
+        <form className={css.searchForm} onSubmit={submit}>
+          <input
+            type="search"
+            value={query}
+            placeholder={t('githubSearch')}
+            aria-label={t('githubSearch')}
+            data-market-search-input
+            onChange={(event) => { setQuery(event.currentTarget.value) }}
+          />
+          <button
+            type="submit"
+            className={css.primaryButton}
+            data-market-search-submit
+            disabled={query.trim().length === 0 || searchState.phase === 'loading'}
+          >
+            {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
+          </button>
+        </form>
+
+        {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
+        {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
+        {searchState.phase === 'error' ? (
+          <p className={css.dialogError} role="alert" data-market-error data-error-code={searchState.failure.code}>
+            {failureText(searchState.failure, t)}
+          </p>
+        ) : null}
+        {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
+          <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
+        ) : null}
+
+        {ready !== undefined && ready.pageData.items.length > 0 ? (
+          <>
+            <ul className={css.resultList} data-market-results>
+              {ready.pageData.items.map(item => {
+                const managed = installed.has(item.repository)
+                return (
+                  <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
+                    <div className={css.resultMain}>
+                      <a
+                        className={css.resultName}
+                        href={item.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        data-market-link
+                        title={item.repository}
+                      >
+                        {item.name}
+                      </a>
+                      {item.description === null ? null : (
+                        <p className={css.resultDescription} data-result-description>{item.description}</p>
+                      )}
+                      <span className={css.resultMeta}>
+                        <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
+                        {item.updatedAt === null ? null : (
+                          <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
+                        )}
+                        <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
+                          {t('repoLinkLabel')}
+                        </a>
+                      </span>
+                    </div>
+                    <div className={css.resultActions}>
+                      {managed ? (
+                        <span className={css.installedBadge} data-installed>{t('installedBadge')}</span>
+                      ) : null}
+                      <button
+                        type="button"
+                        className={css.primaryButton}
+                        data-install-trigger
+                        data-install-repository={item.repository}
+                        disabled={managed}
+                        onClick={() => { if (!managed) setInstallTarget(item.repository) }}
+                      >
+                        {t('installButton')}
+                      </button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+
+            <footer className={css.pagination} data-pagination>
+              <button
+                type="button"
+                className={css.textButton}
+                data-page-prev
+                disabled={ready.page <= 1 || searchState.phase === 'loading'}
+                onClick={() => { goPage(ready.page - 1) }}
+              >
+                {t('prevPage')}
+              </button>
+              <p className={css.count} data-page-count>
+                {t('pagination', {
+                  current: String(ready.page),
+                  total: String(Math.max(totalPages, 1)),
+                  count: String(ready.pageData.totalCount),
+                })}
+              </p>
+              <button
+                type="button"
+                className={css.textButton}
+                data-page-next
+                disabled={totalPages === 0 || ready.page >= totalPages || searchState.phase === 'loading'}
+                onClick={() => { goPage(ready.page + 1) }}
+              >
+                {t('nextPage')}
+              </button>
+            </footer>
+          </>
+        ) : null}
+
+        {installing ? (
+          <InstallDialog
+            key={installTarget}
+            repository={installTarget!}
+            previewInstall={previewInstall}
+            install={install}
+            t={t}
+            onClose={() => { setInstallTarget(null) }}
+            onInstalled={(repository) => { onInstalled(repository) }}
+          />
+        ) : null}
+      </section>
+    </div>
+  )
+}
 
 /* ------------------------------------------------------------------------ */
 /* Page                                                                     */
@@ -629,7 +773,7 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
 export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const {
     status: readStatus, list, setEnabled, requestRemove, confirmRemove,
-    search: runSearch, previewInstall, install, t,
+    search, previewInstall, install, t,
   } = props
   const mounted = useRef(true)
   const [statusState, setStatusState] = useState<StatusState>({ status: 'loading' })
@@ -638,9 +782,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const [query, setQuery] = useState('')
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
   const [rowFailures, setRowFailures] = useState<ReadonlyMap<string, ManageUiFailure>>(() => new Map())
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchState, setSearchState] = useState<SearchState>({ phase: 'idle' })
-  const [installTarget, setInstallTarget] = useState<string | null>(null)
+  const [marketOpen, setMarketOpen] = useState(false)
   const [removeTarget, setRemoveTarget] = useState<ManagedPluginView | null>(null)
 
   useEffect(() => {
@@ -736,21 +878,8 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     })()
   }
 
-  const submitSearch = (event: FormEvent): void => {
-    event.preventDefault()
-    const keywords = searchQuery.trim()
-    if (keywords.length === 0) return
-    setSearchState({ phase: 'loading' })
-    void Promise.resolve()
-      .then(() => runSearch(keywords))
-      .then(
-        (page) => { if (mounted.current) setSearchState({ phase: 'ready', page }) },
-        (error: unknown) => { if (mounted.current) setSearchState({ phase: 'error', failure: toUiFailure(error) }) },
-      )
-  }
-
-  const configured = statusState.status === 'configured'
-  const managedRepositories = useMemo(() => {
+  /** Installed markers: repositories recorded by the market (GitHub only). */
+  const installedRepositories = useMemo(() => {
     const found = new Set<string>()
     if (listState.status !== 'ready') return found
     for (const view of listState.snapshot.entries) {
@@ -760,52 +889,25 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     return found
   }, [listState])
 
+  const configured = statusState.status === 'configured'
+
   return (
     <div className={css.page} data-manage-tab>
       <StatusHeader state={statusState} t={t} onRetry={loadStatus} />
 
-      {statusState.status === 'configured' || statusState.status === 'error' ? (
-        <section className={css.section} data-search-section>
-          <form className={css.searchForm} onSubmit={submitSearch}>
-            <input
-              type="search"
-              value={searchQuery}
-              placeholder={t('githubSearch')}
-              aria-label={t('githubSearch')}
-              data-search-input
-              onChange={(event) => { setSearchQuery(event.currentTarget.value) }}
-            />
-            <button
-              type="submit"
-              className={css.primaryButton}
-              data-search-submit
-              disabled={searchQuery.trim().length === 0 || searchState.phase === 'loading'}
-            >
-              {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
-            </button>
-          </form>
-
-          {searchState.phase === 'idle' ? <p className={css.hint} data-search-idle>{t('searchIdle')}</p> : null}
-          {searchState.phase === 'loading' ? <p className={css.status} role="status" data-search-loading>{t('searching')}</p> : null}
-          {searchState.phase === 'error' ? (
-            <p className={css.dialogError} role="alert" data-search-error data-error-code={searchState.failure.code}>
-              {failureText(searchState.failure, t)}
-            </p>
-          ) : null}
-          {searchState.phase === 'ready' ? (
-            <SearchResults
-              page={searchState.page}
-              managedRepositories={managedRepositories}
-              t={t}
-              onInstall={(repository) => { setInstallTarget(repository) }}
-            />
-          ) : null}
-        </section>
-      ) : null}
-
       {configured ? (
         <>
-          <h3 className={css.heading} data-managed-heading>{t('managedHeading')}</h3>
+          <div className={css.pageToolbar}>
+            <h3 className={css.heading} data-managed-heading>{t('managedHeading')}</h3>
+            <button
+              type="button"
+              className={css.primaryButton}
+              data-open-market
+              onClick={() => { setMarketOpen(true) }}
+            >
+              {t('openMarket')}
+            </button>
+          </div>
           {listState.status === 'error' ? (
             <div className={css.failure} data-list-error data-error-code={listState.failure.code}>
               <p role="alert">{t('error')}</p>
@@ -828,13 +930,15 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
         </>
       ) : null}
 
-      {installTarget !== null ? (
-        <InstallDialog
-          key={installTarget}
-          repository={installTarget}
-          previewInstall={previewInstall} install={install}
+      {marketOpen ? (
+        <GitHubDialog
+          key="market"
           t={t}
-          onClose={() => { setInstallTarget(null) }}
+          installed={installedRepositories}
+          search={search}
+          previewInstall={previewInstall}
+          install={install}
+          onClose={() => { setMarketOpen(false) }}
           onInstalled={(repository) => { reloadList(); void repository }}
         />
       ) : null}
@@ -848,7 +952,6 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
           onClose={() => { setRemoveTarget(null) }}
           onRemoved={(key) => {
             setRemoveTarget(null)
-            // Drop the removed row locally; a full reload keeps phases fresh.
             setListState(current => current.status === 'ready'
               ? {
                 status: 'ready',
@@ -862,5 +965,4 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     </div>
   )
 }
-
 

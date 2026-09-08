@@ -117,10 +117,12 @@ export async function confirmRemove(
 export async function search(
   keywords: string | null,
   perPage?: number,
+  page?: number,
 ): Promise<MarketCallResult<GitHubSearchPage>> {
   const args: Record<string, unknown> = {}
   if (keywords !== null && keywords !== undefined) args.keywords = keywords
   if (perPage !== undefined) args.perPage = perPage
+  if (page !== undefined) args.page = page
   return post<GitHubSearchPage>('search', args)
 }
 

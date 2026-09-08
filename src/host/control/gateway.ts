@@ -191,13 +191,14 @@ export class MarketControllerGateway extends TypertRemoteService {
     }
   }
 
-  /** GitHub topic search (dsh-plugin). */
+  /** GitHub topic search (dsh-plugin); page is 1-based (null ⇒ page 1). */
   @Remote('search')
-  async search(keywords: string | null, perPage: number | null): Promise<GitHubSearchPage> {
+  async search(keywords: string | null, perPage: number | null, page: number | null): Promise<GitHubSearchPage> {
     try {
       return await this.deps.source.search({
         ...(keywords === null || keywords === undefined ? {} : { keywords }),
         ...(perPage === null || perPage === undefined ? {} : { perPage }),
+        page: page === null || page === undefined ? 1 : page,
       })
     } catch (error) {
       throw toRemoteError(error)

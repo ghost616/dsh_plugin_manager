@@ -35,7 +35,12 @@ import type { ProtectionPolicy } from './protect.ts'
 
 /** Search engine surface of the host GitHub client. */
 export interface SearchEnginePort {
-  search(options: { readonly keywords?: string; readonly perPage?: number }): Promise<GitHubSearchPage>
+  search(options: {
+    readonly keywords?: string
+    readonly perPage?: number
+    /** 1-based page; the host layer clamps out-of-range values. */
+    readonly page?: number
+  }): Promise<GitHubSearchPage>
 }
 
 /** Preview engine surface of the host manifest previewer. */
@@ -102,12 +107,19 @@ export class MarketSourceOperations {
 
   constructor(private readonly deps: MarketSourceDeps) {}
 
-  /** GitHub topic search. Requires a configured repository (market not idle). */
-  async search(options: { readonly keywords?: string; readonly perPage?: number } = {}): Promise<GitHubSearchPage> {
+  /**
+   * GitHub topic search. Requires a configured repository (market not idle).
+   * `page` is 1-based and defaults to 1; range clamping of oversized pages is
+   * the host GitHubMarket's responsibility, so this layer forwards it as-is.
+   */
+  async search(
+    options: { readonly keywords?: string; readonly perPage?: number; readonly page?: number } = {},
+  ): Promise<GitHubSearchPage> {
     this.requireRepository()
     return this.deps.searchEngine.search({
       ...(options.keywords === undefined ? {} : { keywords: options.keywords }),
       ...(options.perPage === undefined ? {} : { perPage: options.perPage }),
+      page: options.page ?? 1,
     })
   }
 

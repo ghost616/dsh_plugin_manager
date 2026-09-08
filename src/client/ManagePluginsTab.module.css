@@ -551,3 +551,48 @@
   justify-content: flex-end;
   gap: 8px;
 }
+.pageToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pageToolbar .heading {
+  margin: 0;
+}
+
+.installedBadge {
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.resultActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: none;
+}
+
+.resultActions .primaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+  padding-top: 10px;
+}
+
+.pagination .count {
+  text-align: center;
+}

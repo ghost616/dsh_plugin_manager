@@ -477,8 +477,7 @@ export function managePageHarness(overrides: Record<string, unknown> = {}) {
     setEnabled: vi.fn(async () => { throw new Error('unused default setEnabled') }),
     requestRemove: vi.fn(async () => { throw new Error('unused default requestRemove') }),
     confirmRemove: vi.fn(async () => { throw new Error('unused default confirmRemove') }),
-    search: vi.fn(async () => makeSearchPage([])),
-    previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
+    search: vi.fn(async () => makeSearchPage([])),    previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
     install: vi.fn(async () => { throw new Error('unused default install') }),
   }
   const props = {

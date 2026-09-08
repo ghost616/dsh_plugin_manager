@@ -46,7 +46,11 @@ import {
 } from './channel.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import { en, zh } from './locales.ts'
-import { ManagePluginsTab, type ManagePluginsTabInjected } from './ManagePluginsTab.tsx'
+import {
+  ManagePluginsTab,
+  SEARCH_PAGE_SIZE,
+  type ManagePluginsTabInjected,
+} from './ManagePluginsTab.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -88,8 +92,8 @@ export function apply(ctx: Context): void {
       return unwrap(await channelConfirmRemove(key, token))
     }
   const searchRecord: ManagePluginsTabInjected['search'] =
-    async (keywords: string): Promise<GitHubSearchPage> => {
-      return unwrap(await channelSearch(keywords))
+    async (keywords: string, page: number): Promise<GitHubSearchPage> => {
+      return unwrap(await channelSearch(keywords, SEARCH_PAGE_SIZE, page))
     }
   const previewInstallRecord: ManagePluginsTabInjected['previewInstall'] =
     async (repository: string): Promise<PluginInstallReview> => {

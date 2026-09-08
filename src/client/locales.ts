@@ -81,6 +81,18 @@ export const zh = {
   githubAuthError: 'GitHub 请求被拒绝（认证问题或仓库不存在）。',
   /** Search results heading. */
   searchResults: '搜索结果',
+  /** Top-level button opening the GitHub browse modal. */
+  openMarket: '打开 GitHub',
+  /** GitHub browse modal title. */
+  marketDialogTitle: 'GitHub 插件',
+  /** Badge of an already-installed search result row. */
+  installedBadge: '已安装',
+  /** Previous search page. */
+  prevPage: '上一页',
+  /** Next search page. */
+  nextPage: '下一页',
+  /** Pagination status line. */
+  pagination: '第 {current}/{total} 页 · 共 {count} 个结果',
   /** External repository link label on a result card. */
   repoLinkLabel: '在 GitHub 打开',
   /** Stargazer count of a search result. */
@@ -184,6 +196,12 @@ export const en: Record<MarketManageLocaleKey, string> = {
   networkError: 'Network error; the service is unreachable.',
   githubAuthError: 'GitHub request rejected (auth problem or missing repository).',
   searchResults: 'Search results',
+  openMarket: 'Browse GitHub',
+  marketDialogTitle: 'GitHub plugins',
+  installedBadge: 'Installed',
+  prevPage: 'Previous page',
+  nextPage: 'Next page',
+  pagination: 'Page {current} of {total} · {count} results',
   repoLinkLabel: 'Open on GitHub',
   starsLabel: '{count} stars',
   updatedLabel: 'Updated {date}',

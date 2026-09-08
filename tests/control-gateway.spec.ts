@@ -29,19 +29,19 @@ afterEach(async () => {
 
 function gatewayWith(
   options: { idle?: boolean } = {},
-): { ctx: Context; gateway: MarketControllerGateway } {
+): { ctx: Context; gateway: MarketControllerGateway; engines: import('./support/control-testbed.ts').FakeEngines } {
   const ctx = new Context()
   contexts.push(ctx)
   const bed = testbed()
   const controller = options.idle === true ? null : bed.controller()
   const repository = options.idle === true ? null : bed.repository
-  const source = makeSourceOps(repository, bed.records)
+  const source = makeSourceOps(repository, bed.records, bed.engines)
   const gateway = new MarketControllerGateway(ctx, {
     controller: () => controller,
     repository: () => repository,
     source,
   })
-  return { ctx, gateway }
+  return { ctx, gateway, engines: bed.engines }
 }
 
 describe('MarketControllerGateway host Remote surface', () => {
@@ -107,11 +107,18 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(remoteErrorOf(idleInstall)).toMatchObject({ code: 'market/idle' })
   })
 
-  it('delegates search to the source engine', async () => {
-    const { gateway } = gatewayWith()
-    const page = await gateway.search('agents', 5)
+  it('delegates search to the source engine and forwards the 1-based page', async () => {
+    const { gateway, engines } = gatewayWith()
+    const page = await gateway.search('agents', 5, 2)
     expect(page.totalCount).toBe(0)
     expect(page.items).toEqual([])
+    expect(engines.searchCalls).toEqual([{ keywords: 'agents', perPage: 5, page: 2 }])
+  })
+
+  it('defaults a null gateway search page to 1', async () => {
+    const { gateway, engines } = gatewayWith()
+    await gateway.search('agents', null, null)
+    expect(engines.searchCalls).toEqual([{ keywords: 'agents', page: 1 }])
   })
 
   it('maps MarketControlError to a wire RemoteError with the stable code', () => {

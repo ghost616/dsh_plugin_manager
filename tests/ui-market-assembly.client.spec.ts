@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Assembly spec of the plugin-market browser half: a real Cordis Context with
  * functional replicas of the platform slot/locale runtimes (the dsh platform
  * packages are module-table rows of the shipped web shell, not installed
@@ -136,7 +136,11 @@ describe('plugin-market browser half assembly', () => {
 
     const pages = [
       { call: () => face.status(), method: 'status', args: {} },
-      { call: () => face.search('agents'), method: 'search', args: { keywords: 'agents' } },
+      {
+        call: () => face.search('agents', 2),
+        method: 'search',
+        args: { keywords: 'agents', perPage: 10, page: 2 },
+      },
       { call: () => face.previewInstall('octocat/demo'), method: 'previewInstall', args: { repository: 'octocat/demo' } },
     ]
     for (const page of pages) {

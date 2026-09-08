@@ -167,9 +167,16 @@ describe('market control web channel (M1 source ops round trip)', () => {
       }],
     }
 
-    const search = await call(router, 'search', { keywords: 'demo', perPage: 10 })
+    // Default page is 1; an explicit 1-based page is forwarded unchanged.
+    const searchDefault = await call(router, 'search', { keywords: 'demo' })
+    expect(searchDefault).toMatchObject({ ok: true, value: { totalCount: 1 } })
+
+    const search = await call(router, 'search', { keywords: 'demo', perPage: 10, page: 2 })
     expect(search).toMatchObject({ ok: true, value: { totalCount: 1 } })
-    expect(engines.searchCalls).toEqual([{ keywords: 'demo', perPage: 10 }])
+    expect(engines.searchCalls).toEqual([
+      { keywords: 'demo', page: 1 },
+      { keywords: 'demo', perPage: 10, page: 2 },
+    ])
 
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)

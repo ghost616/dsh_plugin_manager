@@ -37,9 +37,23 @@ describe('MarketSourceOperations search', () => {
   it('passes search options through and returns the engine page', async () => {
     const bed = testbed()
     const source = ops(bed)
-    const page = await source.search({ keywords: 'agents', perPage: 3 })
+    const page = await source.search({ keywords: 'agents', perPage: 3, page: 2 })
     expect(page).toEqual({ totalCount: 0, items: [] })
-    expect(bed.engines.searchCalls).toEqual([{ keywords: 'agents', perPage: 3 }])
+    expect(bed.engines.searchCalls).toEqual([{ keywords: 'agents', perPage: 3, page: 2 }])
+  })
+
+  it('defaults an omitted page to 1', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await source.search({ keywords: 'agents' })
+    expect(bed.engines.searchCalls).toEqual([{ keywords: 'agents', page: 1 }])
+  })
+
+  it('forwards oversized pages unchanged (host GitHubMarket clamps 1..1e6)', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await source.search({ page: 1_000_001 })
+    expect(bed.engines.searchCalls).toEqual([{ page: 1_000_001 }])
   })
 
   it('propagates engine failures with their stable github/* codes', async () => {

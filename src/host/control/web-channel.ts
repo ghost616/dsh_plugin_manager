@@ -86,11 +86,12 @@ const METHODS: Record<string, MethodMeta> = {
   },
   search: {
     parameters: [],
-    optional: ['keywords', 'perPage'],
+    optional: ['keywords', 'perPage', 'page'],
     call: (gateway, args) => {
       const keywords = optionalString(args.keywords)
       const perPage = optionalNumber(args.perPage)
-      return gateway.search(keywords, perPage)
+      const page = optionalNumber(args.page)
+      return gateway.search(keywords, perPage, page)
     },
   },
   previewInstall: {
