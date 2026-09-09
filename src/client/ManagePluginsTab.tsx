@@ -2,7 +2,7 @@
  *  modal (paginated plugin search + install), and the managed roster. */
 
 import {
-  useEffect, useMemo, useRef, useState,
+  useEffect, useId, useMemo, useRef, useState,
   type FormEvent, type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent, type ReactNode,
 } from 'react'
@@ -644,6 +644,62 @@ function isRefInstalled(
   return installedVersions.get(repository)?.has(version) ?? false
 }
 
+/* ------------------------------------------------------------------------ */
+/* Merged branch/tag picker model                                            */
+/* ------------------------------------------------------------------------ */
+
+/** One installable ref of a repository: a branch or a tag. */
+export type RefKind = 'branch' | 'tag'
+
+/** One installable ref of a repository: a branch or a tag. */
+export interface RefChoice {
+  readonly kind: RefKind
+  readonly name: string
+}
+
+const BRANCH_VALUE_PREFIX = 'branch:'
+const TAG_VALUE_PREFIX = 'tag:'
+
+/** Encode one ref into its dropdown value so the kind survives selection. */
+export function refValueOf(choice: RefChoice): string {
+  return `${choice.kind}:${choice.name}`
+}
+
+/** Decode a dropdown value; null = the empty "select…" placeholder. */
+export function parseRefValue(value: string): RefChoice | null {
+  if (value.startsWith(BRANCH_VALUE_PREFIX)) {
+    return { kind: 'branch', name: value.slice(BRANCH_VALUE_PREFIX.length) }
+  }
+  if (value.startsWith(TAG_VALUE_PREFIX)) {
+    return { kind: 'tag', name: value.slice(TAG_VALUE_PREFIX.length) }
+  }
+  return null
+}
+
+/** Branch names with the default branch pinned first (whenever it is listed). */
+function orderedBranchNames(
+  branches: readonly string[],
+  defaultBranch: string,
+): readonly string[] {
+  if (!branches.includes(defaultBranch)) return branches
+  return [defaultBranch, ...branches.filter(name => name !== defaultBranch)]
+}
+
+/** Human dropdown text of one ref: the name plus optional localized marks. */
+function refDisplayText(
+  choice: RefChoice,
+  defaultBranch: string,
+  installed: boolean,
+  t: Translate,
+): string {
+  const marks: string[] = []
+  if (choice.kind === 'branch' && choice.name === defaultBranch) {
+    marks.push(t('defaultBranchLabel'))
+  }
+  if (installed) marks.push(t('installedBadge'))
+  return marks.length === 0 ? choice.name : `${choice.name} (${marks.join(', ')})`
+}
+
 /**
  * README block of the detail view. Renders marked → DOMPurify under the
  * `.marketReadme` scope class; a null HTML result (unexpected render error)
@@ -669,9 +725,10 @@ function DetailReadme({ readme, url, defaultBranch, t }: {
 }
 
 /**
- * Ready detail content: repository metadata header, branch group, tag group
- * and the README block. Rendered inside the modal's scrolling zone so long
- * README documents scroll instead of stretching the dialog shell.
+ * Ready detail content: repository metadata header, one merged branch/tag
+ * dropdown with the single install action below it, and the README block.
+ * Rendered inside the modal's scrolling zone so long README documents scroll
+ * instead of stretching the dialog shell.
  */
 function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
   readonly detail: RepositoryDetail
@@ -680,7 +737,35 @@ function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
   /** Open the install review for one branch/tag ref of this repository. */
   readonly onInstall: (version: string) => void
 }): ReactNode {
+  const selectId = useId()
+  const [selectedValue, setSelectedValue] = useState('')
   const hasRefs = detail.branches.length > 0 || detail.tags.length > 0
+  const selection = parseRefValue(selectedValue)
+  const selectedInstalled = selection !== null
+    && isRefInstalled(installedVersions, detail.repository, selection.name)
+  const branchChoices: readonly RefChoice[] =
+    orderedBranchNames(detail.branches, detail.defaultBranch).map(name => ({ kind: 'branch', name }))
+  const tagChoices: readonly RefChoice[] =
+    detail.tags.map(name => ({ kind: 'tag', name }))
+
+  const renderOption = (choice: RefChoice): ReactNode => {
+    const installed = isRefInstalled(installedVersions, detail.repository, choice.name)
+    const isDefault = choice.kind === 'branch' && choice.name === detail.defaultBranch
+    return (
+      <option
+        key={refValueOf(choice)}
+        value={refValueOf(choice)}
+        data-ref-option
+        data-ref-kind={choice.kind}
+        data-ref-name={choice.name}
+        data-default-branch={isDefault ? 'true' : undefined}
+        data-ref-installed={installed ? 'true' : undefined}
+      >
+        {refDisplayText(choice, detail.defaultBranch, installed, t)}
+      </option>
+    )
+  }
+
   return (
     <div className={css.detailBody} data-detail-view data-repository={detail.repository}>
       <div className={css.detailHeader} data-detail-header>
@@ -708,74 +793,40 @@ function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
         </span>
       </div>
 
-      {!hasRefs ? <p className={css.status} role="status" data-detail-empty>{t('detailEmpty')}</p> : null}
-
-      {detail.branches.length > 0 ? (
-        <section className={css.refGroup} data-branch-group aria-label={t('branchesTitle')}>
-          <h4 className={css.groupTitle} data-branch-title>{t('branchesTitle')}</h4>
-          <ul className={css.refList}>
-            {detail.branches.map(name => {
-              const installed = isRefInstalled(installedVersions, detail.repository, name)
-              return (
-                <li key={name} className={css.refItem} data-branch-item data-ref-name={name}>
-                  <span className={css.refMeta}>
-                    <code className={css.refName} data-branch-name>{name}</code>
-                    {name === detail.defaultBranch ? (
-                      <span className={css.refHint} data-default-branch>{t('defaultBranchLabel')}</span>
-                    ) : null}
-                  </span>
-                  <span className={css.refActions}>
-                    {installed ? (
-                      <span className={css.installedBadge} data-version-installed>{t('installedBadge')}</span>
-                    ) : null}
-                    <button
-                      type="button"
-                      className={css.primaryButton}
-                      data-branch-install
-                      disabled={installed}
-                      onClick={() => { onInstall(name) }}
-                    >
-                      {t('installButton')}
-                    </button>
-                  </span>
-                </li>
-              )
-            })}
-          </ul>
+      {!hasRefs ? <p className={css.status} role="status" data-detail-empty>{t('detailEmpty')}</p> : (
+        <section className={css.refPicker} data-ref-picker aria-label={t('refSelectLabel')}>
+          <label className={css.groupTitle} data-ref-picker-label htmlFor={selectId}>
+            {t('refSelectLabel')}
+          </label>
+          <select
+            id={selectId}
+            className={css.refSelect}
+            value={selectedValue}
+            aria-label={t('refSelectLabel')}
+            data-ref-select
+            onChange={(event) => { setSelectedValue(event.currentTarget.value) }}
+          >
+            <option value="" data-ref-placeholder>{t('refSelectPlaceholder')}</option>
+            <optgroup label={t('branchesTitle')} data-ref-optgroup data-ref-kind="branch">
+              {branchChoices.map(renderOption)}
+            </optgroup>
+            <optgroup label={t('tagsTitle')} data-ref-optgroup data-ref-kind="tag">
+              {tagChoices.map(renderOption)}
+            </optgroup>
+          </select>
+          <div className={css.refPickerActions}>
+            <button
+              type="button"
+              className={css.primaryButton}
+              data-ref-install
+              disabled={selection === null || selectedInstalled}
+              onClick={() => { if (selection !== null) onInstall(selection.name) }}
+            >
+              {selectedInstalled ? t('installedBadge') : t('installButton')}
+            </button>
+          </div>
         </section>
-      ) : null}
-
-      {detail.tags.length > 0 ? (
-        <section className={css.refGroup} data-tag-group aria-label={t('tagsTitle')}>
-          <h4 className={css.groupTitle} data-tag-title>{t('tagsTitle')}</h4>
-          <ul className={css.refList}>
-            {detail.tags.map(name => {
-              const installed = isRefInstalled(installedVersions, detail.repository, name)
-              return (
-                <li key={name} className={css.refItem} data-tag-item data-ref-name={name}>
-                  <span className={css.refMeta}>
-                    <code className={css.refName} data-tag-name>{name}</code>
-                  </span>
-                  <span className={css.refActions}>
-                    {installed ? (
-                      <span className={css.installedBadge} data-version-installed>{t('installedBadge')}</span>
-                    ) : null}
-                    <button
-                      type="button"
-                      className={css.primaryButton}
-                      data-tag-install
-                      disabled={installed}
-                      onClick={() => { onInstall(name) }}
-                    >
-                      {t('installButton')}
-                    </button>
-                  </span>
-                </li>
-              )
-            })}
-          </ul>
-        </section>
-      ) : null}
+      )}
 
       <section className={css.readmeSection} data-readme-section aria-label={t('readmeHeading')}>
         <h4 className={css.groupTitle} data-readme-title>{t('readmeHeading')}</h4>
@@ -793,6 +844,7 @@ function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
     </div>
   )
 }
+
 
 /**
  * Detail view of one repository: localizes the load states and hands the ready

@@ -61,6 +61,15 @@ async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
   })
 }
 
+/** Pick one option of a controlled select (fires the change React listens to). */
+async function selectIn(select: Element | null | undefined, value: string): Promise<void> {
+  if (select === null || select === undefined) throw new Error('select target missing')
+  await act(async () => {
+    ;(select as HTMLSelectElement).value = value
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+}
+
 function submitForm(input: HTMLInputElement): void {
   act(() => { input.form?.requestSubmit() })
 }
@@ -274,11 +283,18 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     expect(repositoryDetail).toHaveBeenCalledWith('acme/helper')
 
-    const devButton = dialog.querySelector(
-      '[data-branch-item][data-ref-name="dev"] [data-branch-install]',
-    ) as HTMLButtonElement
-    expect(devButton.disabled).toBe(false)
-    await click(devButton)
+    // One merged dropdown encodes every ref with its kind; nothing is chosen
+    // on entry, so the single install action below stays disabled.
+    const select = dialog.querySelector('[data-ref-select]')
+    const installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
+    expect(select).not.toBeNull()
+    expect(select?.querySelector('option[data-ref-name="dev"]')?.getAttribute('value')).toBe('branch:dev')
+    expect(installAction.disabled).toBe(true)
+
+    await selectIn(select, 'branch:dev')
+    await flush()
+    expect(installAction.disabled).toBe(false)
+    await click(installAction)
     await flush()
     const installDialog = dialog.querySelector('[data-dialog="install"]')
     expect(installDialog).not.toBeNull()
@@ -291,14 +307,18 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     expect(dialog.querySelector('[data-dialog="install"]')).toBeNull()
 
-    // The roster reloaded; the installed branch now carries the version mark
-    // while the untouched main branch stays installable.
-    const devItem = dialog.querySelector('[data-branch-item][data-ref-name="dev"]')
-    expect(devItem?.querySelector('[data-version-installed]')?.textContent).toContain(zh.installedBadge)
-    expect((devItem?.querySelector('[data-branch-install]') as HTMLButtonElement).disabled).toBe(true)
-    expect((dialog.querySelector(
-      '[data-branch-item][data-ref-name="main"] [data-branch-install]',
-    ) as HTMLButtonElement).disabled).toBe(false)
+    // The roster reloaded; the installed dev ref is annotated inside the
+    // dropdown, and the still-selected action turns into an installed state.
+    // Switching to the untouched main branch re-enables a fresh install.
+    const devOption = select?.querySelector('option[data-ref-name="dev"]')
+    expect(devOption?.getAttribute('data-ref-installed')).toBe('true')
+    expect(devOption?.textContent).toContain(zh.installedBadge)
+    expect(installAction.disabled).toBe(true)
+    expect(installAction.textContent).toContain(zh.installedBadge)
+    await selectIn(select, 'branch:main')
+    await flush()
+    expect(installAction.disabled).toBe(false)
+    expect(installAction.textContent).toContain(zh.installButton)
     expect(list).toHaveBeenCalledTimes(2)
   })
 
@@ -327,8 +347,11 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
 
     await click(dialog.querySelector('[data-row-details]'))
     await flush()
-    await click(dialog.querySelector('[data-branch-install]'))
+    await selectIn(dialog.querySelector('[data-ref-select]'), 'branch:main')
     await flush()
+    await click(dialog.querySelector('[data-ref-install]'))
+    await flush()
+    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'main')
     const installDialog = dialog.querySelector('[data-dialog="install"]')
     expect(installDialog?.querySelector('[data-overwrite-notice]')).not.toBeNull()
     const degraded = installDialog?.querySelector('[data-degraded-notice]')
@@ -358,7 +381,9 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
 
     await click(dialog.querySelector('[data-row-details]'))
     await flush()
-    await click(dialog.querySelector('[data-tag-item][data-ref-name="v1.0.0"] [data-tag-install]'))
+    await selectIn(dialog.querySelector('[data-ref-select]'), 'tag:v1.0.0')
+    await flush()
+    await click(dialog.querySelector('[data-ref-install]'))
     await flush()
     expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'v1.0.0')
     await click(dialog.querySelector('[data-install-confirm]'))
@@ -718,7 +743,7 @@ describe('ManagePluginsTab GitHub modal page jump', () => {
 })
 
 describe('ManagePluginsTab GitHub repository detail view', () => {
-  it('opens the detail view from a row and renders metadata, ref groups and the README', async () => {
+  it('opens the detail view from a row and renders metadata, the merged ref dropdown and the README', async () => {
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository,
       name: 'helper',
@@ -754,13 +779,39 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     expect(view?.textContent).toContain(zh.updatedLabel.replace('{date}', '2026-03-02'))
     expect(view?.querySelector('[data-detail-link]')?.getAttribute('href')).toContain('github.com')
 
-    const branchGroup = view?.querySelector('[data-branch-group]')
-    expect(branchGroup?.querySelector('[data-branch-title]')?.textContent).toContain(zh.branchesTitle)
-    expect(branchGroup?.querySelectorAll('[data-branch-item]')).toHaveLength(2)
-    expect(branchGroup?.querySelector('[data-default-branch]')?.textContent).toContain(zh.defaultBranchLabel)
-    const tagGroup = view?.querySelector('[data-tag-group]')
-    expect(tagGroup?.querySelector('[data-tag-title]')?.textContent).toContain(zh.tagsTitle)
-    expect(tagGroup?.querySelectorAll('[data-tag-item]')).toHaveLength(2)
+    // One merged dropdown below the metadata: a labelled select whose options
+    // are grouped branches→tags, values encode the ref kind, the default
+    // branch is pinned first with its mark, and an empty "select…" item leads.
+    const select = view?.querySelector('[data-ref-select]') as HTMLSelectElement | null
+    expect(select).not.toBeNull()
+    expect(select?.getAttribute('aria-label')).toBe(zh.refSelectLabel)
+    expect(view?.querySelector('[data-ref-picker-label]')?.textContent).toContain(zh.refSelectLabel)
+    const options = select ? Array.from(select.options) : []
+    expect(options[0]?.value).toBe('')
+    expect(options[0]?.textContent).toContain(zh.refSelectPlaceholder)
+
+    const groups = Array.from(select?.querySelectorAll('[data-ref-optgroup]') ?? [])
+    expect(groups).toHaveLength(2)
+    expect(groups[0]?.getAttribute('data-ref-kind')).toBe('branch')
+    expect(groups[0]?.getAttribute('label')).toBe(zh.branchesTitle)
+    expect(groups[1]?.getAttribute('data-ref-kind')).toBe('tag')
+    expect(groups[1]?.getAttribute('label')).toBe(zh.tagsTitle)
+
+    const branchOptions = Array.from(groups[0]?.querySelectorAll('[data-ref-option]') ?? [])
+    expect(branchOptions).toHaveLength(2)
+    expect(branchOptions[0]?.getAttribute('data-ref-name')).toBe('main')
+    expect(branchOptions[0]?.getAttribute('value')).toBe('branch:main')
+    expect(branchOptions[0]?.getAttribute('data-default-branch')).toBe('true')
+    expect(branchOptions[0]?.textContent).toContain(zh.defaultBranchLabel)
+    expect(branchOptions[1]?.getAttribute('data-ref-name')).toBe('dev')
+    expect(branchOptions[1]?.getAttribute('value')).toBe('branch:dev')
+    expect(branchOptions[1]?.getAttribute('data-default-branch')).toBeNull()
+
+    const tagOptions = Array.from(groups[1]?.querySelectorAll('[data-ref-option]') ?? [])
+    expect(tagOptions).toHaveLength(2)
+    expect(tagOptions[0]?.getAttribute('value')).toBe('tag:v1.0.0')
+    expect(tagOptions[1]?.getAttribute('value')).toBe('tag:v2.0.0')
+    expect((view?.querySelector('[data-ref-install]') as HTMLButtonElement).disabled).toBe(true)
 
     const readme = view?.querySelector('[data-readme]')
     expect(readme).not.toBeNull()
@@ -831,15 +882,24 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
       '[data-market-card][data-repository="acme/helper"] [data-row-details]',
     ))
     await flush()
-    const helperTags = dialog.querySelectorAll('[data-tag-group] [data-tag-item]')
-    expect(helperTags[0]?.getAttribute('data-ref-name')).toBe('v1.0.0')
-    expect(helperTags[0]?.querySelector('[data-version-installed]')?.textContent).toContain(zh.installedBadge)
-    expect((helperTags[0]?.querySelector('[data-tag-install]') as HTMLButtonElement).disabled).toBe(true)
-    expect(helperTags[1]?.getAttribute('data-ref-name')).toBe('v2.0.0')
-    expect(helperTags[1]?.querySelector('[data-version-installed]')).toBeNull()
-    expect((helperTags[1]?.querySelector('[data-tag-install]') as HTMLButtonElement).disabled).toBe(false)
-    expect(dialog.querySelector('[data-branch-group] [data-version-installed]')).toBeNull()
-    expect((dialog.querySelector('[data-branch-install]') as HTMLButtonElement).disabled).toBe(false)
+    const select = dialog.querySelector('[data-ref-select]')
+    const installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
+    const installedTag = select?.querySelector('option[data-ref-name="v1.0.0"]')
+    expect(installedTag?.getAttribute('data-ref-installed')).toBe('true')
+    expect(installedTag?.textContent).toContain(zh.installedBadge)
+    expect(select?.querySelector('option[data-ref-name="v2.0.0"]')?.getAttribute('data-ref-installed')).toBeNull()
+    expect(select?.querySelector('option[data-ref-name="main"]')?.getAttribute('data-ref-installed')).toBeNull()
+
+    // Choosing an installed ref disables the action in its installed state:
+    // the detail view offers no overwrite/reinstall path from here.
+    await selectIn(select, 'tag:v1.0.0')
+    await flush()
+    expect(installAction.disabled).toBe(true)
+    expect(installAction.textContent).toContain(zh.installedBadge)
+    await selectIn(select, 'tag:v2.0.0')
+    await flush()
+    expect(installAction.disabled).toBe(false)
+    expect(installAction.textContent).toContain(zh.installButton)
 
     // legacy (version null): the repository is managed but no ref can match.
     await click(dialog.querySelector('[data-detail-back]'))
@@ -848,9 +908,10 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
       '[data-market-card][data-repository="acme/legacy"] [data-row-details]',
     ))
     await flush()
-    expect(dialog.querySelectorAll('[data-tag-group] [data-version-installed]')).toHaveLength(0)
-    expect(dialog.querySelectorAll('[data-branch-group] [data-version-installed]')).toHaveLength(0)
-    expect((dialog.querySelector('[data-tag-install]') as HTMLButtonElement).disabled).toBe(false)
+    expect(dialog.querySelectorAll('[data-ref-select] option[data-ref-installed]')).toHaveLength(0)
+    await selectIn(dialog.querySelector('[data-ref-select]'), 'tag:v0.9.0')
+    await flush()
+    expect((dialog.querySelector('[data-ref-install]') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('renders the README as sanitized HTML with resolved relative links and images', async () => {
@@ -944,8 +1005,8 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     await click(dialog.querySelector('[data-row-details]'))
     await flush()
 
-    expect(dialog.querySelector('[data-branch-group]')).toBeNull()
-    expect(dialog.querySelector('[data-tag-group]')).toBeNull()
+    expect(dialog.querySelector('[data-ref-picker]')).toBeNull()
+    expect(dialog.querySelector('[data-ref-select]')).toBeNull()
     expect(dialog.querySelector('[data-detail-empty]')?.textContent).toContain(zh.detailEmpty)
     expect(dialog.querySelector('[data-readme]')).not.toBeNull()
   })

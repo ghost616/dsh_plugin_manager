@@ -95,6 +95,10 @@ export const zh = {
   detailError: '无法读取仓库详情。',
   /** Detail-view empty state (no installable branch or tag). */
   detailEmpty: '该仓库没有可安装的分支或标签。',
+  /** Label of the merged branch/tag dropdown in the detail view. */
+  refSelectLabel: '选择要安装的分支或标签',
+  /** Placeholder of the detail-view ref dropdown (nothing selected). */
+  refSelectPlaceholder: '请选择…',
   /** Search-result row action opening the repository detail view. */
   rowDetails: '详情',
   /** Branch-name group heading of the detail view. */
@@ -229,6 +233,8 @@ export const en: Record<MarketManageLocaleKey, string> = {
   detailLoading: 'Loading repository details…',
   detailError: 'Could not load repository details.',
   detailEmpty: 'This repository has no installable branches or tags.',
+  refSelectLabel: 'Select a branch or tag to install',
+  refSelectPlaceholder: 'Select…',
   rowDetails: 'Details',
   branchesTitle: 'Branches',
   defaultBranchLabel: 'default branch',
