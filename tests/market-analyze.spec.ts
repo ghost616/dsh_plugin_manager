@@ -16,7 +16,7 @@ import {
   type LlmCompletion,
   type RawCheckoutAnalysis,
 } from '../src/host/market/index.ts'
-import { NodeFs } from '../src/host/market/fs.ts'
+import { NodeFs, type FsLike } from '../src/host/market/fs.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { makeSuiteTmp, removeTmp } from './support/tmpdir.ts'
 
@@ -170,6 +170,29 @@ describe('collectCheckoutSnapshot', () => {
     expect(snapshot.entries).toContainEqual({ name: 'src', directory: true })
     expect(snapshot.entries).toContainEqual({ name: 'index.js', directory: false })
   })
+
+  it('normalizes a missing checkout directory to market/io (no raw fs error)', async () => {
+    const missing = join(root, 'does-not-exist-dir')
+    const error = await expectAsyncMarketError(() => collectCheckoutSnapshot(missing), 'market/io')
+    expect(error.message).toContain(missing)
+  })
+
+  it('normalizes native entry-inspection failures to market/io with path and cause', async () => {
+    const dir = join(root, 'io-stat')
+    await mkdir(dir, { recursive: true })
+    const failingFs = {
+      readdir: async () => ['index.js'],
+      stat: async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      },
+      lstat: async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      },
+    } as unknown as FsLike
+    const error = await expectAsyncMarketError(() => collectCheckoutSnapshot(dir, { fs: failingFs }), 'market/io')
+    expect(error.message).toContain('index.js')
+    expect(error.message).toContain('permission denied')
+  })
 })
 
 describe('buildAnalyzePrompt', () => {
@@ -199,6 +222,13 @@ describe('buildAnalyzePrompt', () => {
     const prompt = buildAnalyzePrompt(snapshotOf({ readme: null, manifest: null }))
     expect(prompt.user).toContain('(no README found)')
     expect(prompt.user).toContain('(absent or unreadable)')
+  })
+
+  it('treats repository text as untrusted (prompt-injection defense)', () => {
+    const prompt = buildAnalyzePrompt(snapshotOf())
+    expect(prompt.system).toContain('UNTRUSTED')
+    expect(prompt.system).toMatch(/ignore any instructional/i)
+    expect(prompt.system).toContain('objective facts')
   })
 })
 
@@ -399,6 +429,27 @@ describe('InstallAnalyzer', () => {
       const analyzer = new InstallAnalyzer({ complete, provider: 'ds-provider', model: 'deepseek-chat' })
       await expectAsyncMarketError(() => analyzer.analyze(snapshotOf()), code)
     }
+  })
+
+  it('normalizes a native hasFile probe failure to market/io (no raw fs error)', async () => {
+    const complete = vi.fn<LlmCompletion>(async () => validText)
+    const hasFile = vi.fn(async () => {
+      throw new Error('probe boom')
+    })
+    const analyzer = new InstallAnalyzer({ complete, provider: 'ds-provider', model: 'deepseek-chat', hasFile })
+    const error = await expectAsyncMarketError(() => analyzer.analyze(snapshotOf()), 'market/io')
+    expect(hasFile).toHaveBeenCalledWith('index.js')
+    expect(error.message).toContain('probe boom')
+  })
+
+  it('passes an already-stable MarketError from the hasFile probe through unchanged', async () => {
+    const complete = vi.fn<LlmCompletion>(async () => validText)
+    const original = new MarketError('market/llm-failed', 'stable failure from the probe')
+    const hasFile = vi.fn(async () => {
+      throw original
+    })
+    const analyzer = new InstallAnalyzer({ complete, provider: 'ds-provider', model: 'deepseek-chat', hasFile })
+    await expectAsyncMarketError(() => analyzer.analyze(snapshotOf()), 'market/llm-failed')
   })
 })
 

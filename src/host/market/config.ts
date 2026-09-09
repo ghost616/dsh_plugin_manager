@@ -82,7 +82,7 @@ export function normalizeMarketConfig(input: unknown, env: ResolveEnvironment): 
   if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
     throw new MarketError(
       'config/invalid',
-      'Plugin-market Config must be an object with an optional "repositoryPath" string.',
+      'Plugin-market Config must be an object with an optional "repositoryPath" string and an optional "llm" section { provider?: string, model?: string } for the smart-install analyzer.',
     )
   }
   const raw = (input ?? {}) as Record<string, unknown>

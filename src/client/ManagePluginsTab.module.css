@@ -690,8 +690,9 @@
   user-select: none;
 }
 
-/* Close button (dsh settings-modal chrome): 28x28 round, transparent, hover
-   tint, × glyph inherits label-primary from currentColor. */
+/* Close button (dsh ui-primitives Modal .close chrome): 28x28 on a transparent
+   fill with an 8px rounded corner, label-secondary glyph (currentColor) and an
+   interactive hover tint — matches the modal close pattern exactly. */
 .dialogClose {
   flex: none;
   display: inline-flex;
@@ -701,10 +702,10 @@
   height: 28px;
   padding: 0;
   border: none;
-  border-radius: 28px;
+  border-radius: 8px;
   background: transparent;
   cursor: pointer;
-  color: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-label-secondary);
 }
 
 .dialogClose:hover {

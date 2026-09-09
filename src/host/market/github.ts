@@ -377,6 +377,8 @@ export class GitHubMarket {
 
   /**
    * Fetch the `name` entries of a paginated branch/tag listing endpoint.
+   * The runtime token is resolved once per call (not per page), so the token
+   * source — e.g. the environment reader — is never consulted in a loop.
    * @param kind endpoint suffix: `branches` or `tags`
    */
   private async listRefNames(
@@ -385,10 +387,11 @@ export class GitHubMarket {
     signal?: AbortSignal,
   ): Promise<readonly string[]> {
     const ownerRepo = parseRepositorySlug(slug)
+    const token = await this.resolveToken()
     const names: string[] = []
     for (let page = 1; page <= GITHUB_LIST_MAX_PAGES; page += 1) {
       const url = `${this.baseUrl}/repos/${ownerRepo}/${kind}?per_page=${GITHUB_LIST_PAGE_SIZE}&page=${page}`
-      const request: GitHubRequestOptions = { token: await this.resolveToken() }
+      const request: GitHubRequestOptions = { token }
       if (signal !== undefined) request.signal = signal
       const body = await githubFetch(this.fetchImpl, url, request)
       const data = parseGitHubJson(body.text, url)

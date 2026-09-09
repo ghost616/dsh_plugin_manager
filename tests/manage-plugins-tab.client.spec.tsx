@@ -48,6 +48,14 @@ async function click(element: Element | null | undefined): Promise<void> {
   await act(async () => { (element as HTMLButtonElement).click() })
 }
 
+/** Dispatch one keyboard event on a target (bubbles to its dialog shell). */
+async function pressKey(target: Element | null | undefined, key: string): Promise<void> {
+  if (target === null || target === undefined) throw new Error('keyboard target missing')
+  await act(async () => {
+    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  })
+}
+
 async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
@@ -277,5 +285,27 @@ describe('ManagePluginsTab managed roster', () => {
     expect(host.textContent).toBe('')
     expect(list).toHaveBeenCalledTimes(1)
     host.remove()
+  })
+
+  it('focuses the remove dialog on open and dismisses it on Escape', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-a', repository: 'octocat/demo-plugin', enabled: false },
+    ]))
+    const { props } = managePageHarness({ list })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    await click(host.querySelector('[data-remove-trigger]'))
+    await flush()
+    const dialog = host.querySelector('[data-dialog="remove"]')
+    expect(dialog).not.toBeNull()
+    // Initial focus lands inside the dialog.
+    expect(dialog?.contains(document.activeElement)).toBe(true)
+    // Escape dismisses the ask step (no removal request is in flight); the row
+    // stays untouched for a later retry.
+    await pressKey(dialog?.querySelector('[data-remove-cancel]'), 'Escape')
+    await flush()
+    expect(host.querySelector('[data-dialog="remove"]')).toBeNull()
+    expect(rows(host)).toHaveLength(1)
   })
 })

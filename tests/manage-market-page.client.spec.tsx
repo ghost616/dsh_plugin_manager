@@ -1112,6 +1112,60 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     expect(dialog.querySelector('[data-detail-error]')).toBeNull()
     expect(dialog.querySelector('[data-detail-view]')).not.toBeNull()
   })
+
+  it('pins the default branch first even when the branch list does not start with it', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['dev', 'main'],
+      tags: [],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    // 'main' is the default branch although the branch list leads with 'dev':
+    // the dropdown reorders it to the head of the branch group with its mark.
+    const branches = dialog.querySelectorAll('[data-ref-select] option[data-ref-kind="branch"]')
+    expect(branches).toHaveLength(2)
+    expect(branches[0]?.getAttribute('data-ref-name')).toBe('main')
+    expect(branches[0]?.getAttribute('data-default-branch')).toBe('true')
+    expect(branches[1]?.getAttribute('data-ref-name')).toBe('dev')
+    expect(branches[1]?.getAttribute('data-default-branch')).toBeNull()
+  })
+
+  it('renders no empty branch/tag optgroup heading when that family has no refs', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: [],
+      tags: ['v1.0.0'],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    // A group with zero options never renders its heading: no stray "Branches"
+    // label above an empty select group.
+    const select = dialog.querySelector('[data-ref-select]')
+    expect(select?.querySelector('[data-ref-optgroup][data-ref-kind="branch"]')).toBeNull()
+    const tagGroup = select?.querySelector('[data-ref-optgroup][data-ref-kind="tag"]')
+    expect(tagGroup).not.toBeNull()
+    expect(tagGroup?.getAttribute('label')).toBe(zh.tagsTitle)
+    expect(tagGroup?.querySelectorAll('[data-ref-option]')).toHaveLength(1)
+  })
 })
 
 describe('ManagePluginsTab smart-install analysis states', () => {
@@ -1272,5 +1326,163 @@ describe('ManagePluginsTab smart-install analysis states', () => {
     expect(installDialog.querySelector('[data-preview-error]')).toBeNull()
     expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
     expect(install).not.toHaveBeenCalled()
+  })
+})
+
+describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
+  /** Open the market modal and drive it into the install review dialog. */
+  async function openInstallDialog(host: HTMLElement): Promise<HTMLElement> {
+    const market = await openMarket(host)
+    await searchIn(market, 'helper')
+    await click(market.querySelector('[data-row-details]'))
+    await flush()
+    await selectIn(market.querySelector('[data-ref-select]'), 'branch:main')
+    await flush()
+    await click(market.querySelector('[data-ref-install]'))
+    await flush()
+    const installDialog = market.querySelector('[data-dialog="install"]')
+    if (installDialog === null) throw new Error('install dialog did not open')
+    return installDialog as HTMLElement
+  }
+
+  function oneRepoHarness() {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    return { repositoryDetail, search }
+  }
+
+  /** Dispatch one keyboard event on a target (bubbles to the dialog shell). */
+  async function pressKey(target: Element | null, key: string, shiftKey = false): Promise<void> {
+    if (target === null) throw new Error('keyboard target missing')
+    await act(async () => {
+      target.dispatchEvent(new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+        shiftKey,
+      }))
+    })
+  }
+
+  it('offers a close exit on a non-analysis preview failure', async () => {
+    const previewInstall = vi.fn(async () => {
+      throw new MarketCallFailure({ code: 'github/network', message: 'down', details: {} })
+    })
+    const { repositoryDetail, search } = oneRepoHarness()
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    const installDialog = await openInstallDialog(host)
+    const previewError = installDialog.querySelector('[data-preview-error]')
+    expect(previewError?.getAttribute('data-error-code')).toBe('github/network')
+    // A transport/manifest preview failure gets Retry plus a close exit.
+    expect((installDialog.querySelector('[data-preview-retry]') as HTMLButtonElement)).not.toBeNull()
+    const cancel = installDialog.querySelector('[data-dialog-cancel]') as HTMLButtonElement
+    expect(cancel).not.toBeNull()
+    await click(cancel)
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+    expect(host.querySelector('[data-dialog="market"]')).not.toBeNull()
+  })
+
+  it('recovers any non-expired install failure through re-preview', async () => {
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({ repository, version: version ?? undefined }))
+    const install = vi.fn(async () => {
+      throw new MarketCallFailure({ code: 'install/git-failed', message: 'git failed', details: {} })
+    })
+    const { repositoryDetail, search } = oneRepoHarness()
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    const installDialog = await openInstallDialog(host)
+    expect(installDialog.querySelector('[data-preview-error]')).toBeNull()
+    await click(installDialog.querySelector('[data-install-confirm]'))
+    await flush()
+    const installError = installDialog.querySelector('[data-install-error]')
+    expect(installError?.getAttribute('data-error-code')).toBe('install/git-failed')
+    const rePreview = installDialog.querySelector('[data-repreview]') as HTMLButtonElement
+    expect(rePreview).not.toBeNull()
+    expect(rePreview.textContent).toContain(zh.repreviewButton)
+    expect(install).toHaveBeenCalledTimes(1)
+    // Re-preview re-runs the review and returns to the confirmation flow.
+    await click(rePreview)
+    await flush()
+    expect(previewInstall).toHaveBeenCalledTimes(2)
+    expect(installDialog.querySelector('[data-install-error]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+  })
+
+  it('labels a missing repository with its own not-found copy', async () => {
+    const previewInstall = vi.fn(async () => {
+      throw new MarketCallFailure({ code: 'github/not-found', message: 'gone', details: {} })
+    })
+    const { repositoryDetail, search } = oneRepoHarness()
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    const error = installDialog.querySelector('[data-preview-error]')
+    expect(error?.getAttribute('data-error-code')).toBe('github/not-found')
+    expect(error?.textContent).toContain(zh.githubNotFound)
+    expect(error?.textContent).not.toContain(zh.githubAuthError)
+  })
+
+  it('focuses the market dialog, closes it on Escape, and wraps Tab inside it', async () => {
+    const { repositoryDetail, search } = oneRepoHarness()
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    // Initial focus lands inside the dialog when it opens.
+    const dialog = await openMarket(host)
+    expect(dialog.contains(document.activeElement)).toBe(true)
+
+    // Tab loop: Shift+Tab from the first control wraps to the last; Tab from
+    // the last wraps back to the first (the focus never leaves the dialog).
+    const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled])',
+    ))
+    expect(focusables.length).toBeGreaterThan(1)
+    focusables[0]!.focus()
+    await pressKey(focusables[0], 'Tab', true)
+    expect(document.activeElement).toBe(focusables[focusables.length - 1])
+    await pressKey(document.activeElement as HTMLElement, 'Tab')
+    expect(document.activeElement).toBe(focusables[0])
+
+    // Escape closes the market dialog (always dismissible).
+    await pressKey(dialog.querySelector('[data-market-close]'), 'Escape')
+    await flush()
+    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
+  })
+
+  it('closes the nested install dialog first on Escape and keeps the market open', async () => {
+    const { repositoryDetail, search } = oneRepoHarness()
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+    expect(installDialog.contains(document.activeElement)).toBe(true)
+
+    // Escape inside the install dialog only dismisses it; the market modal
+    // underneath stays open.
+    await pressKey(installDialog.querySelector('[data-install-confirm]'), 'Escape')
+    await flush()
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+    expect(host.querySelector('[data-dialog="market"]')).not.toBeNull()
+
+    // A second Escape inside the market dialog closes it as well.
+    const market = host.querySelector('[data-dialog="market"]')!
+    await pressKey(market.querySelector('[data-market-close]'), 'Escape')
+    await flush()
+    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
   })
 })

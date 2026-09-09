@@ -17,6 +17,8 @@ export const zh = {
   error: '暂时无法读取插件。',
   /** Retry a failed load. */
   retry: '重试',
+  /** Re-run the preview after an install failure (mints a fresh token). */
+  repreviewButton: '重新预览',
   /** Managed-list local filter placeholder (explicit local semantics). */
   filterPlaceholder: '筛选已管理插件',
   /** No managed plugin records exist at all. */
@@ -77,8 +79,10 @@ export const zh = {
   rateLimited: 'GitHub 限流，请稍后再试。',
   /** Network/transport failure. */
   networkError: '网络错误，服务暂时不可达。',
-  /** GitHub auth/not-found failure. */
-  githubAuthError: 'GitHub 请求被拒绝（认证问题或仓库不存在）。',
+  /** GitHub auth failure. */
+  githubAuthError: 'GitHub 请求被拒绝（认证问题）。',
+  /** Dedicated copy for a missing/removed GitHub repository. */
+  githubNotFound: 'GitHub 仓库不存在或已删除。',
   /** Search results heading. */
   searchResults: '搜索结果',
   /** Top-level button opening the GitHub browse modal. */
@@ -214,6 +218,7 @@ export const en: Record<MarketManageLocaleKey, string> = {
   loading: 'Reading managed plugins…',
   error: 'Plugins are temporarily unavailable.',
   retry: 'Retry',
+  repreviewButton: 'Re-preview',
   filterPlaceholder: 'Filter managed plugins',
   empty: 'No managed plugins yet.',
   emptySearch: 'No matching plugins.',
@@ -244,7 +249,8 @@ export const en: Record<MarketManageLocaleKey, string> = {
   searchFailed: 'Search failed.',
   rateLimited: 'GitHub rate limit reached; try again later.',
   networkError: 'Network error; the service is unreachable.',
-  githubAuthError: 'GitHub request rejected (auth problem or missing repository).',
+  githubAuthError: 'GitHub request rejected (auth problem).',
+  githubNotFound: 'The GitHub repository was not found or has been removed.',
   searchResults: 'Search results',
   openMarket: 'Browse GitHub',
   marketDialogTitle: 'GitHub plugins',

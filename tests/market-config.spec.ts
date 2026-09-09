@@ -37,6 +37,21 @@ describe('normalizeMarketConfig', () => {
     expectMarketError(() => normalizeMarketConfig('nope', env), 'config/invalid')
   })
 
+  it('names the optional llm section in the generic config/invalid message', () => {
+    try {
+      normalizeMarketConfig('nope', env)
+      throw new Error('expected config/invalid')
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarketError)
+      const market = error as MarketError
+      expect(market.code).toBe('config/invalid')
+      expect(market.message).toContain('repositoryPath')
+      expect(market.message).toContain('"llm"')
+      expect(market.message).toContain('provider')
+      expect(market.message).toContain('model')
+    }
+  })
+
   it('resolves a relative path against the working directory', () => {
     const result = normalizeMarketConfig({ repositoryPath: 'relative/repo' }, env)
     expect(result.repositoryPath).toBe(resolve(env.cwd, 'relative/repo'))

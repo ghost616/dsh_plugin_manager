@@ -83,6 +83,22 @@ describe('createLlmCompletion (structural ctx.llm stream)', () => {
     expect(text).toBe('{"kind":"plugin"}')
   })
 
+  it('joins text blocks in index order even when chunks arrive out of order', async () => {
+    // Block 1 deltas arrive before block 0 is even opened: a transport that
+    // interleaves chunks must not produce arrival-order garbage. Each block is
+    // assembled independently and the final text concatenates block 0 then 1.
+    const complete = createLlmCompletion({ llm: () => streamOf([
+      { type: 'text-delta', index: 1, text: 'ef' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'ABCD' } },
+      { type: 'text-delta', index: 0, text: 'ignored-after-close' },
+      { type: 'text-delta', index: 1, text: 'gh' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'EFGH' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]) })
+    const text = await complete({ provider: 'p', model: 'm', system: '', user: 'u' })
+    expect(text).toBe('ABCDEFGH')
+  })
+
   it('maps a terminal error finish to market/llm-failed', async () => {
     const complete = createLlmCompletion({ llm: () => streamOf([
       { type: 'text-delta', index: 0, text: 'partial' },
@@ -115,21 +131,39 @@ describe('createLlmCompletion (structural ctx.llm stream)', () => {
       .rejects.toMatchObject({ code: 'market/llm-failed' })
   })
 
-  it('aborts the request when the deadline fires and reports market/llm-failed', async () => {
-    let sawSignal = false
-    const never = {
+  it('really cancels the in-flight stream when the deadline fires (abort causality)', async () => {
+    // The fake transport only terminates when the caller aborts it — if the
+    // deadline never fired, the completion promise would never settle and this
+    // test would time out. Termination therefore proves the timeout cancelled
+    // the request, and the resulting failure is the deadline abort, not an
+    // empty answer or stream output.
+    let transportAborted = false
+    const abortAware = {
       stream(request: { signal?: AbortSignal }) {
-        sawSignal = request.signal !== undefined
+        const signal = request.signal
+        if (signal === undefined) throw new Error('expected an abort signal from the deadline')
         return (async function* () {
-          await new Promise(resolve => setTimeout(resolve, 20))
+          await new Promise<void>((resolve, reject) => {
+            const fail = (): void => {
+              transportAborted = true
+              reject(new Error('The operation was aborted'))
+            }
+            if (signal.aborted) {
+              fail()
+              return
+            }
+            signal.addEventListener('abort', fail, { once: true })
+          })
+          // Unreachable in practice: the abort rejects the pending promise.
           yield { type: 'finish' as const, reason: { kind: 'stop' } }
         })()
       },
     } satisfies LlmStreamService
-    const complete = createLlmCompletion({ llm: () => never, deadlineMs: 5 })
-    await expect(complete({ provider: 'p', model: 'm', system: '', user: 'u' }))
-      .rejects.toMatchObject({ code: 'market/llm-failed' })
-    expect(sawSignal).toBe(true)
+    const complete = createLlmCompletion({ llm: () => abortAware, deadlineMs: 5 })
+    const error = await complete({ provider: 'p', model: 'm', system: '', user: 'u' }).catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'market/llm-failed' })
+    if (error instanceof Error) expect(error.message).toContain('timed out after 5 ms')
+    expect(transportAborted).toBe(true)
   })
 
   it('uses the documented default deadline when none is given', () => {

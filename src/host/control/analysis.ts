@@ -9,7 +9,10 @@
  *   chunk protocol is modelled structurally and the runtime objects are
  *   consumed as-is. Terminal `finish` errors (`error`/`aborted`) and transport
  *   throws normalize to the stable `market/llm-failed` code; a deadline signal
- *   aborts the request through an AbortController.
+ *   aborts the request through an AbortController. A completion failure is
+ *   NEVER a green light: callers treat any non-installable outcome — refusal
+ *   or error alike — as "not installable", so an analysis that cannot run must
+ *   refuse the candidate, never silently pass it.
  * - {@link snapshotFromPreview} approximates the analyzer input from remote
  *   preview data (README text + the manifest preview outcome), so a
  *   very-unconventional candidate can be classified before any local checkout
@@ -104,6 +107,9 @@ export interface LlmCompletionOptions {
  * from the chunk protocol; a terminal `error`/`aborted` finish (or any throw
  * while iterating) surfaces as `market/llm-failed`, so the analyzer never sees
  * a transport error disguised as output. The deadline aborts the request.
+ * Any failure thrown here leaves the candidate unclassified — the source layer
+ * refuses the preview (never silently allowing the install) and the UI can
+ * retry on the stable `market/llm-failed` code.
  */
 export function createLlmCompletion(options: LlmCompletionOptions): LlmCompletion {
   const deadlineMs = options.deadlineMs ?? ANALYSIS_DEADLINE_MS
@@ -148,24 +154,25 @@ async function assembleStreamText(chunks: AsyncIterable<LlmChunk>): Promise<stri
   // Per-block assembly mirroring BlockAssembler semantics: text deltas append
   // to their open block; a `block-end` carries the authoritative assembled
   // text of that block (it replaces any prior deltas and closes the block).
-  const parts: { text: string; closed: boolean }[] = []
-  const byIndex = new Map<number, { entry: { text: string; closed: boolean } }>()
+  // Blocks are keyed by their chunk index and concatenated in index order at
+  // the end, so a transport that interleaves out-of-order chunks (or a late
+  // block whose deltas arrived first) still yields deterministic text instead
+  // of arrival-order garbage.
+  const byIndex = new Map<number, { text: string; closed: boolean }>()
   let terminal: LlmFinishChunk | undefined
   for await (const chunk of chunks) {
     if (isTextDeltaChunk(chunk)) {
-      let entry = byIndex.get(chunk.index)?.entry
+      let entry = byIndex.get(chunk.index)
       if (entry === undefined) {
         entry = { text: '', closed: false }
-        parts.push(entry)
-        byIndex.set(chunk.index, { entry })
+        byIndex.set(chunk.index, entry)
       }
       if (!entry.closed) entry.text += chunk.text
     } else if (isTextBlockEndChunk(chunk)) {
-      let entry = byIndex.get(chunk.index)?.entry
+      let entry = byIndex.get(chunk.index)
       if (entry === undefined) {
         entry = { text: '', closed: false }
-        parts.push(entry)
-        byIndex.set(chunk.index, { entry })
+        byIndex.set(chunk.index, entry)
       }
       entry.text = chunk.block.text
       entry.closed = true
@@ -178,7 +185,8 @@ async function assembleStreamText(chunks: AsyncIterable<LlmChunk>): Promise<stri
     const detail = reason.failure?.message ?? reason.failure?.code ?? reason.kind
     throw marketError('market/llm-failed', `The smart-install analysis model call failed (${detail}).`)
   }
-  return parts.map(part => part.text).join('')
+  const indexes = [...byIndex.keys()].sort((a, b) => a - b)
+  return indexes.map(index => byIndex.get(index)?.text ?? '').join('')
 }
 
 /** Narrow a raw chunk to the text-delta member (unknown chunks are skipped). */
@@ -277,6 +285,10 @@ export interface RunCheckoutAnalysisOptions {
  *
  * When no llm provider/model is configured the analyzer throws
  * `market/llm-unconfigured` first, which this function lets propagate.
+ *
+ * Analysis failure is never silently allowed: every non-installable outcome —
+ * a refusal verdict OR a propagated error — means the candidate stays
+ * unclassified and must not install.
  */
 export async function runCheckoutAnalysis(
   snapshot: CheckoutSnapshot,

@@ -139,7 +139,9 @@ export interface InstallAnalysisEngine {
    *   plugin.
    * @throws MarketError `market/llm-unconfigured` when the analysis engine
    *   exists but no llm provider/model is configured; `market/llm-failed` /
-   *   `market/llm-bad-output` on model failures.
+   *   `market/llm-bad-output` on model failures. The source layer keeps
+   *   `market/llm-unconfigured` as-is and normalizes every other failure to
+   *   the stable retryable `market/llm-failed` before it reaches the wire.
    */
   analyze(request: {
     readonly repository: string
@@ -220,6 +222,30 @@ export function pluginKeyForRepository(repository: string): PluginMarketKey {
  */
 function isGithubNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'github/not-found'
+}
+
+/** Stable wire code of any thrown value (structural, not instanceof-bound). */
+function errorCodeOf(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : undefined
+}
+
+/**
+ * Friendly build-first guidance appended to `install/entry-missing` failures:
+ * the resolved entry is absent because the repository may ship as source and
+ * need its documented build step before the plugin entry becomes loadable.
+ */
+export const ENTRY_MISSING_BUILD_HINT =
+  ' If the repository ships as source, run its documented build step to generate the plugin entry, then retry the install.'
+
+/** Rethrow an `install/entry-missing` failure with the build-first hint. */
+function enrichEntryMissingError(error: unknown): never {
+  if (errorCodeOf(error) === 'install/entry-missing') {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new MarketControlError('install/entry-missing', `${message}${ENTRY_MISSING_BUILD_HINT}`)
+  }
+  throw error
 }
 
 /**
@@ -304,6 +330,13 @@ export class MarketSourceOperations {
    * is refused outright with `market/llm-unconfigured` and a model-config
    * hint, so the two-step protocol never mints a token for a checkout the
    * market cannot even classify.
+   *
+   * Analysis failure is never silently allowed: if the analysis of an
+   * unconventional candidate itself fails (LLM transport/timeout jitter,
+   * unparsable output, engine bugs) the preview rejects with the stable
+   * retryable `market/llm-failed` and NO confirmation token is minted — the
+   * candidate stays unclassified and cannot be installed, so the UI can simply
+   * retry the review.
    */
   async previewInstall(
     repositoryRaw: string,
@@ -403,13 +436,23 @@ export class MarketSourceOperations {
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
     const installer = this.deps.installer(repository)
-    const outcome = await installer.install({
-      repositoryRoot: repository.root,
-      key,
-      repository: slug,
-      ...(kind === undefined ? {} : { refKind: kind }),
-      version: ref ?? pending.version ?? null,
-    })
+    let outcome: { readonly record: PluginMarketRecord; readonly checkoutDir: string }
+    try {
+      outcome = await installer.install({
+        repositoryRoot: repository.root,
+        key,
+        repository: slug,
+        ...(kind === undefined ? {} : { refKind: kind }),
+        version: ref ?? pending.version ?? null,
+      })
+    } catch (error) {
+      // The host reports a missing runnable entry as install/entry-missing
+      // (e.g. an unconventional checkout the model judged a plugin, or a
+      // manifest that resolved no main and no conventional index.js exists).
+      // Surface the same stable code with a build-first hint so the user knows
+      // the repository may ship as source and needs its documented build.
+      throw enrichEntryMissingError(error)
+    }
     await this.deps.syncRecord(outcome.record)
     return {
       key,
@@ -450,6 +493,14 @@ export class MarketSourceOperations {
    * the market Config configured no llm endpoint — the candidate is refused
    * with `market/llm-unconfigured` and a model-config hint (see
    * {@link InstallAnalysisEngine}).
+   *
+   * Failure semantics: an analysis that cannot run NEVER silently allows the
+   * install. `market/llm-unconfigured` propagates as-is (a retry cannot fix a
+   * missing model endpoint); every other failure — LLM transport/timeout
+   * jitter, unparsable output, engine bugs — is normalized to the stable
+   * retryable `market/llm-failed`, and because this throws before the review
+   * token is minted, the candidate cannot be installed until a review
+   * succeeds.
    */
   private async analyzeCandidate(
     slug: string,
@@ -462,8 +513,21 @@ export class MarketSourceOperations {
         `"${slug}" does not look like a standard npm plugin, and the smart-install analyzer is not configured. Set Config.llm.provider and Config.llm.model on plugin-market-host to classify and install non-standard checkouts.`,
       )
     }
+    let refusal: PluginInstallReviewAnalysis | null
+    try {
+      refusal = await engine.analyze({ repository: slug, preview })
+    } catch (error) {
+      // See the failure-semantics note above: only the configuration case
+      // keeps its own code; everything else is one stable, retryable failure.
+      if (errorCodeOf(error) === 'market/llm-unconfigured') throw error
+      throw new MarketControlError(
+        'market/llm-failed',
+        `The smart-install analysis of "${slug}" failed; the checkout was not classified and cannot be installed. Retry the review, or check the configured LLM provider/model.`,
+        {},
+        { cause: error },
+      )
+    }
     // null → the model judged the checkout an installable plugin: no refusal.
-    const refusal = await engine.analyze({ repository: slug, preview })
     return refusal === null ? undefined : refusal
   }
 

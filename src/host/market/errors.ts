@@ -56,6 +56,8 @@ const DEFAULT_MESSAGE: Record<PluginMarketErrorCode, string> = {
     'The smart-install analysis model call failed. Retry, or check the configured LLM provider/model.',
   'market/llm-bad-output':
     'The smart-install analysis returned an unparsable or invalid answer; the checkout was not classified.',
+  'market/io':
+    'An I/O error occurred while reading the checkout for install analysis.',
   'market/unsupported-skills':
     'This checkout is a skills pack, not a dsh plugin; the plugin market cannot install it.',
   'market/unsupported-preset':

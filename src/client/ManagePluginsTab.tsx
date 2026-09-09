@@ -4,7 +4,7 @@
 import {
   useEffect, useId, useMemo, useRef, useState,
   type FormEvent, type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent, type ReactNode,
+  type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject,
 } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -117,8 +117,8 @@ export function failureText(failure: ManageUiFailure, t: Translate): string {
     case 'github/rate-limit': return t('rateLimited')
     case 'github/network':
     case 'market/unreachable': return t('networkError')
-    case 'github/auth':
-    case 'github/not-found': return t('githubAuthError')
+    case 'github/auth': return t('githubAuthError')
+    case 'github/not-found': return t('githubNotFound')
     case 'market/confirm-expired': return t('confirmExpired')
     case 'market/confirm-required': return t('confirmRequired')
     case 'market/protected': return t('protectedEntry')
@@ -134,6 +134,60 @@ export function isAnalysisFailureCode(code: string): boolean {
   return code === 'market/llm-unconfigured'
     || code === 'market/llm-failed'
     || code === 'market/llm-bad-output'
+}
+
+/** Focusable controls of one modal dialog (Tab-trap candidates). */
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(', ')
+
+/**
+ * Modal-dialog keyboard accessibility shared by every dialog shell: move the
+ * initial focus onto the dialog, close it on Escape when a dismiss/cancel
+ * semantic exists, and keep Tab looping inside the dialog (a simple trap that
+ * never lets the focus escape into the page or a sibling dialog). Escape stops
+ * propagation so a nested dialog (install on top of market) closes first and
+ * never closes its outer owner.
+ */
+function useDialogA11y(dialogRef: RefObject<HTMLElement | null>, dismissible: boolean, onClose: () => void): void {
+  useEffect(() => {
+    dialogRef.current?.focus()
+  }, [dialogRef])
+
+  useEffect(() => {
+    const node = dialogRef.current
+    if (node === null) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        if (dismissible) onClose()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusables = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+      if (focusables.length === 0) return
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      const index = active !== null ? focusables.indexOf(active) : -1
+      if (event.shiftKey) {
+        if (index <= 0) {
+          event.preventDefault()
+          focusables[focusables.length - 1]?.focus()
+        }
+        return
+      }
+      if (index === -1 || index === focusables.length - 1) {
+        event.preventDefault()
+        focusables[0]?.focus()
+      }
+    }
+    node.addEventListener('keydown', onKeyDown)
+    return () => { node.removeEventListener('keydown', onKeyDown) }
+  }, [dialogRef, dismissible, onClose])
 }
 
 /** Localized accessible label of one live loader phase. */
@@ -361,6 +415,7 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
   readonly onInstalled: (repository: string) => void
 }): ReactNode {
   const mounted = useRef(true)
+  const dialogRef = useRef<HTMLElement | null>(null)
   const [previewTick, setPreviewTick] = useState(0)
   const [phase, setPhase] = useState<InstallPhase>({ phase: 'preview' })
 
@@ -368,6 +423,10 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
+
+  // Esc closes the review dialog whenever no install is in flight; the focus
+  // is moved onto the dialog on mount and Tab never leaves it.
+  useDialogA11y(dialogRef, phase.phase !== 'installing', onClose)
 
   useEffect(() => {
     let current = true
@@ -379,7 +438,7 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
         (error: unknown) => { if (current) setPhase({ phase: 'preview-error', failure: toUiFailure(error) }) },
       )
     return () => { current = false }
-  }, [previewInstall, install, previewTick, repository, version, refKind])
+  }, [previewInstall, previewTick, repository, version, refKind])
 
   const confirm = (review: PluginInstallReview): void => {
     if (phase.phase === 'installing') return
@@ -409,6 +468,8 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
   return (
     <div className={css.backdrop}>
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className={css.dialog}
         role="dialog"
         aria-modal="true"
@@ -519,7 +580,11 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
                 <button type="button" className={css.textButton} data-analysis-close onClick={onClose}>
                   {t('closeButton')}
                 </button>
-              ) : null}
+              ) : (
+                <button type="button" className={css.textButton} data-dialog-cancel onClick={onClose}>
+                  {t('cancelButton')}
+                </button>
+              )}
             </>
           ) : null}
           {phase.phase === 'done' ? (
@@ -533,9 +598,11 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
                 <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
                   {busy ? t('installing') : t('installButton')}
                 </button>
-                {phase.phase === 'install-error' && phase.failure.code === 'market/confirm-expired' ? (
+                {phase.phase === 'install-error' ? (
+                  // Every install failure (not only a consumed confirmation)
+                  // offers a fresh review: the old token may be spent already.
                   <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
-                    {t('retry')}
+                    {t('repreviewButton')}
                   </button>
                 ) : null}
                 <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
@@ -569,6 +636,7 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
 }): ReactNode {
   const [phase, setPhase] = useState<RemovePhase>({ phase: 'ask' })
   const [failure, setFailure] = useState<ManageUiFailure | undefined>(undefined)
+  const dialogRef = useRef<HTMLElement | null>(null)
   const name = displayName(view)
 
   const first = (): void => {
@@ -603,9 +671,14 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
   const busy = phase.phase === 'requesting' || phase.phase === 'removing'
   const secondVisible = phase.phase === 'second' || phase.phase === 'removing'
 
+  // Esc dismisses the removal dialog whenever no removal request is in flight.
+  useDialogA11y(dialogRef, !busy, onClose)
+
   return (
     <div className={css.backdrop}>
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className={css.dialog}
         role="dialog"
         aria-modal="true"
@@ -903,12 +976,16 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
             onChange={(event) => { setSelectedValue(event.currentTarget.value) }}
           >
             <option value="" data-ref-placeholder>{t('refSelectPlaceholder')}</option>
-            <optgroup label={t('branchesTitle')} data-ref-optgroup data-ref-kind="branch">
-              {branchChoices.map(renderOption)}
-            </optgroup>
-            <optgroup label={t('tagsTitle')} data-ref-optgroup data-ref-kind="tag">
-              {tagChoices.map(renderOption)}
-            </optgroup>
+            {branchChoices.length === 0 ? null : (
+              <optgroup label={t('branchesTitle')} data-ref-optgroup data-ref-kind="branch">
+                {branchChoices.map(renderOption)}
+              </optgroup>
+            )}
+            {tagChoices.length === 0 ? null : (
+              <optgroup label={t('tagsTitle')} data-ref-optgroup data-ref-kind="tag">
+                {tagChoices.map(renderOption)}
+              </optgroup>
+            )}
           </select>
           <div className={css.refPickerActions}>
             <button
@@ -995,6 +1072,7 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
   readonly onInstalled: (repository: string) => void
 }): ReactNode {
   const mounted = useRef(true)
+  const dialogRef = useRef<HTMLElement | null>(null)
   const generation = useRef(0)
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<MarketSearchState>({ phase: 'idle' })
@@ -1161,9 +1239,15 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
     commitJump()
   }
 
+  // The market modal is always dismissible; a nested install dialog handles
+  // its own Escape first and never bubbles into this one.
+  useDialogA11y(dialogRef, true, onClose)
+
   return (
     <div className={css.backdrop}>
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className={`${css.dialog} ${css.marketDialog}${dragging ? ` ${css.marketDragging}` : ''}`}
         role="dialog"
         aria-modal="true"

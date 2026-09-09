@@ -16,6 +16,7 @@ import {
 } from '../lib/types/host/control/gateway.js'
 // @ts-expect-error -- compiled artifact (see header note)
 import { MarketControlError } from '../lib/types/host/control/controller.js'
+import { MarketError } from '../src/host/market/errors.ts'
 import {
   fakeAnalysisEngine,
   key,
@@ -229,6 +230,41 @@ describe('MarketControllerGateway host Remote surface', () => {
     const { gateway } = gatewayWith({ previewResult: degradedNoManifest })
     const caught = await gateway.previewInstall('octocat/demo-plugin', null, null).catch((error: unknown) => error)
     expect(remoteErrorOf(caught)).toMatchObject({ code: 'market/llm-unconfigured' })
+  })
+
+  it('normalizes an unparsable analysis answer to the stable retryable market/llm-failed on the gateway', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({
+      error: new MarketError('market/llm-bad-output', 'the model returned prose, not JSON'),
+    })
+    const { gateway } = gatewayWith({ analysis, previewResult: degradedNoManifest })
+    const caught = await gateway.previewInstall('octocat/demo-plugin', null, null).catch((error: unknown) => error)
+    // LLM jitter surfaces as one stable code the UI can retry, not as the
+    // internal llm-bad-output or a transport error.
+    expect(remoteErrorOf(caught)).toMatchObject({
+      code: 'market/llm-failed',
+      message: expect.stringMatching(/retry/i),
+    })
+  })
+
+  it('surfaces install/entry-missing with a build-first hint over the gateway', async () => {
+    const { gateway, engines } = gatewayWith()
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    engines.installError = new MarketError(
+      'install/entry-missing',
+      'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
+    )
+    const caught = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
+      .catch((error: unknown) => error)
+    expect(remoteErrorOf(caught)).toMatchObject({
+      code: 'install/entry-missing',
+      message: expect.stringContaining('documented build step'),
+    })
   })
 
   it('bypasses analysis for standard plugins (ready preview never consults the engine)', async () => {

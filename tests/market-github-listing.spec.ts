@@ -73,6 +73,28 @@ describe('GitHubMarket.tags listing pagination (shared rule with branches)', () 
     expect(headers.authorization).toBe('Bearer secret-token-abc')
     expect(JSON.stringify(names)).not.toContain('secret-token-abc')
   })
+
+  it('resolves the runtime token once per listing call, not once per page', async () => {
+    // Full pages force the fetch to hit the page cap, exercising every page
+    // of the paging loop while the token source stays single-resolution.
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, body: refList(100, 't-') }))
+    let resolutions = 0
+    const names = await new GitHubMarket({
+      fetchImpl,
+      tokenProvider: async () => {
+        resolutions += 1
+        return 'secret-token-abc'
+      },
+    }).tags(slug)
+    expect(names).toHaveLength(GITHUB_LIST_PAGE_SIZE * GITHUB_LIST_MAX_PAGES)
+    expect(calls).toHaveLength(GITHUB_LIST_MAX_PAGES)
+    expect(resolutions).toBe(1)
+    // Every page still authenticates with the same resolved token.
+    for (const call of calls) {
+      const headers = call.init?.headers ?? {}
+      expect(headers.authorization).toBe('Bearer secret-token-abc')
+    }
+  })
 })
 
 describe('githubFetch default accept media type', () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { MarketError } from '../src/host/market/errors.ts'
 import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
+import { ENTRY_MISSING_BUILD_HINT } from '../src/host/control/source.ts'
 import { fakeAnalysisEngine, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
 
 /** Repository slug → derived key convention under test. */
@@ -249,6 +250,53 @@ describe('MarketSourceOperations previewInstall', () => {
     await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-failed' })
   })
 
+  it('normalizes every non-config analysis failure into the stable retryable market/llm-failed and mints no token', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    // LLM jitter takes many shapes: unparsable output, transport errors and
+    // plain engine bugs must all surface as ONE stable retryable code the UI
+    // can branch on, never as a surprise 500.
+    const failures: unknown[] = [
+      new MarketError('market/llm-bad-output', 'the model returned prose, not JSON'),
+      new MarketError('github/network', 'offline', { path: 'https://api.github.com' }),
+      new Error('boom: analysis engine crashed'),
+    ]
+    for (const failure of failures) {
+      const analysis = fakeAnalysisEngine({ error: failure })
+      const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+      await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-failed' })
+    }
+    // A failed analysis never mints a confirmation: the candidate is
+    // unclassified, so a subsequent install has no pending review to consume.
+    const analysis = fakeAnalysisEngine({ error: new MarketError('market/llm-bad-output', 'prose, not JSON') })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    await source.previewInstall(SLUG).catch(() => {})
+    await expect(source.install(SLUG, 'tok')).rejects.toMatchObject({ code: 'market/confirm-required' })
+    expect(bed.engines.installCalls).toHaveLength(0)
+    expect(bed.engines.synced).toHaveLength(0)
+  })
+
+  it('keeps an engine market/llm-unconfigured distinct instead of normalizing it', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({
+      error: new MarketError('market/llm-unconfigured', 'no provider configured'),
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-unconfigured' })
+    expect(bed.engines.previewCalls).toEqual([SLUG])
+  })
+
   it('rejects a malformed repository slug with github/bad-request', async () => {
     const bed = testbed()
     const source = ops(bed)
@@ -320,6 +368,24 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
       code: 'install/git-failed',
     })
+  })
+
+  it('appends a build-first hint to install/entry-missing failures', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    bed.engines.installError = new MarketError(
+      'install/entry-missing',
+      'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
+    )
+    const error = await source.install(SLUG, review.confirmToken).catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'install/entry-missing' })
+    if (error instanceof Error) {
+      expect(error.message).toContain('dist/index.js')
+      // The stable code is kept; the message now tells the user the repository
+      // may need its documented build step first.
+      expect(error.message).toContain(ENTRY_MISSING_BUILD_HINT)
+    }
   })
 })
 

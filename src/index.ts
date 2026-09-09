@@ -1,5 +1,5 @@
 /**
- * dsh-plugin-market Host loader entry 鈥?`plugin-market-host` and package
+ * dsh-plugin-market Host loader entry —`plugin-market-host` and package
  * composer.
  *
  * Activation contract:
@@ -8,13 +8,13 @@
  *   absent or blank the plugin market stays idle (nothing to manage yet)
  *   until the setting is configured.
  * - When configured, activation validates the path (nonexistent / not a
- *   directory / not writable 鈥?each a stable `repository/*` error with a
+ *   directory / not writable —each a stable `repository/*` error with a
  *   friendly message), initializes the manager-owned layout, opens the
  *   records file v1 and links the running instance's `@deepseek-ai/*` harness
  *   packages into the repository's shared scope (single Cordis runtime).
  * - The opened repository is published as the `marketRepository` Cordis
  *   service, then the record-driven market control is activated as a child
- *   plugin (plugin-market-control) in the SAME context 鈥?it is no longer a
+ *   plugin (plugin-market-control) in the SAME context —it is no longer a
  *   standalone Loader row. The child fiber resolves `marketRepository` and
  *   `loader` from this context chain and is torn down together with this row.
  * - All business logic lives under `src/host/market/` and `src/host/control/`;

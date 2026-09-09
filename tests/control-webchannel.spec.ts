@@ -418,6 +418,52 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
+  it('normalizes an analysis failure into the stable retryable market/llm-failed envelope over HTTP', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({
+      error: new MarketError('market/llm-bad-output', 'the model returned prose, not JSON'),
+    })
+    const { router, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
+    await listen(router.server)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(review.ok).toBe(false)
+    if (!review.ok) {
+      // One stable retryable code for every analysis failure shape.
+      expect(review.error.code).toBe('market/llm-failed')
+      expect(review.error.message).toMatch(/retry/i)
+    }
+    dispose()
+  })
+
+  it('surfaces install/entry-missing with a build-first hint over HTTP', async () => {
+    const { router, engines, dispose } = routeFor()
+    await listen(router.server)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(review.ok).toBe(true)
+    const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    engines.installError = new MarketError(
+      'install/entry-missing',
+      'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
+    )
+    const failed = await call(router, 'install', {
+      repository: 'octocat/demo-plugin',
+      confirmToken: token,
+    })
+    expect(failed.ok).toBe(false)
+    if (!failed.ok) {
+      expect(failed.error.code).toBe('install/entry-missing')
+      // The stable code is preserved; the message now points the user at the
+      // repository's documented build step.
+      expect(failed.error.message).toContain('documented build step')
+    }
+    dispose()
+  })
+
   it('serves standard (ready) previews without analysis over HTTP', async () => {
     const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'never' } })
     const { router, dispose } = routeFor({ analysis })

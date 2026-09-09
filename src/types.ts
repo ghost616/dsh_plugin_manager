@@ -78,6 +78,11 @@ export type PluginMarketErrorCode =
   | 'market/llm-failed'
   /** The analyzer's LLM output could not be parsed or failed field validation. */
   | 'market/llm-bad-output'
+  /**
+   * An I/O failure occurred while reading the analyzed checkout or probing its
+   * entry through the filesystem adapter (native errors never cross the wire).
+   */
+  | 'market/io'
   /** The analyzed checkout is a skills pack, not an installable dsh plugin. */
   | 'market/unsupported-skills'
   /** The analyzed checkout is a configuration preset, not an installable dsh plugin. */
@@ -461,6 +466,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'market/llm-unconfigured': {}
     'market/llm-failed': {}
     'market/llm-bad-output': MarketAnalysisErrorDetails
+    'market/io': MarketRemoteErrorDetails
     'market/unsupported-skills': MarketAnalysisErrorDetails
     'market/unsupported-preset': MarketAnalysisErrorDetails
     'market/unsupported-build': MarketAnalysisErrorDetails
