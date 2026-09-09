@@ -50,6 +50,20 @@ const DEFAULT_MESSAGE: Record<PluginMarketErrorCode, string> = {
   'install/io': 'An I/O error occurred during the plugin install.',
   'gate/consent-required':
     'Installing a plugin requires explicit TrustGate confirmation.',
+  'market/llm-unconfigured':
+    'The smart-install analyzer needs an LLM endpoint: configure Config.llm.provider and Config.llm.model to enable install analysis.',
+  'market/llm-failed':
+    'The smart-install analysis model call failed. Retry, or check the configured LLM provider/model.',
+  'market/llm-bad-output':
+    'The smart-install analysis returned an unparsable or invalid answer; the checkout was not classified.',
+  'market/unsupported-skills':
+    'This checkout is a skills pack, not a dsh plugin; the plugin market cannot install it.',
+  'market/unsupported-preset':
+    'This checkout is a configuration preset, not a dsh plugin; the plugin market cannot install it.',
+  'market/unsupported-build':
+    'This checkout looks like a dsh plugin but has no ready-to-load entry; build it first (e.g. run the package build script), then retry.',
+  'market/unsupported-other':
+    'This checkout is tooling or other software, not a dsh plugin; the plugin market cannot install it.',
 }
 
 /** Optional context attached to a {@link MarketError}. */

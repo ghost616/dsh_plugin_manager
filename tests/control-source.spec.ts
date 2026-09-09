@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { MarketError } from '../src/host/market/errors.ts'
 import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
-import { key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
+import { fakeAnalysisEngine, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
 
 /** Repository slug → derived key convention under test. */
 const SLUG = 'octocat/demo-plugin'
@@ -159,18 +159,94 @@ describe('MarketSourceOperations previewInstall', () => {
     expect(bed.engines.previewCalls).toHaveLength(0)
   })
 
-  it('accepts a degraded preview (unreadable manifest) without blocking', async () => {
+  it('keeps a transport-degraded preview (network hiccup) installable without analysis', async () => {
     const bed = testbed()
     bed.engines.previewResult = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'manifest unreadable',
-      code: 'github/not-found',
+      reason: 'manifest temporarily unreadable',
+      code: 'github/network',
     }
     const source = ops(bed)
     const review = await source.previewInstall(SLUG)
     expect(review.preview.status).toBe('degraded')
-    if (review.preview.status === 'degraded') expect(review.preview.code).toBe('github/not-found')
+    if (review.preview.status === 'degraded') expect(review.preview.code).toBe('github/network')
+    expect(review.analysis).toBeUndefined()
+  })
+
+  it('refuses an unconventional (no manifest) candidate with market/llm-unconfigured when no analysis engine is wired', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const source = ops(bed)
+    await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-unconfigured' })
+    expect(bed.engines.previewCalls).toEqual([SLUG])
+  })
+
+  it('runs analysis on an unconventional candidate and carries a refusal on the review', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'skills', reason: 'A Claude skills collection' } })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(analysis.calls).toEqual([SLUG])
+    expect(review.analysis).toEqual({ installable: false, kind: 'skills', reason: 'A Claude skills collection' })
+    // install() of the refused review rejects up front (no installer/record).
+    await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
+      code: 'market/unsupported-skills',
+      message: 'A Claude skills collection',
+    })
+    expect(bed.engines.installCalls).toHaveLength(0)
+    expect(bed.engines.synced).toHaveLength(0)
+  })
+
+  it('lets an analysis verdict of a runnable plugin through without a refusal', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({ result: null })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(analysis.calls).toEqual([SLUG])
+    expect(review.analysis).toBeUndefined()
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(outcome.key).toBe(key(GH_KEY))
+  })
+
+  it('bypasses analysis entirely for standard npm plugins (ready preview)', async () => {
+    const bed = testbed()
+    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'should not run' } })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(review.preview.status).toBe('ready')
+    expect(review.analysis).toBeUndefined()
+    expect(analysis.calls).toHaveLength(0)
+  })
+
+  it('propagates analysis engine failures with their stable llm codes', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({ error: new MarketError('market/llm-failed', 'model exploded') })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-failed' })
   })
 
   it('rejects a malformed repository slug with github/bad-request', async () => {

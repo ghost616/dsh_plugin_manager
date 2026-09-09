@@ -1113,3 +1113,164 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     expect(dialog.querySelector('[data-detail-view]')).not.toBeNull()
   })
 })
+
+describe('ManagePluginsTab smart-install analysis states', () => {
+  /** Search one repository, open its detail view and start the ref install. */
+  async function openInstallDialog(host: HTMLElement): Promise<HTMLElement> {
+    const market = await openMarket(host)
+    await searchIn(market, 'helper')
+    await click(market.querySelector('[data-row-details]'))
+    await flush()
+    await selectIn(market.querySelector('[data-ref-select]'), 'branch:main')
+    await flush()
+    await click(market.querySelector('[data-ref-install]'))
+    await flush()
+    const installDialog = market.querySelector('[data-dialog="install"]')
+    if (installDialog === null) throw new Error('install dialog did not open')
+    return installDialog as HTMLElement
+  }
+
+  /** One-repository harness whose preview result is fully under test control. */
+  function analysisHarness(previewInstall: ReturnType<typeof vi.fn>) {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const install = vi.fn(async () => {
+      throw new Error('install must never run for an analysis state')
+    })
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+    return { props, previewInstall, install }
+  }
+
+  it('shows the analysis refusal with the reason and never offers a confirmation', async () => {
+    const reason = 'This checkout ships agent skill packs instead of a plugin entry.'
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({
+        repository,
+        version: version ?? undefined,
+        analysis: { kind: 'skills', reason },
+      }))
+    const { props, previewInstall: preview, install } = analysisHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+    expect(preview).toHaveBeenCalledWith('acme/helper', 'main', 'branch')
+
+    // The confirmation flow is replaced by the refusal panel: localized kind
+    // heading plus the model's original rationale, no confirm, no deps.
+    const blocked = installDialog.querySelector('[data-analysis-blocked]')
+    expect(blocked).not.toBeNull()
+    expect(blocked?.getAttribute('data-analysis-kind')).toBe('skills')
+    expect(blocked?.querySelector('[data-analysis-title]')?.textContent).toContain(zh.analysisKindSkills)
+    expect(blocked?.querySelector('[data-analysis-reason]')?.textContent).toBe(reason)
+    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
+    expect(installDialog.querySelector('[data-deps]')).toBeNull()
+    expect(installDialog.querySelector('[data-analysis-close]')).not.toBeNull()
+    expect(install).not.toHaveBeenCalled()
+
+    // Only a close affordance dismisses the refusal dialog.
+    await click(installDialog.querySelector('[data-analysis-close]'))
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+  })
+
+  it.each([
+    ['preset', zh.analysisKindPreset],
+    ['plugin', zh.analysisKindBuild],
+    ['tooling', zh.analysisKindTooling],
+    ['other', zh.analysisKindOther],
+  ] as const)('localizes the refusal heading for the %s analysis kind', async (kind, expected) => {
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({
+        repository,
+        version: version ?? undefined,
+        analysis: { kind, reason: 'the model reason' },
+      }))
+    const { props } = analysisHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    const blocked = installDialog.querySelector('[data-analysis-blocked]')
+    expect(blocked?.getAttribute('data-analysis-kind')).toBe(kind)
+    expect(blocked?.querySelector('[data-analysis-title]')?.textContent).toContain(expected)
+    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
+  })
+
+  it('shows analysis-aware loading copy while the review preview is pending', async () => {
+    let settle: (review: unknown) => void = () => {}
+    const previewInstall = vi.fn(() => new Promise(resolve => { settle = resolve }))
+    const { props } = analysisHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    const loading = installDialog.querySelector('[data-preview-loading]')
+    expect(loading?.textContent).toContain(zh.previewing)
+    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
+
+    await act(async () => { settle(makeInstallReview({ repository: 'acme/helper', version: 'main' })) })
+    await flush()
+    expect(installDialog.querySelector('[data-preview-loading]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+  })
+
+  it('guides to configure the analysis model when the preview rejects llm-unconfigured', async () => {
+    const previewInstall = vi.fn(async () => {
+      throw new MarketCallFailure({ code: 'market/llm-unconfigured', message: 'no llm endpoint', details: {} })
+    })
+    const { props, install } = analysisHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    const error = installDialog.querySelector('[data-preview-error]')
+    expect(error?.getAttribute('data-error-code')).toBe('market/llm-unconfigured')
+    // The manifest-read prefix never labels an analysis failure.
+    expect(error?.textContent).toContain(zh.analysisNotConfigured)
+    expect(error?.textContent).not.toContain(zh.previewFailed)
+    expect(installDialog.querySelector('[data-analysis-guide]')?.textContent).toContain(zh.analysisConfigGuide)
+    // A missing config cannot be fixed by retrying here: close-only, no confirm.
+    expect(installDialog.querySelector('[data-preview-retry]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
+    expect(install).not.toHaveBeenCalled()
+    await click(installDialog.querySelector('[data-analysis-close]'))
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+  })
+
+  it.each([
+    ['market/llm-failed', zh.analysisModelFailed],
+    ['market/llm-bad-output', zh.analysisBadOutput],
+  ] as const)('shows the %s analysis failure with retry and close', async (code, expected) => {
+    const previewInstall = vi.fn()
+      .mockRejectedValueOnce(new MarketCallFailure({ code, message: 'model trouble', details: {} }))
+      .mockResolvedValueOnce(makeInstallReview({ repository: 'acme/helper', version: 'main' }))
+    const { props, previewInstall: preview, install } = analysisHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    const error = installDialog.querySelector('[data-preview-error]')
+    expect(error?.getAttribute('data-error-code')).toBe(code)
+    expect(error?.textContent).toContain(expected)
+    expect(error?.textContent).not.toContain(zh.previewFailed)
+    expect(installDialog.querySelector('[data-analysis-guide]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
+
+    // Retry re-runs the preview and recovers into the confirmation flow.
+    const retry = installDialog.querySelector('[data-preview-retry]') as HTMLButtonElement
+    expect(retry).not.toBeNull()
+    expect(installDialog.querySelector('[data-analysis-close]')).not.toBeNull()
+    expect(install).not.toHaveBeenCalled()
+    await click(retry)
+    await flush()
+    expect(preview).toHaveBeenCalledTimes(2)
+    expect(installDialog.querySelector('[data-preview-error]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+    expect(install).not.toHaveBeenCalled()
+  })
+})

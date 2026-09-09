@@ -25,6 +25,7 @@ import type {
   GitHubSearchPage,
   PluginInstallOutcome,
   PluginInstallReview,
+  PluginInstallReviewAnalysis,
   PluginMarketKey,
   PluginMarketRecord,
   PluginPreviewOutcome,
@@ -36,6 +37,7 @@ import { parsePluginKey, pluginKeyForGithubRef } from '../market/keys.ts'
 import { entryModuleName } from './entry-name.ts'
 import { REMOVE_CONFIRM_TTL_MS, MarketControlError, type ControlLogger } from './controller.ts'
 import type { ProtectionPolicy } from './protect.ts'
+import { refusalWireCode } from './analysis.ts'
 
 /** Search engine surface of the host GitHub client. */
 export interface SearchEnginePort {
@@ -107,8 +109,42 @@ export interface MarketSourceDeps {
   readonly now?: () => Date
   /** Confirmation validity window; defaults to {@link REMOVE_CONFIRM_TTL_MS}. */
   readonly confirmTtlMs?: number
+  /**
+   * Optional smart-install analysis engine. Present only when the market
+   * Config configured `llm.provider`/`llm.model`; previewInstall then runs the
+   * analysis for unconventional checkouts (previews whose manifest is
+   * unreadable/absent — no standard npm plugin entry evidence) and surfaces
+   * the refusal on the review, while install refuses those candidates up
+   * front. Without it the unconventional path rejects with
+   * `market/llm-unconfigured` and a model-config hint.
+   */
+  readonly analysis?: InstallAnalysisEngine
   /** Optional structured logger. */
   readonly logger?: ControlLogger
+}
+
+/**
+ * One smart-install analysis of an unconventional candidate. The engine
+ * classifies the checkout (skills/preset/tooling/other — or a plugin that is
+ * only installable after a build) and reports a refusal verdict; a `plugin`
+ * with a runnable entry yields `null` (no refusal, install proceeds).
+ */
+export interface InstallAnalysisEngine {
+  /**
+   * Classify one candidate whose remote preview showed no readable manifest.
+   * @param request - the candidate slug plus the preview outcome that marked
+   *   it unconventional.
+   * @returns the refusal (installable: false) when the model judged the
+   *   checkout not directly installable, or null when it is an installable
+   *   plugin.
+   * @throws MarketError `market/llm-unconfigured` when the analysis engine
+   *   exists but no llm provider/model is configured; `market/llm-failed` /
+   *   `market/llm-bad-output` on model failures.
+   */
+  analyze(request: {
+    readonly repository: string
+    readonly preview: PluginPreviewOutcome
+  }): Promise<PluginInstallReviewAnalysis | null>
 }
 
 /** One pending install confirmation, keyed by the derived install key. */
@@ -116,6 +152,8 @@ interface PendingInstall {
   readonly token: string
   readonly expiresAt: number
   readonly version: string | null
+  /** Smart-install refusal recorded for this candidate, when it was refused. */
+  readonly analysis?: PluginInstallReviewAnalysis
 }
 
 /** Branch/tag discriminator of one v2 install tuple. */
@@ -254,6 +292,18 @@ export class MarketSourceOperations {
    * with `refKind: 'branch' | 'tag'` it targets that specific ref, keyed by
    * the `(owner, repo, ref-kind, ref)` tuple — a branch and a tag of the same
    * name review as two independent plugins.
+   *
+   * Smart-install analysis: when the remote preview shows an unconventional
+   * candidate (no readable package.json on the probed branches — no standard
+   * npm plugin entry evidence) the review runs the configured analysis engine
+   * first and carries the refusal verdict (`analysis`) when the model judged
+   * the checkout not installable (skills/preset/tooling/other, or a plugin
+   * that needs a build first). Standard npm plugins (readable manifest) and
+   * degraded previews caused by transport failures never run the model. When
+   * the market Config configured no llm endpoint, an unconventional candidate
+   * is refused outright with `market/llm-unconfigured` and a model-config
+   * hint, so the two-step protocol never mints a token for a checkout the
+   * market cannot even classify.
    */
   async previewInstall(
     repositoryRaw: string,
@@ -269,6 +319,9 @@ export class MarketSourceOperations {
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
     const preview = await this.deps.previewEngine.preview(slug)
+    const analysis = MarketSourceOperations.isUnconventionalPreview(preview)
+      ? await this.analyzeCandidate(slug, preview)
+      : undefined
     const token = randomBytes(16).toString('hex')
     const now = (this.deps.now ?? (() => new Date()))()
     const ttl = this.deps.confirmTtlMs ?? REMOVE_CONFIRM_TTL_MS
@@ -276,6 +329,7 @@ export class MarketSourceOperations {
       token,
       expiresAt: now.getTime() + ttl,
       version: ref,
+      ...(analysis === undefined ? {} : { analysis }),
     })
     return {
       repository: slug,
@@ -287,6 +341,7 @@ export class MarketSourceOperations {
       confirmToken: token,
       expiresAt: new Date(now.getTime() + ttl).toISOString(),
       ...(kind === undefined ? {} : { refKind: kind }),
+      ...(analysis === undefined ? {} : { analysis }),
     }
   }
 
@@ -333,6 +388,17 @@ export class MarketSourceOperations {
     }
     this.pending.delete(key)
 
+    // A smart-install refusal recorded at review time makes the install
+    // non-runnable: reject with the unsupported code and the model's reason
+    // before the host pipeline runs (no record/checkout is produced).
+    if (pending.analysis !== undefined) {
+      throw new MarketControlError(
+        refusalWireCode(pending.analysis.kind),
+        pending.analysis.reason,
+        { key },
+      )
+    }
+
     const existing = await repository.records.get(key)
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
@@ -362,6 +428,43 @@ export class MarketSourceOperations {
       )
     }
     return repository
+  }
+
+  /**
+   * Whether a preview outcome marks its candidate as unconventional — the
+   * checkout has no readable package.json on the probed branches (missing or
+   * invalid), so no standard npm plugin entry can be resolved remotely and the
+   * checkout needs model classification. Transport failures (network /
+   * rate-limit / auth) are not unconventional: the manifest may simply be
+   * temporarily unreadable and the review keeps the degraded-but-installable
+   * semantics.
+   */
+  private static isUnconventionalPreview(preview: PluginPreviewOutcome): boolean {
+    return preview.status === 'degraded'
+      && (preview.code === 'github/not-found' || preview.code === 'github/bad-response')
+  }
+
+  /**
+   * Run the smart-install analysis of an unconventional candidate and map its
+   * verdict onto the review analysis field. A missing analysis engine means
+   * the market Config configured no llm endpoint — the candidate is refused
+   * with `market/llm-unconfigured` and a model-config hint (see
+   * {@link InstallAnalysisEngine}).
+   */
+  private async analyzeCandidate(
+    slug: string,
+    preview: PluginPreviewOutcome,
+  ): Promise<PluginInstallReviewAnalysis | undefined> {
+    const engine = this.deps.analysis
+    if (engine === undefined) {
+      throw new MarketControlError(
+        'market/llm-unconfigured',
+        `"${slug}" does not look like a standard npm plugin, and the smart-install analyzer is not configured. Set Config.llm.provider and Config.llm.model on plugin-market-host to classify and install non-standard checkouts.`,
+      )
+    }
+    // null → the model judged the checkout an installable plugin: no refusal.
+    const refusal = await engine.analyze({ repository: slug, preview })
+    return refusal === null ? undefined : refusal
   }
 
   /** Overwriting or deleting a protected/self entry is never allowed. */

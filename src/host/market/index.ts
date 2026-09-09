@@ -100,8 +100,11 @@ export { createNodePackageResolver }
 export {
   normalizeMarketConfig,
   MARKET_CONFIG_DEFAULTS,
+  requireMarketLlm,
   type Config,
   type MarketConfig,
+  type MarketLlmConfig,
+  type MarketLlmEndpoint,
   type ResolveEnvironment,
 } from './config.ts'
 
@@ -163,3 +166,31 @@ export {
   LOCAL_DIR_NAME_MAX_LENGTH,
   REF_SEG_MAX_LENGTH,
 } from './paths.ts'
+
+export {
+  ANALYZE_SYSTEM_PROMPT,
+  ANALYSIS_OUTPUT_MAX_LENGTH,
+  ANALYSIS_REASON_MAX_LENGTH,
+  PROMPT_MANIFEST_FIELD_MAX_CHARS,
+  PROMPT_README_MAX_CHARS,
+  README_CANDIDATES,
+  SNAPSHOT_ENTRY_LIMIT,
+  SNAPSHOT_EXCLUDED_TOP_LEVEL,
+  InstallAnalyzer,
+  buildAnalyzePrompt,
+  collectCheckoutSnapshot,
+  parseAnalysisOutput,
+  resolveAnalysisVerdict,
+  type AnalyzePrompt,
+  type CheckoutEntryInfo,
+  type CheckoutKind,
+  type CheckoutManifestSummary,
+  type CheckoutSnapshot,
+  type CollectCheckoutSnapshotOptions,
+  type InstallAnalyzerOptions,
+  type LlmCompletion,
+  type LlmCompletionRequest,
+  type PluginAnalysisVerdict,
+  type RawCheckoutAnalysis,
+  type ResolveAnalysisOptions,
+} from './analyze.ts'

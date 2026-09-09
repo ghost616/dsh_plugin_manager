@@ -159,6 +159,26 @@ export const zh = {
   installDone: '安装完成。插件默认停用，可在已管理列表中启用。',
   /** Install failure heading. */
   installFailed: '安装失败。',
+  /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
+  previewing: '正在检查该仓库并分析可否安装…',
+  /** Analysis refusal of a plugin-shaped checkout that needs a build first. */
+  analysisKindBuild: '该仓库看似 dsh 插件，但缺少可直接加载的入口，需先构建再安装。',
+  /** Analysis refusal: the checkout is a skills/instruction pack. */
+  analysisKindSkills: '该仓库是技能/指令包（skills pack），不是可安装的 dsh 插件。',
+  /** Analysis refusal: the checkout is a configuration preset. */
+  analysisKindPreset: '该仓库是配置预设（preset），不是可安装的 dsh 插件。',
+  /** Analysis refusal: the checkout is a development tool or CLI. */
+  analysisKindTooling: '该仓库是开发工具或命令行程序，不是可安装的 dsh 插件。',
+  /** Analysis refusal: the checkout could not be recognized as a plugin. */
+  analysisKindOther: '该仓库未能被识别为可安装的 dsh 插件。',
+  /** Preview failure when no LLM endpoint is configured for smart analysis. */
+  analysisNotConfigured: '智能分析未配置。',
+  /** Guidance shown with analysisNotConfigured (where to set provider/model). */
+  analysisConfigGuide: '该仓库的常规插件信息不足，需借助智能分析判断可否安装；请在插件设置/配置中为智能安装分析指定模型 provider 与 model（plugin-market-host 的 Config.llm），配置后重试。',
+  /** Preview failure when the analysis model call itself failed. */
+  analysisModelFailed: '智能分析调用失败，请重试；若持续失败请检查所配置的模型。',
+  /** Preview failure when the analysis model returned unparsable output. */
+  analysisBadOutput: '智能分析返回了无法解析的结果，请重试。',
   /** Install confirmation expired (re-preview required). */
   confirmExpired: '确认已过期，请重新确认。',
   /** Confirmation missing. */
@@ -265,6 +285,16 @@ export const en: Record<MarketManageLocaleKey, string> = {
   installing: 'Downloading and installing…',
   installDone: 'Installed. The plugin is disabled by default; enable it from the managed list.',
   installFailed: 'Install failed.',
+  previewing: 'Inspecting the repository and analyzing whether it can be installed…',
+  analysisKindBuild: 'This repository looks like a dsh plugin, but has no ready-to-load entry; build it before installing.',
+  analysisKindSkills: 'This repository is a skills/instructions pack, not an installable dsh plugin.',
+  analysisKindPreset: 'This repository is a configuration preset, not an installable dsh plugin.',
+  analysisKindTooling: 'This repository is a development tool or CLI, not an installable dsh plugin.',
+  analysisKindOther: 'This repository was not recognized as an installable dsh plugin.',
+  analysisNotConfigured: 'Smart analysis is not configured.',
+  analysisConfigGuide: 'This repository lacks standard plugin metadata, so smart analysis is required to judge whether it can be installed. Specify the LLM provider and model used for analysis in the plugin settings/config (Config.llm of plugin-market-host), then retry.',
+  analysisModelFailed: 'The smart-analysis model call failed; retry, or check the configured model.',
+  analysisBadOutput: 'Smart analysis returned an unparsable answer; retry.',
   confirmExpired: 'The confirmation expired; please confirm again.',
   confirmRequired: 'Confirmation is required.',
   protectedEntry: 'This entry is protected and cannot be changed.',

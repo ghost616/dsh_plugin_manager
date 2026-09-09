@@ -9,6 +9,7 @@ import type { Plugin } from '@deepseek-ai/cordis'
 import type {
   GitHubSearchPage,
   ManagedPluginPhase,
+  PluginInstallReviewAnalysis,
   PluginMarketGithubSource,
   PluginMarketKey,
   PluginMarketRecord,
@@ -31,6 +32,7 @@ import { isProtectedRecordKey } from '../../src/host/control/protect.ts'
 import type { MarketRepository } from '../../src/host/market/index.ts'
 import {
   MarketSourceOperations,
+  type InstallAnalysisEngine,
   type InstallerPort,
   type MarketSourceDeps,
   type PreviewEnginePort,
@@ -322,6 +324,8 @@ export function makeSourceOps(
     confirmTtlMs?: number
     isProtectedKey?: (key: string) => boolean
     isSelfModule?: (moduleName: string) => boolean
+    /** Optional smart-install analysis engine (default: none → llm-unconfigured). */
+    analysis?: InstallAnalysisEngine
   } = {},
 ): MarketSourceOperations {
   const deps: MarketSourceDeps = {
@@ -335,6 +339,7 @@ export function makeSourceOps(
       isSelfModule: options.isSelfModule ?? (() => false),
     },
     syncRecord: engines.syncRecord,
+    ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.confirmTtlMs === undefined ? {} : { confirmTtlMs: options.confirmTtlMs }),
     logger: { warn: () => {}, error: () => {} },
@@ -363,6 +368,28 @@ export function sourceTestbed(): {
 
 export function makeSource(repository = 'octocat/demo-plugin'): PluginMarketGithubSource {
   return { kind: 'github', repository, version: 'v1.0.0', commit: 'abc123' }
+}
+
+/** Scriptable smart-install analysis engine with a call recorder. */
+export function fakeAnalysisEngine(script: {
+  /** Verdict per call (null = installable plugin); overridable per call index. */
+  result?: PluginInstallReviewAnalysis | null
+  /** Throw this error on the next call instead of returning. */
+  error?: unknown
+} = {}): InstallAnalysisEngine & { readonly calls: string[] } {
+  const calls: string[] = []
+  return {
+    calls,
+    async analyze(request) {
+      calls.push(request.repository)
+      if (script.error !== undefined) {
+        const error = script.error
+        script.error = undefined
+        throw error
+      }
+      return script.result ?? null
+    },
+  }
 }
 
 /**

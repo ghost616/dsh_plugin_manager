@@ -13,6 +13,7 @@ import type {
   ManagedPluginList,
   ManagedPluginPhase,
   ManagedPluginView,
+  MarketCheckoutKind,
   MarketStatus,
   PluginInstallOutcome,
   PluginInstallReview,
@@ -121,8 +122,18 @@ export function failureText(failure: ManageUiFailure, t: Translate): string {
     case 'market/confirm-expired': return t('confirmExpired')
     case 'market/confirm-required': return t('confirmRequired')
     case 'market/protected': return t('protectedEntry')
+    case 'market/llm-unconfigured': return t('analysisNotConfigured')
+    case 'market/llm-failed': return t('analysisModelFailed')
+    case 'market/llm-bad-output': return t('analysisBadOutput')
     default: return t('failedWithCode', { code: failure.code })
   }
+}
+
+/** Whether a failure code belongs to the smart-install analysis family. */
+export function isAnalysisFailureCode(code: string): boolean {
+  return code === 'market/llm-unconfigured'
+    || code === 'market/llm-failed'
+    || code === 'market/llm-bad-output'
 }
 
 /** Localized accessible label of one live loader phase. */
@@ -322,6 +333,21 @@ type InstallPhase =
   | { readonly phase: 'install-error'; readonly review: PluginInstallReview; readonly failure: ManageUiFailure }
   | { readonly phase: 'done'; readonly outcome: PluginInstallOutcome }
 
+/** Localized refusal-heading key of one analysis kind. The `plugin` kind is
+ *  the build-first refusal; `tooling` and `other` share the generic copy. */
+const ANALYSIS_KIND_KEYS = {
+  plugin: 'analysisKindBuild',
+  skills: 'analysisKindSkills',
+  preset: 'analysisKindPreset',
+  tooling: 'analysisKindTooling',
+  other: 'analysisKindOther',
+} satisfies Record<MarketCheckoutKind, MarketManageLocaleKey>
+
+/** Localized refusal heading of one review analysis verdict. */
+function analysisKindText(kind: MarketCheckoutKind, t: Translate): string {
+  return t(ANALYSIS_KIND_KEYS[kind])
+}
+
 function InstallDialog({ repository, version, refKind, previewInstall, install, t, onClose, onInstalled }: {
   readonly repository: string
   /** Branch/tag ref name being installed; null = the legacy default branch. */
@@ -375,6 +401,9 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
   const review = phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error'
     ? phase.review
     : undefined
+  /** Smart-analysis refusal attached to the review: the candidate is not
+   *  installable, so the confirmation flow is replaced by the refusal state. */
+  const refusal = review?.analysis
   const busy = phase.phase === 'installing' || phase.phase === 'preview'
 
   return (
@@ -395,14 +424,30 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
           )}
         </header>
 
-        {phase.phase === 'preview' ? <p className={css.status} role="status">{t('loading')}</p> : null}
+        {phase.phase === 'preview' ? <p className={css.status} role="status" data-preview-loading>{t('previewing')}</p> : null}
         {phase.phase === 'preview-error' ? (
-          <p className={css.dialogError} role="alert" data-preview-error data-error-code={phase.failure.code}>
-            {t('previewFailed')} {failureText(phase.failure, t)}
-          </p>
+          <div>
+            <p className={css.dialogError} role="alert" data-preview-error data-error-code={phase.failure.code}>
+              {isAnalysisFailureCode(phase.failure.code)
+                ? failureText(phase.failure, t)
+                : `${t('previewFailed')} ${failureText(phase.failure, t)}`}
+            </p>
+            {phase.failure.code === 'market/llm-unconfigured' ? (
+              <p className={css.analysisGuide} data-analysis-guide>{t('analysisConfigGuide')}</p>
+            ) : null}
+          </div>
         ) : null}
 
-        {review !== undefined ? (
+        {refusal !== undefined ? (
+          <div className={css.analysisBlock} data-analysis-blocked data-analysis-kind={refusal.kind}>
+            <p className={css.analysisTitle} role="status" data-analysis-title>
+              {analysisKindText(refusal.kind, t)}
+            </p>
+            <p className={css.analysisReason} data-analysis-reason>{refusal.reason}</p>
+          </div>
+        ) : null}
+
+        {review !== undefined && refusal === undefined ? (
           <>
             {review.preview.status === 'degraded' ? (
               <p className={css.warning} data-degraded-notice data-degraded-code={review.preview.code}>
@@ -458,10 +503,24 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
         ) : null}
 
         <footer className={css.dialogActions}>
-          {phase.phase === 'preview-error' ? (
-            <button type="button" className={css.primaryButton} data-preview-retry onClick={() => { setPreviewTick(value => value + 1) }}>
-              {t('retry')}
+          {refusal !== undefined ? (
+            <button type="button" className={css.textButton} data-analysis-close onClick={onClose}>
+              {t('closeButton')}
             </button>
+          ) : null}
+          {phase.phase === 'preview-error' ? (
+            <>
+              {phase.failure.code === 'market/llm-unconfigured' ? null : (
+                <button type="button" className={css.primaryButton} data-preview-retry onClick={() => { setPreviewTick(value => value + 1) }}>
+                  {t('retry')}
+                </button>
+              )}
+              {isAnalysisFailureCode(phase.failure.code) ? (
+                <button type="button" className={css.textButton} data-analysis-close onClick={onClose}>
+                  {t('closeButton')}
+                </button>
+              ) : null}
+            </>
           ) : null}
           {phase.phase === 'done' ? (
             <button type="button" className={css.primaryButton} data-dialog-done onClick={onClose}>
@@ -469,19 +528,21 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
             </button>
           ) : null}
           {phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error' ? (
-            <>
-              <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
-                {busy ? t('installing') : t('installButton')}
-              </button>
-              {phase.phase === 'install-error' && phase.failure.code === 'market/confirm-expired' ? (
-                <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
-                  {t('retry')}
+            refusal === undefined ? (
+              <>
+                <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
+                  {busy ? t('installing') : t('installButton')}
                 </button>
-              ) : null}
-              <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
-                {t('cancelButton')}
-              </button>
-            </>
+                {phase.phase === 'install-error' && phase.failure.code === 'market/confirm-expired' ? (
+                  <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
+                    {t('retry')}
+                  </button>
+                ) : null}
+                <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
+                  {t('cancelButton')}
+                </button>
+              </>
+            ) : null
           ) : null}
         </footer>
       </section>

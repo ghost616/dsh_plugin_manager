@@ -544,6 +544,42 @@
   color: var(--dsw-alias-state-business-primary);
 }
 
+/* Smart-install analysis refusal panel: replaces the confirmation flow when
+   the review analysis judged the candidate not installable. */
+.analysisBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 6%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+
+.analysisTitle {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.analysisReason {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+/* Model-config guidance under an analysis preview failure (llm-unconfigured). */
+.analysisGuide {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .deps {
   display: flex;
   flex-direction: column;

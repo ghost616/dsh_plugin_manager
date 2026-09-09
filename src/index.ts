@@ -66,8 +66,15 @@ export async function apply(ctx: Context, config?: Config): Promise<void> {
   // driven control in the same context: ctx.plugin resolves the control's
   // inject ('marketRepository', 'loader') from this context chain, so the
   // repository is opened exactly once and both halves share one lifecycle.
+  // The normalized market Config's optional llm section is forwarded as the
+  // control activation Config, enabling the smart-install analyzer when the
+  // market row configured provider/model.
   new MarketRepositoryService(ctx, repository)
-  void ctx.plugin(marketControlPlugin).then(
+  const controlConfig = resolved.llm === undefined ? undefined : { llm: resolved.llm }
+  const activated = controlConfig === undefined
+    ? ctx.plugin(marketControlPlugin)
+    : ctx.plugin(marketControlPlugin, controlConfig)
+  void activated.then(
     () => undefined,
     (error: unknown) => {
       logger.error(`plugin-market-control failed to activate: ${error instanceof Error ? error.message : String(error)}`)

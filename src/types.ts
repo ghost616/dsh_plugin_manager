@@ -68,6 +68,27 @@ export type PluginMarketErrorCode =
   | 'install/deps-failed'
   | 'install/io'
   | 'gate/consent-required'
+  /**
+   * The smart-install analyzer was invoked without a usable LLM endpoint
+   * (`Config.llm.provider`/`Config.llm.model` missing); the assembly layer
+   * checks this before any analysis call.
+   */
+  | 'market/llm-unconfigured'
+  /** The analyzer's LLM completion call failed (transport/finish error). */
+  | 'market/llm-failed'
+  /** The analyzer's LLM output could not be parsed or failed field validation. */
+  | 'market/llm-bad-output'
+  /** The analyzed checkout is a skills pack, not an installable dsh plugin. */
+  | 'market/unsupported-skills'
+  /** The analyzed checkout is a configuration preset, not an installable dsh plugin. */
+  | 'market/unsupported-preset'
+  /**
+   * The analyzed checkout looks like a dsh plugin but has no ready-to-load
+   * entry (it needs a build step first); the reason explains how to build it.
+   */
+  | 'market/unsupported-build'
+  /** The analyzed checkout is tooling/other, not an installable dsh plugin. */
+  | 'market/unsupported-other'
 
 /**
  * Supported plugin source kinds, keyed by their `kind` discriminant. The map
@@ -248,6 +269,26 @@ export interface MarketStatus {
   readonly repositoryPath: string | null
 }
 
+/**
+ * Checkout kind an install analysis can classify a candidate into. Mirrors
+ * the host analyzer vocabulary (see plugin-market-host analyze.ts) as a
+ * client-safe literal union so reviews can carry it across the wire.
+ */
+export type MarketCheckoutKind = 'plugin' | 'skills' | 'preset' | 'tooling' | 'other'
+
+/**
+ * Smart-install analysis verdict attached to a review when the candidate
+ * checkout is not an installable dsh plugin. `installable` is always false on
+ * this shape (an installable plugin carries no analysis field); `kind` tells
+ * the UI which refusal copy to show and `reason` is the user-facing model
+ * rationale.
+ */
+export interface PluginInstallReviewAnalysis {
+  readonly installable: false
+  readonly kind: MarketCheckoutKind
+  readonly reason: string
+}
+
 /** One pre-download review of a candidate GitHub plugin repository. */
 export interface PluginInstallReview {
   /** Validated `owner/repo` slug of the reviewed repository. */
@@ -275,6 +316,13 @@ export interface PluginInstallReview {
   readonly confirmToken: string
   /** ISO-8601 expiry of the confirmation token. */
   readonly expiresAt: string
+  /**
+   * Smart-install analysis verdict, present only when the review classified
+   * the candidate as not installable (skills/preset/tooling/other, or a plugin
+   * needing a build first). Absent on standard npm plugins (no analysis ran)
+   * and on candidates the analysis considered installable.
+   */
+  readonly analysis?: PluginInstallReviewAnalysis
 }
 
 /** Outcome of a confirmed install. */
@@ -345,6 +393,16 @@ export interface MarketRemoteErrorDetails {
 }
 
 /**
+ * Structured payload carried by smart-install analysis wire failures. The
+ * human-readable analysis rationale travels in the Remote `message` (it is
+ * user-facing); `reason` is the same text as structured data for consumers
+ * that render the failure without parsing the message.
+ */
+export interface MarketAnalysisErrorDetails {
+  readonly reason?: string
+}
+
+/**
  * Wire failure vocabulary of the market control surface. The Host throws
  * {@link RemoteError} instances with these codes; consumers branch on `code`
  * and never instanceof. Repository/record/harness codes are the existing
@@ -400,5 +458,12 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'market/confirm-expired': { readonly key: string }
     'market/load-failed': { readonly key: string }
     'market/bad-request': {}
+    'market/llm-unconfigured': {}
+    'market/llm-failed': {}
+    'market/llm-bad-output': MarketAnalysisErrorDetails
+    'market/unsupported-skills': MarketAnalysisErrorDetails
+    'market/unsupported-preset': MarketAnalysisErrorDetails
+    'market/unsupported-build': MarketAnalysisErrorDetails
+    'market/unsupported-other': MarketAnalysisErrorDetails
   }
 }

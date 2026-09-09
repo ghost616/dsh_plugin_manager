@@ -16,6 +16,7 @@ import type {
   ManagedPluginPhase,
   ManagedPluginList,
   ManagedPluginView,
+  MarketCheckoutKind,
   PluginMarketRecord,
 } from '../../src/types.ts'
 import { en, zh, type MarketManageLocaleKey } from '../../src/client/locales.ts'
@@ -472,6 +473,8 @@ export interface InstallReviewSeed {
   peerDependencies?: string[]
   /** Version resolved by the preview (branch/tag name when pinned). */
   version?: string
+  /** Smart-analysis refusal the review carries (installable: false). */
+  analysis?: { readonly kind: MarketCheckoutKind; readonly reason: string }
 }
 
 /** Build a PluginInstallReview-shaped fixture for one repository. */
@@ -498,6 +501,7 @@ export function makeInstallReview(seed: InstallReviewSeed) {
     existing: null,
     confirmToken: `token-${slug}`,
     expiresAt: '2026-01-02T00:00:00.000Z',
+    ...(seed.analysis === undefined ? {} : { analysis: seed.analysis }),
   }
 }
 

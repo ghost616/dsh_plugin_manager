@@ -13,7 +13,7 @@ import { MarketError } from '../src/host/market/errors.ts'
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 // @ts-expect-error -- compiled artifact
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
-import { FakeEngines, makeSourceOps, testbed } from './support/control-testbed.ts'
+import { FakeEngines, fakeAnalysisEngine, makeSourceOps, testbed } from './support/control-testbed.ts'
 
 const contexts: Context[] = []
 const servers: Server[] = []
@@ -83,7 +83,11 @@ async function call(router: RouterServer, method: string, args: object): Promise
 }
 
 /** One route-wired gateway over fakes (records + source engines). */
-function routeFor(options: { idle?: boolean } = {}): {
+function routeFor(options: {
+  idle?: boolean
+  analysis?: import('../src/host/control/source.ts').InstallAnalysisEngine
+  previewResult?: import('../src/types.ts').PluginPreviewOutcome
+} = {}): {
   router: RouterServer
   bed: ReturnType<typeof testbed>
   engines: FakeEngines
@@ -95,7 +99,10 @@ function routeFor(options: { idle?: boolean } = {}): {
   const controller = options.idle === true ? null : bed.controller()
   const repository = options.idle === true ? null : bed.repository
   const engines = new FakeEngines()
-  const source = makeSourceOps(repository, bed.records, engines)
+  if (options.previewResult !== undefined) engines.previewResult = options.previewResult
+  const source = makeSourceOps(repository, bed.records, engines, {
+    ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
+  })
   const gateway = new MarketControllerGateway(ctx, {
     controller: () => controller,
     repository: () => repository,
@@ -363,6 +370,63 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
     const malformed = await post(router, 'not json', 400)
     expect(malformed.body.ok).toBe(false)
+    dispose()
+  })
+
+  it('serves the smart-install refusal over HTTP and refuses the confirmed install', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({
+      result: { installable: false, kind: 'skills', reason: 'an agent skills pack' },
+    })
+    const { router, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
+    await listen(router.server)
+
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(review.ok).toBe(true)
+    const reviewValue = (review as { ok: true; value: { analysis: unknown; confirmToken: string } }).value
+    expect(reviewValue.analysis).toEqual({ installable: false, kind: 'skills', reason: 'an agent skills pack' })
+
+    const refusal = await call(router, 'install', {
+      repository: 'octocat/demo-plugin',
+      confirmToken: reviewValue.confirmToken,
+    })
+    expect(refusal.ok).toBe(false)
+    if (!refusal.ok) {
+      expect(refusal.error.code).toBe('market/unsupported-skills')
+      expect(refusal.error.message).toBe('an agent skills pack')
+    }
+    dispose()
+  })
+
+  it('answers llm-unconfigured over HTTP when an unconventional preview has no analysis engine', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const { router, dispose } = routeFor({ previewResult: degradedNoManifest })
+    await listen(router.server)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(review.ok).toBe(false)
+    if (!review.ok) expect(review.error.code).toBe('market/llm-unconfigured')
+    dispose()
+  })
+
+  it('serves standard (ready) previews without analysis over HTTP', async () => {
+    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'never' } })
+    const { router, dispose } = routeFor({ analysis })
+    await listen(router.server)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(review.ok).toBe(true)
+    const value = (review as { ok: true; value: { analysis?: unknown } }).value
+    expect(value.analysis).toBeUndefined()
+    expect(analysis.calls).toHaveLength(0)
     dispose()
   })
 })

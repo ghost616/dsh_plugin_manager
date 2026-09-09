@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { RemoteError, remoteErrorOf, remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
+import type { InstallAnalysisEngine } from '../src/host/control/source.ts'
 // @ts-expect-error -- compiled artifact (see header note)
 import {
   MARKET_CONTROL_SERVICE_KEY,
@@ -16,6 +17,7 @@ import {
 // @ts-expect-error -- compiled artifact (see header note)
 import { MarketControlError } from '../lib/types/host/control/controller.js'
 import {
+  fakeAnalysisEngine,
   key,
   makeSourceOps,
   testbed,
@@ -28,20 +30,32 @@ afterEach(async () => {
 })
 
 function gatewayWith(
-  options: { idle?: boolean } = {},
-): { ctx: Context; gateway: MarketControllerGateway; engines: import('./support/control-testbed.ts').FakeEngines } {
+  options: {
+    idle?: boolean
+    analysis?: InstallAnalysisEngine
+    previewResult?: import('../src/types.ts').PluginPreviewOutcome
+  } = {},
+): {
+  ctx: Context
+  gateway: MarketControllerGateway
+  engines: import('./support/control-testbed.ts').FakeEngines
+  records: import('./support/control-testbed.ts').FakeRecords
+} {
   const ctx = new Context()
   contexts.push(ctx)
   const bed = testbed()
+  if (options.previewResult !== undefined) bed.engines.previewResult = options.previewResult
   const controller = options.idle === true ? null : bed.controller()
   const repository = options.idle === true ? null : bed.repository
-  const source = makeSourceOps(repository, bed.records, bed.engines)
+  const source = makeSourceOps(repository, bed.records, bed.engines, {
+    ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
+  })
   const gateway = new MarketControllerGateway(ctx, {
     controller: () => controller,
     repository: () => repository,
     source,
   })
-  return { ctx, gateway, engines: bed.engines }
+  return { ctx, gateway, engines: bed.engines, records: bed.records }
 }
 
 describe('MarketControllerGateway host Remote surface', () => {
@@ -182,5 +196,47 @@ describe('MarketControllerGateway host Remote surface', () => {
     })
     const caught = await gateway.setEnabled('gh-nope', true).catch((error: unknown) => error)
     expect(remoteErrorOf(caught)).toMatchObject({ code: 'record/not-found' })
+  })
+
+  it('surfaces the smart-install refusal on an unconventional preview and rejects its install', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({
+      result: { installable: false, kind: 'preset', reason: 'an include-tree preset' },
+    })
+    const { gateway } = gatewayWith({ analysis, previewResult: degradedNoManifest })
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    expect(review.analysis).toEqual({ installable: false, kind: 'preset', reason: 'an include-tree preset' })
+    const refusal = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
+      .catch((error: unknown) => error)
+    expect(remoteErrorOf(refusal)).toMatchObject({
+      code: 'market/unsupported-preset',
+      message: 'an include-tree preset',
+    })
+  })
+
+  it('answers llm-unconfigured over the gateway when an unconventional preview has no analysis engine', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const { gateway } = gatewayWith({ previewResult: degradedNoManifest })
+    const caught = await gateway.previewInstall('octocat/demo-plugin', null, null).catch((error: unknown) => error)
+    expect(remoteErrorOf(caught)).toMatchObject({ code: 'market/llm-unconfigured' })
+  })
+
+  it('bypasses analysis for standard plugins (ready preview never consults the engine)', async () => {
+    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'never' } })
+    const { gateway, engines } = gatewayWith({ analysis })
+    const review = await gateway.previewInstall('octocat/demo-plugin', 'branch', 'main')
+    expect(review.analysis).toBeUndefined()
+    expect(analysis.calls).toHaveLength(0)
+    expect(engines.previewCalls).toEqual(['octocat/demo-plugin'])
   })
 })

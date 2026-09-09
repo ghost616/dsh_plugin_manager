@@ -1,16 +1,26 @@
 import { homedir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import {
+  ANALYSIS_OUTPUT_MAX_LENGTH,
+  ANALYSIS_REASON_MAX_LENGTH,
   GITHUB_LIST_MAX_PAGES,
   GITHUB_LIST_PAGE_SIZE,
   MARKET_CONFIG_DEFAULTS,
   MarketRepositoryService,
   GitHubMarket,
+  InstallAnalyzer,
+  README_CANDIDATES,
+  SNAPSHOT_ENTRY_LIMIT,
+  buildAnalyzePrompt,
+  collectCheckoutSnapshot,
   isManagedLocalDirName,
+  parseAnalysisOutput,
   parseRefSeg,
   parsePluginKey,
   pluginKeyForGithubRef,
   refSegOf,
+  requireMarketLlm,
+  resolveAnalysisVerdict,
   resolveInstallTarget,
   normalizeMarketConfig,
   openMarketRepository,
@@ -62,6 +72,29 @@ describe('plugin-market-host public export surface', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(MarketError)
       expect((error as MarketError).code).toBe('config/invalid')
+    }
+  })
+
+  it('exposes the smart-install analyzer pieces from the market index', () => {
+    expect(typeof InstallAnalyzer).toBe('function')
+    expect(typeof collectCheckoutSnapshot).toBe('function')
+    expect(typeof buildAnalyzePrompt).toBe('function')
+    expect(typeof parseAnalysisOutput).toBe('function')
+    expect(typeof resolveAnalysisVerdict).toBe('function')
+    expect(typeof requireMarketLlm).toBe('function')
+    expect(README_CANDIDATES[0]).toBe('README')
+    expect(SNAPSHOT_ENTRY_LIMIT).toBeGreaterThan(0)
+    expect(ANALYSIS_REASON_MAX_LENGTH).toBeGreaterThan(0)
+    expect(ANALYSIS_OUTPUT_MAX_LENGTH).toBeGreaterThan(ANALYSIS_REASON_MAX_LENGTH)
+  })
+
+  it('keeps stable error behavior through the surface (market/llm-unconfigured)', () => {
+    try {
+      requireMarketLlm(undefined, undefined)
+      throw new Error('expected market/llm-unconfigured')
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarketError)
+      expect((error as MarketError).code).toBe('market/llm-unconfigured')
     }
   })
 })

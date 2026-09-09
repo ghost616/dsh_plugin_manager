@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { normalizeMarketConfig } from '../src/host/market/config.ts'
+import { normalizeMarketConfig, requireMarketLlm } from '../src/host/market/config.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 
 const env = { cwd: process.cwd(), home: homedir() }
@@ -59,5 +59,49 @@ describe('normalizeMarketConfig', () => {
     expect(result.createIfMissing).toBe(false)
     expect(result.linkSharedHarness).toBe(true)
     expect(result.repositoryPath).toBe(resolve(env.cwd, 'x'))
+    expect(result.llm).toBeUndefined()
+  })
+
+  it('leaves llm unset when the raw config carries no llm section', () => {
+    for (const input of [undefined, {}, { llm: undefined }, { llm: null }, { llm: {} }, { llm: { provider: '  ', model: '  ' } }]) {
+      expect(normalizeMarketConfig(input, env).llm).toBeUndefined()
+    }
+  })
+
+  it('normalizes a valid llm section (trims provider/model)', () => {
+    const result = normalizeMarketConfig({ llm: { provider: '  ds-provider ', model: 'deepseek-chat ' } }, env)
+    expect(result.llm).toEqual({ provider: 'ds-provider', model: 'deepseek-chat' })
+  })
+
+  it('keeps a partial llm section with only the fields provided', () => {
+    const onlyProvider = normalizeMarketConfig({ llm: { provider: 'ds-provider' } }, env)
+    expect(onlyProvider.llm?.provider).toBe('ds-provider')
+    expect(onlyProvider.llm?.model).toBeUndefined()
+    const onlyModel = normalizeMarketConfig({ llm: { model: 'deepseek-chat' } }, env)
+    expect(onlyModel.llm?.model).toBe('deepseek-chat')
+    expect(onlyModel.llm?.provider).toBeUndefined()
+  })
+
+  it('rejects malformed llm sections with config/invalid', () => {
+    expectMarketError(() => normalizeMarketConfig({ llm: 'deepseek' }, env), 'config/invalid')
+    expectMarketError(() => normalizeMarketConfig({ llm: ['ds'] }, env), 'config/invalid')
+    expectMarketError(() => normalizeMarketConfig({ llm: { provider: 42 } }, env), 'config/invalid')
+    expectMarketError(() => normalizeMarketConfig({ llm: { model: [] } }, env), 'config/invalid')
+    expectMarketError(() => normalizeMarketConfig({ llm: { provider: null, model: {} } }, env), 'config/invalid')
+  })
+})
+
+describe('requireMarketLlm', () => {
+  it('resolves a complete provider/model endpoint', () => {
+    expect(requireMarketLlm(' ds-provider ', ' deepseek-chat '))
+      .toEqual({ provider: 'ds-provider', model: 'deepseek-chat' })
+  })
+
+  it('throws market/llm-unconfigured when provider or model is missing', () => {
+    expectMarketError(() => requireMarketLlm(undefined, undefined), 'market/llm-unconfigured')
+    expectMarketError(() => requireMarketLlm('ds-provider', undefined), 'market/llm-unconfigured')
+    expectMarketError(() => requireMarketLlm(undefined, 'deepseek-chat'), 'market/llm-unconfigured')
+    expectMarketError(() => requireMarketLlm('  ', 'deepseek-chat'), 'market/llm-unconfigured')
+    expectMarketError(() => requireMarketLlm('ds-provider', ''), 'market/llm-unconfigured')
   })
 })

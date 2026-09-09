@@ -28,13 +28,15 @@ import { GitHubMarket } from '../market/github.ts'
 import { PluginPreviewer } from '../market/preview.ts'
 import { PluginInstaller } from '../market/install.ts'
 import { NodeFs } from '../market/fs.ts'
+import { requireMarketLlm, type MarketLlmConfig } from '../market/config.ts'
 import { MarketPluginController } from './controller.ts'
 import { entryDirectoryPath, entryModuleName } from './entry-name.ts'
 import { MarketControllerGateway } from './gateway.ts'
 import { createLoaderAdapter } from './loader-adapter.ts'
 import { createProtectionPolicy } from './protect.ts'
-import { MarketSourceOperations, type InstallerPort } from './source.ts'
+import { MarketSourceOperations, type InstallAnalysisEngine, type InstallerPort } from './source.ts'
 import { registerMarketWebChannel } from './web-channel.ts'
+import { createLlmCompletion, runCheckoutAnalysis, snapshotFromPreview, type LlmStreamService } from './analysis.ts'
 import type {} from '../market/service.ts'
 
 /** Stable plugin name; must not contain the loader-forbidden colon. */
@@ -43,7 +45,9 @@ export const name = 'plugin-market-control'
 /**
  * Services the activation needs on the composing context chain: the root
  * Cordis Loader (the repository arrives reactively, if at all — the surface
- * stays mounted and answers `market/idle` while it is absent).
+ * stays mounted and answers `market/idle` while it is absent). The llm service
+ * is resolved reactively through a nested inject (never a hard dependency), so
+ * headless runs keep the surface mounted without a chat provider.
  */
 export const inject: readonly string[] = ['loader']
 
@@ -51,6 +55,13 @@ export const inject: readonly string[] = ['loader']
 export interface Config {
   /** Removal/install confirmation validity window in milliseconds. */
   readonly confirmTtlMs?: number
+  /**
+   * Optional LLM endpoint of the smart-install analyzer. When both
+   * `provider`/`model` are present the control wires an analysis engine over
+   * the live `ctx.llm` service; otherwise an unconventional checkout is
+   * refused with `market/llm-unconfigured` and a model-config hint.
+   */
+  readonly llm?: MarketLlmConfig
 }
 
 /** Live (repository, controller) pairing, or null while the market idles. */
@@ -74,11 +85,53 @@ export function apply(ctx: Context, config?: Config): void {
   // installer is bound to the current repository per install so it shares the
   // records store instance (one serialized writer per records file).
   const github = new GitHubMarket()
+
+  // Smart-install analysis assembly: present only when the market Config
+  // configured both llm.provider and llm.model (requireMarketLlm validates at
+  // activation). The engine is inert until a preview marks a candidate
+  // unconventional; the llm service is read live on each call so a chat
+  // provider mounted after this row still serves analysis. The preview
+  // snapshot is approximated from the remote README + preview outcome (no
+  // checkout exists at preview time).
+  const llmConfig = config?.llm
+  let analysisEngine: InstallAnalysisEngine | undefined
+  if (llmConfig !== undefined) {
+    try {
+      const endpoint = requireMarketLlm(llmConfig.provider, llmConfig.model)
+      const complete = createLlmCompletion({ llm: () => liveLlm(ctx) })
+      analysisEngine = {
+        async analyze({ repository, preview }) {
+          let readme: string | null = null
+          try {
+            readme = await github.readme(repository)
+          } catch (error) {
+            // A README read failure (non-404) must not block classification:
+            // the model still judges the checkout from the preview facts.
+            logger.warn(`Smart-install analysis: README of "${repository}" unreadable (${error instanceof Error ? error.message : String(error)}); classifying from the preview outcome.`)
+          }
+          const snapshot = snapshotFromPreview(readme, preview)
+          const decision = await runCheckoutAnalysis(snapshot, {
+            complete,
+            provider: endpoint.provider,
+            model: endpoint.model,
+          })
+          return decision.installable
+            ? null
+            : { installable: false, kind: decision.kind, reason: decision.reason }
+        },
+      }
+    } catch (error) {
+      // Partial/blank llm section: leave the engine unset so unconventional
+      // previews are refused with market/llm-unconfigured and a config hint.
+      logger.warn(`Smart-install analysis disabled: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   const source = new MarketSourceOperations({
     repository: () => runtime?.repository ?? null,
     searchEngine: github,
     detailEngine: github,
     previewEngine: new PluginPreviewer(),
+    ...(analysisEngine === undefined ? {} : { analysis: analysisEngine }),
     installer: (repository): InstallerPort => {
       const installer = new PluginInstaller({ store: repository.records })
       return {
@@ -182,3 +235,17 @@ export const marketControlPlugin = {
 } satisfies Plugin.Object<Config>
 
 export default marketControlPlugin
+
+/** Read the live llm service structurally; null while none is mounted. */
+function liveLlm(ctx: Context): LlmStreamService | null {
+  try {
+    const service: unknown = ctx.llm
+    if (service !== null && typeof service === 'object' && typeof (service as { stream?: unknown }).stream === 'function') {
+      return service as LlmStreamService
+    }
+    return null
+  } catch {
+    // Not mounted on this context chain (yet): treat as unconfigured.
+    return null
+  }
+}
