@@ -1,8 +1,11 @@
 import { homedir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import {
+  GITHUB_LIST_MAX_PAGES,
+  GITHUB_LIST_PAGE_SIZE,
   MARKET_CONFIG_DEFAULTS,
   MarketRepositoryService,
+  GitHubMarket,
   normalizeMarketConfig,
   openMarketRepository,
 } from '../src/host/market/index.ts'
@@ -18,6 +21,12 @@ describe('plugin-market-host public export surface', () => {
     expect(typeof openMarketRepository).toBe('function')
     expect(typeof normalizeMarketConfig).toBe('function')
     expect(typeof MarketRepositoryService).toBe('function')
+  })
+
+  it('re-exports the GitHubMarket class and ref-listing page constants', () => {
+    expect(typeof GitHubMarket).toBe('function')
+    expect(GITHUB_LIST_PAGE_SIZE).toBe(100)
+    expect(GITHUB_LIST_MAX_PAGES).toBe(5)
   })
 
   it('keeps activation defaults: createIfMissing=false, harness linking on', () => {

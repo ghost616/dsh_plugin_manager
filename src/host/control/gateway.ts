@@ -31,6 +31,7 @@ import type {
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
+  RepositoryDetail,
 } from '../../types.ts'
 import type { MarketRepository } from '../market/index.ts'
 import { parsePluginKey } from '../market/keys.ts'
@@ -200,6 +201,16 @@ export class MarketControllerGateway extends TypertRemoteService {
         ...(perPage === null || perPage === undefined ? {} : { perPage }),
         page: page === null || page === undefined ? 1 : page,
       })
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** Aggregated detail (metadata + branches + tags + README) of one repository. */
+  @Remote('repositoryDetail')
+  async repositoryDetail(repository: string): Promise<RepositoryDetail> {
+    try {
+      return await this.deps.source.repositoryDetail(repository)
     } catch (error) {
       throw toRemoteError(error)
     }

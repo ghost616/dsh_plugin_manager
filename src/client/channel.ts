@@ -6,7 +6,8 @@
  * Wire shape (see src/host/control/web-channel.ts):
  *   POST /api/plugins-market
  *   { "method": "status" | "listManaged" | "setEnabled" | "requestRemove"
- *       | "confirmRemove" | "search" | "previewInstall" | "install",
+ *       | "confirmRemove" | "search" | "repositoryDetail" | "previewInstall"
+ *       | "install",
  *     "args": { ... } }
  *   → { "ok": true, "value": ... }
  *   | { "ok": false, "error": { "code", "message", "details" } }
@@ -29,6 +30,7 @@ import type {
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
+  RepositoryDetail,
 } from '../types.ts'
 
 /** Exact route path registered by the Host control row. */
@@ -124,6 +126,17 @@ export async function search(
   if (perPage !== undefined) args.perPage = perPage
   if (page !== undefined) args.page = page
   return post<GitHubSearchPage>('search', args)
+}
+
+/**
+ * One aggregated repository detail read: repository metadata, branch/tag name
+ * listings and the raw README, fetched by the Host in parallel (see
+ * {@link RepositoryDetail}).
+ */
+export async function repositoryDetail(
+  repository: string,
+): Promise<MarketCallResult<RepositoryDetail>> {
+  return post<RepositoryDetail>('repositoryDetail', { repository })
 }
 
 /** Review one repository and mint its single-use install confirmation. */

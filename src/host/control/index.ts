@@ -70,12 +70,14 @@ export function apply(ctx: Context, config?: Config): void {
   const ttl = config?.confirmTtlMs
   let runtime: Runtime | null = null
 
-  // Source engines (search/preview) are context-independent; the installer is
-  // bound to the current repository per install so it shares the records
-  // store instance (one serialized writer per records file).
+  // Source engines (search/detail/preview) are context-independent; the
+  // installer is bound to the current repository per install so it shares the
+  // records store instance (one serialized writer per records file).
+  const github = new GitHubMarket()
   const source = new MarketSourceOperations({
     repository: () => runtime?.repository ?? null,
-    searchEngine: new GitHubMarket(),
+    searchEngine: github,
+    detailEngine: github,
     previewEngine: new PluginPreviewer(),
     installer: (repository): InstallerPort => {
       const installer = new PluginInstaller({ store: repository.records })

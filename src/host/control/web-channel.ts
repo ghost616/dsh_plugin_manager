@@ -7,7 +7,8 @@
  * Wire shape:
  *   POST /api/plugins-market
  *   { "method": "status" | "listManaged" | "setEnabled" | "requestRemove"
- *       | "confirmRemove" | "search" | "previewInstall" | "install",
+ *       | "confirmRemove" | "search" | "repositoryDetail" | "previewInstall"
+ *       | "install",
  *     "args": { ... } }
  *   200 → { "ok": true, "value": ... }
  *        | { "ok": false, "error": { "code", "message", "details" } }
@@ -29,6 +30,7 @@ import type {
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
+  RepositoryDetail,
 } from '../../types.ts'
 import type { MarketControllerGateway } from './gateway.ts'
 import { toRemoteError } from './gateway.ts'
@@ -93,6 +95,10 @@ const METHODS: Record<string, MethodMeta> = {
       const page = optionalNumber(args.page)
       return gateway.search(keywords, perPage, page)
     },
+  },
+  repositoryDetail: {
+    parameters: ['repository'],
+    call: (gateway, args) => gateway.repositoryDetail(String(args.repository)),
   },
   previewInstall: {
     parameters: ['repository'],
@@ -274,3 +280,4 @@ export type MarketChannelValue =
   | GitHubSearchPage
   | PluginInstallReview
   | PluginInstallOutcome
+  | RepositoryDetail

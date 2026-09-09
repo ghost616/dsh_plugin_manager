@@ -115,6 +115,8 @@ export {
   parseGitHubJson,
   parseRepositorySlug,
   isValidRepositorySlug,
+  GITHUB_LIST_PAGE_SIZE,
+  GITHUB_LIST_MAX_PAGES,
   type FetchLike,
   type FetchResponse,
   type TokenProvider,

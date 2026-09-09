@@ -705,3 +705,261 @@
   border-color: var(--dsw-alias-state-business-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
 }
+
+/* --- repository detail view (metadata + branch/tag install + README) --- */
+
+/* Title bar group of the detail state: the back control sits before the
+   dialog title, both outside the drag-handle's interactive children. */
+.dialogTitleRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dialogTitleRow strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Detail content column inside the modal's scrolling zone. */
+.detailBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.detailHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.detailName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  text-decoration: none;
+}
+
+.detailName:hover {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.detailDescription {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Branch / tag install groups. */
+.refGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.groupTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.refList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.refItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.refMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.refName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.refHint {
+  flex: none;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 10%, transparent);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.refActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.refActions .primaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* README block: sanitized markdown scoped under .marketReadme so every rule
+   stays inside the card and only semantic dsw tokens feed the look. */
+.readmeSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.marketReadme {
+  overflow-wrap: break-word;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.marketReadme > :first-child {
+  margin-top: 0;
+}
+
+.marketReadme > :last-child {
+  margin-bottom: 0;
+}
+
+.marketReadme h1,
+.marketReadme h2,
+.marketReadme h3,
+.marketReadme h4,
+.marketReadme h5,
+.marketReadme h6 {
+  margin: 14px 0 6px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.marketReadme h1 {
+  font-size: 1.35em;
+}
+
+.marketReadme h2 {
+  font-size: 1.2em;
+}
+
+.marketReadme h3 {
+  font-size: 1.1em;
+}
+
+.marketReadme h4,
+.marketReadme h5,
+.marketReadme h6 {
+  font-size: 1em;
+}
+
+.marketReadme p {
+  margin: 0 0 8px;
+}
+
+.marketReadme a {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: none;
+}
+
+.marketReadme a:hover {
+  text-decoration: underline;
+}
+
+.marketReadme ul,
+.marketReadme ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.marketReadme li {
+  margin: 2px 0;
+}
+
+.marketReadme code {
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+}
+
+.marketReadme pre {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  overflow: auto;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.marketReadme pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.marketReadme blockquote {
+  margin: 0 0 8px;
+  padding: 2px 12px;
+  border-left: 3px solid var(--dsw-alias-border-l4);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.marketReadme img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.marketReadme hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+}
+
+.marketReadme table {
+  margin: 0 0 10px;
+  border-collapse: collapse;
+}
+
+.marketReadme th,
+.marketReadme td {
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  padding: 6px 10px;
+  text-align: left;
+}

@@ -32,6 +32,7 @@ describe('MarketSourceOperations search', () => {
     await expect(source.search({ keywords: 'demo' })).rejects.toMatchObject({ code: 'market/idle' })
     await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/idle' })
     await expect(source.install(SLUG, 'tok')).rejects.toMatchObject({ code: 'market/idle' })
+    await expect(source.repositoryDetail(SLUG)).rejects.toMatchObject({ code: 'market/idle' })
   })
 
   it('passes search options through and returns the engine page', async () => {
@@ -61,6 +62,66 @@ describe('MarketSourceOperations search', () => {
     bed.engines.searchError = new MarketError('github/network', 'offline', { path: 'https://api.github.com' })
     const source = ops(bed)
     await expect(source.search({ keywords: 'demo' })).rejects.toMatchObject({ code: 'github/network' })
+  })
+})
+
+describe('MarketSourceOperations repositoryDetail', () => {
+  it('aggregates metadata, branches, tags and README of one repository', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const detail = await source.repositoryDetail(SLUG)
+    expect(detail).toEqual({
+      repository: SLUG,
+      name: 'demo-plugin',
+      description: 'a dsh plugin',
+      stars: 12,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      url: 'https://github.com/octocat/demo-plugin',
+      cloneUrl: 'https://github.com/octocat/demo-plugin.git',
+      defaultBranch: 'main',
+      branches: ['main'],
+      tags: ['v1.0.0'],
+      readme: '# demo plugin\n',
+    })
+    expect(bed.engines.detailCalls).toEqual([
+      { kind: 'meta', slug: SLUG },
+      { kind: 'branches', slug: SLUG },
+      { kind: 'tags', slug: SLUG },
+      { kind: 'readme', slug: SLUG },
+    ])
+  })
+
+  it('tolerates a missing README (GitHub 404) and yields readme null', async () => {
+    const bed = testbed()
+    bed.engines.readmeError = new MarketError('github/not-found', 'no README', {
+      path: 'https://api.github.com/repos/octocat/demo-plugin/readme',
+    })
+    const source = ops(bed)
+    const detail = await source.repositoryDetail(SLUG)
+    expect(detail.readme).toBeNull()
+    expect(detail.branches).toEqual(['main'])
+    expect(detail.defaultBranch).toBe('main')
+  })
+
+  it('propagates a non-404 readme failure instead of swallowing it', async () => {
+    const bed = testbed()
+    bed.engines.readmeError = new MarketError('github/rate-limit', 'limited', { path: 'https://api.github.com' })
+    const source = ops(bed)
+    await expect(source.repositoryDetail(SLUG)).rejects.toMatchObject({ code: 'github/rate-limit' })
+  })
+
+  it('fails the whole aggregation when a non-readme query fails', async () => {
+    const bed = testbed()
+    bed.engines.branchesError = new MarketError('github/network', 'offline', { path: 'https://api.github.com' })
+    const source = ops(bed)
+    await expect(source.repositoryDetail(SLUG)).rejects.toMatchObject({ code: 'github/network' })
+  })
+
+  it('rejects a malformed repository slug with github/bad-request before any engine call', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await expect(source.repositoryDetail('not-a-slug')).rejects.toMatchObject({ code: 'github/bad-request' })
+    expect(bed.engines.detailCalls).toHaveLength(0)
   })
 })
 

@@ -15,6 +15,7 @@ import type {
   PluginPreviewOutcome,
 } from '../../src/types.ts'
 import { parsePluginKey } from '../../src/host/market/keys.ts'
+import type { GitHubRepoMeta } from '../../src/host/market/github.ts'
 import {
   MarketPluginController,
   type MarketControllerDeps,
@@ -32,6 +33,7 @@ import {
   type InstallerPort,
   type MarketSourceDeps,
   type PreviewEnginePort,
+  type RepositoryDetailPort,
   type SearchEnginePort,
 } from '../../src/host/control/source.ts'
 import type { PluginMarketSource } from '../../src/types.ts'
@@ -228,6 +230,49 @@ export class FakeEngines {
     },
   }
 
+  /** Detail-engine script: metadata/branches/tags/readme stubs + recording. */
+  detailCalls: { kind: 'meta' | 'branches' | 'tags' | 'readme'; slug: string }[] = []
+  metaResult: GitHubRepoMeta = {
+    slug: 'octocat/demo-plugin',
+    name: 'demo-plugin',
+    description: 'a dsh plugin',
+    stars: 12,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    url: 'https://github.com/octocat/demo-plugin',
+    cloneUrl: 'https://github.com/octocat/demo-plugin.git',
+    defaultBranch: 'main',
+  }
+  metaError: unknown = undefined
+  branchesResult: readonly string[] = ['main']
+  branchesError: unknown = undefined
+  tagsResult: readonly string[] = ['v1.0.0']
+  tagsError: unknown = undefined
+  readmeResult: string | null = '# demo plugin\n'
+  readmeError: unknown = undefined
+
+  detailEngine: RepositoryDetailPort = {
+    repositoryMeta: async (slug) => {
+      this.detailCalls.push({ kind: 'meta', slug })
+      if (this.metaError !== undefined) throw this.metaError
+      return { ...this.metaResult, slug }
+    },
+    branches: async (slug) => {
+      this.detailCalls.push({ kind: 'branches', slug })
+      if (this.branchesError !== undefined) throw this.branchesError
+      return this.branchesResult
+    },
+    tags: async (slug) => {
+      this.detailCalls.push({ kind: 'tags', slug })
+      if (this.tagsError !== undefined) throw this.tagsError
+      return this.tagsResult
+    },
+    readme: async (slug) => {
+      this.detailCalls.push({ kind: 'readme', slug })
+      if (this.readmeError !== undefined) throw this.readmeError
+      return this.readmeResult
+    },
+  }
+
   installer(records: FakeRecords): InstallerPort {
     return {
       install: async (input) => {
@@ -275,6 +320,7 @@ export function makeSourceOps(
   const deps: MarketSourceDeps = {
     repository: () => repository,
     searchEngine: engines.searchEngine,
+    detailEngine: engines.detailEngine,
     previewEngine: engines.previewEngine,
     installer: () => engines.installer(records),
     protection: {

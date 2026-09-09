@@ -19,7 +19,9 @@ import type {
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
+  RepositoryDetail,
 } from '../types.ts'
+import { renderReadmeHtml } from './readme.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
 
@@ -40,10 +42,13 @@ export interface ManagePluginsTabInjected {
   confirmRemove: (key: PluginMarketKey, token: string) => Promise<RemoveOutcome>
   /** One GitHub search page (1-based page, fixed page size). */
   search: (keywords: string, page: number) => Promise<GitHubSearchPage>
-  /** Review one repository and mint its single-use install confirmation. */
-  previewInstall: (repository: string) => Promise<PluginInstallReview>
-  /** Run the double-confirmed install for a reviewed repository. */
-  install: (repository: string, confirmToken: string) => Promise<PluginInstallOutcome>
+  /** Aggregated repository detail (metadata, refs, README). */
+  repositoryDetail: (repository: string) => Promise<RepositoryDetail>
+  /** Review one repository ref (default branch when no version) and mint its
+   *  single-use install confirmation. */
+  previewInstall: (repository: string, version?: string | null) => Promise<PluginInstallReview>
+  /** Run the double-confirmed install for a reviewed repository ref. */
+  install: (repository: string, confirmToken: string, version?: string | null) => Promise<PluginInstallOutcome>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -305,8 +310,10 @@ type InstallPhase =
   | { readonly phase: 'install-error'; readonly review: PluginInstallReview; readonly failure: ManageUiFailure }
   | { readonly phase: 'done'; readonly outcome: PluginInstallOutcome }
 
-function InstallDialog({ repository, previewInstall, install, t, onClose, onInstalled }: {
+function InstallDialog({ repository, version, previewInstall, install, t, onClose, onInstalled }: {
   readonly repository: string
+  /** Branch/tag ref being installed; null = the repository default branch. */
+  readonly version?: string | null
   readonly previewInstall: ManagePluginsTabInjected['previewInstall']
   readonly install: ManagePluginsTabInjected['install']
   readonly t: Translate
@@ -326,18 +333,18 @@ function InstallDialog({ repository, previewInstall, install, t, onClose, onInst
     let current = true
     setPhase({ phase: 'preview' })
     void Promise.resolve()
-      .then(() => previewInstall(repository))
+      .then(() => previewInstall(repository, version ?? null))
       .then(
         (review) => { if (current) setPhase({ phase: 'review', review }) },
         (error: unknown) => { if (current) setPhase({ phase: 'preview-error', failure: toUiFailure(error) }) },
       )
     return () => { current = false }
-  }, [previewInstall, install, previewTick, repository])
+  }, [previewInstall, install, previewTick, repository, version])
 
   const confirm = (review: PluginInstallReview): void => {
     if (phase.phase === 'installing') return
     setPhase({ phase: 'installing', review })
-    void install(repository, review.confirmToken)
+    void install(repository, review.confirmToken, version ?? null)
       .then(
         (outcome) => {
           if (!mounted.current) return
@@ -367,7 +374,11 @@ function InstallDialog({ repository, previewInstall, install, t, onClose, onInst
       >
         <header className={css.dialogHeader}>
           <strong>{t('installDialogTitle')}</strong>
-          <code data-dialog-repository>{repository}</code>
+          {version === undefined || version === null ? (
+            <code data-dialog-repository>{repository}</code>
+          ) : (
+            <code data-dialog-repository data-install-version={version}>{`${repository}@${version}`}</code>
+          )}
         </header>
 
         {phase.phase === 'preview' ? <p className={css.status} role="status">{t('loading')}</p> : null}
@@ -611,10 +622,224 @@ type MarketSearchState =
   | { readonly phase: 'error'; readonly failure: ManageUiFailure; readonly keywords: string; readonly page: number }
   | { readonly phase: 'ready'; readonly pageData: GitHubSearchPage; readonly keywords: string; readonly page: number }
 
-function GitHubDialog({ t, installed, search, previewInstall, install, onClose, onInstalled }: {
+/** One install target selected from the detail view (branch or tag). */
+interface MarketInstallTarget {
+  readonly repository: string
+  /** Branch/tag ref to install; null = the repository default branch. */
+  readonly version: string | null
+}
+
+/** Load state of the repository detail view. */
+type MarketDetailState =
+  | { readonly status: 'loading' }
+  | { readonly status: 'error'; readonly failure: ManageUiFailure }
+  | { readonly status: 'ready'; readonly detail: RepositoryDetail }
+
+/** One installed-ref marker query over the roster projection. */
+function isRefInstalled(
+  installedVersions: ReadonlyMap<string, ReadonlySet<string>>,
+  repository: string,
+  version: string,
+): boolean {
+  return installedVersions.get(repository)?.has(version) ?? false
+}
+
+/**
+ * README block of the detail view. Renders marked → DOMPurify under the
+ * `.marketReadme` scope class; a null HTML result (unexpected render error)
+ * surfaces as a localized failure instead of raw markdown.
+ */
+function DetailReadme({ readme, url, defaultBranch, t }: {
+  readonly readme: string
+  readonly url: string
+  readonly defaultBranch: string
   readonly t: Translate
+}): ReactNode {
+  const html = useMemo(() => {
+    try {
+      return renderReadmeHtml(readme, { url, defaultBranch })
+    } catch {
+      return null
+    }
+  }, [readme, url, defaultBranch])
+  if (html === null) {
+    return <p className={css.status} role="alert" data-readme-error>{t('detailError')}</p>
+  }
+  return <div className={css.marketReadme} data-readme dangerouslySetInnerHTML={{ __html: html }} />
+}
+
+/**
+ * Ready detail content: repository metadata header, branch group, tag group
+ * and the README block. Rendered inside the modal's scrolling zone so long
+ * README documents scroll instead of stretching the dialog shell.
+ */
+function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
+  readonly detail: RepositoryDetail
+  readonly installedVersions: ReadonlyMap<string, ReadonlySet<string>>
+  readonly t: Translate
+  /** Open the install review for one branch/tag ref of this repository. */
+  readonly onInstall: (version: string) => void
+}): ReactNode {
+  const hasRefs = detail.branches.length > 0 || detail.tags.length > 0
+  return (
+    <div className={css.detailBody} data-detail-view data-repository={detail.repository}>
+      <div className={css.detailHeader} data-detail-header>
+        <a
+          className={css.detailName}
+          href={detail.url}
+          target="_blank"
+          rel="noreferrer"
+          data-detail-name
+          title={detail.repository}
+        >
+          {detail.name}
+        </a>
+        {detail.description === null ? null : (
+          <p className={css.detailDescription} data-detail-description>{detail.description}</p>
+        )}
+        <span className={css.resultMeta} data-detail-meta>
+          <span data-detail-stars>{t('starsLabel', { count: String(detail.stars) })}</span>
+          {detail.updatedAt === null ? null : (
+            <span data-detail-updated>{t('updatedLabel', { date: shortDate(detail.updatedAt) })}</span>
+          )}
+          <a className={css.externalLink} href={detail.url} target="_blank" rel="noreferrer" data-detail-link>
+            {t('repoLinkLabel')}
+          </a>
+        </span>
+      </div>
+
+      {!hasRefs ? <p className={css.status} role="status" data-detail-empty>{t('detailEmpty')}</p> : null}
+
+      {detail.branches.length > 0 ? (
+        <section className={css.refGroup} data-branch-group aria-label={t('branchesTitle')}>
+          <h4 className={css.groupTitle} data-branch-title>{t('branchesTitle')}</h4>
+          <ul className={css.refList}>
+            {detail.branches.map(name => {
+              const installed = isRefInstalled(installedVersions, detail.repository, name)
+              return (
+                <li key={name} className={css.refItem} data-branch-item data-ref-name={name}>
+                  <span className={css.refMeta}>
+                    <code className={css.refName} data-branch-name>{name}</code>
+                    {name === detail.defaultBranch ? (
+                      <span className={css.refHint} data-default-branch>{t('defaultBranchLabel')}</span>
+                    ) : null}
+                  </span>
+                  <span className={css.refActions}>
+                    {installed ? (
+                      <span className={css.installedBadge} data-version-installed>{t('installedBadge')}</span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={css.primaryButton}
+                      data-branch-install
+                      disabled={installed}
+                      onClick={() => { onInstall(name) }}
+                    >
+                      {t('installButton')}
+                    </button>
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {detail.tags.length > 0 ? (
+        <section className={css.refGroup} data-tag-group aria-label={t('tagsTitle')}>
+          <h4 className={css.groupTitle} data-tag-title>{t('tagsTitle')}</h4>
+          <ul className={css.refList}>
+            {detail.tags.map(name => {
+              const installed = isRefInstalled(installedVersions, detail.repository, name)
+              return (
+                <li key={name} className={css.refItem} data-tag-item data-ref-name={name}>
+                  <span className={css.refMeta}>
+                    <code className={css.refName} data-tag-name>{name}</code>
+                  </span>
+                  <span className={css.refActions}>
+                    {installed ? (
+                      <span className={css.installedBadge} data-version-installed>{t('installedBadge')}</span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={css.primaryButton}
+                      data-tag-install
+                      disabled={installed}
+                      onClick={() => { onInstall(name) }}
+                    >
+                      {t('installButton')}
+                    </button>
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      <section className={css.readmeSection} data-readme-section aria-label={t('readmeHeading')}>
+        <h4 className={css.groupTitle} data-readme-title>{t('readmeHeading')}</h4>
+        {detail.readme === null ? (
+          <p className={css.status} role="status" data-readme-empty>{t('noReadme')}</p>
+        ) : (
+          <DetailReadme
+            readme={detail.readme}
+            url={detail.url}
+            defaultBranch={detail.defaultBranch}
+            t={t}
+          />
+        )}
+      </section>
+    </div>
+  )
+}
+
+/**
+ * Detail view of one repository: localizes the load states and hands the ready
+ * detail to {@link RepositoryDetailBody}. Lives inside the shared modal shell
+ * and its scrolling zone; the list search/pagination are hidden while it is up.
+ */
+function RepositoryDetailPane({ slug, state, installedVersions, t, onRetry, onInstall }: {
+  readonly slug: string
+  readonly state: MarketDetailState
+  readonly installedVersions: ReadonlyMap<string, ReadonlySet<string>>
+  readonly t: Translate
+  readonly onRetry: () => void
+  readonly onInstall: (version: string) => void
+}): ReactNode {
+  return (
+    <div data-detail-pane data-detail-slug={slug}>
+      {state.status === 'loading' ? (
+        <p className={css.status} role="status" data-detail-loading>{t('detailLoading')}</p>
+      ) : null}
+      {state.status === 'error' ? (
+        <div className={css.marketError} role="alert" data-detail-error data-error-code={state.failure.code}>
+          <p>{failureText(state.failure, t)}</p>
+          <button type="button" className={css.textButton} data-detail-retry onClick={onRetry}>
+            {t('retry')}
+          </button>
+        </div>
+      ) : null}
+      {state.status === 'ready' ? (
+        <RepositoryDetailBody
+          detail={state.detail}
+          installedVersions={installedVersions}
+          t={t}
+          onInstall={onInstall}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function GitHubDialog({ t, installed, installedVersions, search, repositoryDetail, previewInstall, install, onClose, onInstalled }: {
+  readonly t: Translate
+  /** Repositories that already own a managed record (row badge markers). */
   readonly installed: ReadonlySet<string>
+  /** Installed version names per repository (detail-view per-ref markers). */
+  readonly installedVersions: ReadonlyMap<string, ReadonlySet<string>>
   readonly search: ManagePluginsTabInjected['search']
+  readonly repositoryDetail: ManagePluginsTabInjected['repositoryDetail']
   readonly previewInstall: ManagePluginsTabInjected['previewInstall']
   readonly install: ManagePluginsTabInjected['install']
   readonly onClose: () => void
@@ -625,7 +850,11 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   const generation = useRef(0)
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<MarketSearchState>({ phase: 'idle' })
-  const [installTarget, setInstallTarget] = useState<string | null>(null)
+  /** Open detail slug: null shows the search/list view. */
+  const [detailSlug, setDetailSlug] = useState<string | null>(null)
+  const [detailTick, setDetailTick] = useState(0)
+  const [detailState, setDetailState] = useState<MarketDetailState>({ status: 'loading' })
+  const [installTarget, setInstallTarget] = useState<MarketInstallTarget | null>(null)
   const [jumpValue, setJumpValue] = useState('')
   const [dragPosition, setDragPosition] = useState<{ left: number; top: number } | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -642,6 +871,38 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
       detachDrag.current?.()
     }
   }, [])
+
+  /**
+   * Detail load: runs whenever a slug is opened (or the retry tick fires).
+   * Search generations are untouched — a detail response that resolves after
+   * the user pressed back (slug null) is dropped by the closure guard.
+   */
+  useEffect(() => {
+    const slug = detailSlug
+    if (slug === null) return
+    let current = true
+    setDetailState({ status: 'loading' })
+    void Promise.resolve()
+      .then(() => repositoryDetail(slug))
+      .then(
+        (detail) => { if (current && mounted.current) setDetailState({ status: 'ready', detail }) },
+        (error: unknown) => { if (current && mounted.current) setDetailState({ status: 'error', failure: toUiFailure(error) }) },
+      )
+    return () => { current = false }
+  }, [detailSlug, detailTick, repositoryDetail])
+
+  /** Back to the list view; the search keywords/page state is untouched. */
+  const goBackToList = (): void => {
+    setDetailState({ status: 'loading' })
+    setDetailSlug(null)
+  }
+
+  /** Open the install review for one branch/tag ref of the shown repository. */
+  const openRefInstall = (repository: string, version: string): void => {
+    setInstallTarget({ repository, version })
+  }
+
+  const detailInView = detailSlug !== null
 
   /**
    * Begin dragging the dialog from its title bar. Interactive children (the
@@ -735,7 +996,6 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
   const totalPages = ready === undefined || ready.pageData.totalCount === 0
     ? 0
     : Math.ceil(ready.pageData.totalCount / SEARCH_PAGE_SIZE)
-  const installing = installTarget !== null
 
   /** Jump to an explicit page: clamp 1..totalPages; invalid input no-ops. */
   const commitJump = (): void => {
@@ -772,7 +1032,19 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
           data-drag-handle
           onMouseDown={beginDrag}
         >
-          <strong>{t('marketDialogTitle')}</strong>
+          <span className={css.dialogTitleRow}>
+            {detailInView ? (
+              <button
+                type="button"
+                className={css.textButton}
+                data-detail-back
+                onClick={goBackToList}
+              >
+                {t('detailBack')}
+              </button>
+            ) : null}
+            <strong>{detailInView ? t('detailTitle') : t('marketDialogTitle')}</strong>
+          </span>
           <button
             type="button"
             className={css.dialogClose}
@@ -784,98 +1056,112 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
           </button>
         </header>
 
-        <form className={css.searchForm} onSubmit={submit}>
-          <input
-            type="search"
-            value={query}
-            placeholder={t('githubSearch')}
-            aria-label={t('githubSearch')}
-            data-market-search-input
-            onChange={(event) => { setQuery(event.currentTarget.value) }}
-          />
-          <button
-            type="submit"
-            className={css.primaryButton}
-            data-market-search-submit
-            disabled={query.trim().length === 0 || searchState.phase === 'loading'}
-          >
-            {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
-          </button>
-        </form>
-
-        <div className={css.marketScroll} data-market-scroll>
-          {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
-          {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
-          {searchState.phase === 'error' ? (
-            <div className={css.marketError} role="alert" data-market-error data-error-code={searchState.failure.code}>
-              <p>{failureText(searchState.failure, t)}</p>
+        {detailSlug === null ? (
+          <>
+            <form className={css.searchForm} onSubmit={submit}>
+              <input
+                type="search"
+                value={query}
+                placeholder={t('githubSearch')}
+                aria-label={t('githubSearch')}
+                data-market-search-input
+                onChange={(event) => { setQuery(event.currentTarget.value) }}
+              />
               <button
-                type="button"
-                className={css.textButton}
-                data-market-retry
-                onClick={() => { runSearch(searchState.keywords, searchState.page) }}
+                type="submit"
+                className={css.primaryButton}
+                data-market-search-submit
+                disabled={query.trim().length === 0 || searchState.phase === 'loading'}
               >
-                {t('retry')}
+                {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
               </button>
+            </form>
+
+            <div className={css.marketScroll} data-market-scroll>
+              {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
+              {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
+              {searchState.phase === 'error' ? (
+                <div className={css.marketError} role="alert" data-market-error data-error-code={searchState.failure.code}>
+                  <p>{failureText(searchState.failure, t)}</p>
+                  <button
+                    type="button"
+                    className={css.textButton}
+                    data-market-retry
+                    onClick={() => { runSearch(searchState.keywords, searchState.page) }}
+                  >
+                    {t('retry')}
+                  </button>
+                </div>
+              ) : null}
+              {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
+                <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
+              ) : null}
+
+              {ready !== undefined && ready.pageData.items.length > 0 ? (
+                <ul className={css.resultList} data-market-results>
+                  {ready.pageData.items.map(item => {
+                    const managed = installed.has(item.repository)
+                    return (
+                      <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
+                        <div className={css.resultMain}>
+                          <a
+                            className={css.resultName}
+                            href={item.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            data-market-link
+                            title={item.repository}
+                          >
+                            {item.name}
+                          </a>
+                          {item.description === null ? null : (
+                            <p className={css.resultDescription} data-result-description>{item.description}</p>
+                          )}
+                          <span className={css.resultMeta}>
+                            <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
+                            {item.updatedAt === null ? null : (
+                              <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
+                            )}
+                            <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
+                              {t('repoLinkLabel')}
+                            </a>
+                          </span>
+                        </div>
+                        <div className={css.resultActions}>
+                          {managed ? (
+                            <span className={css.installedBadge} data-installed>{t('installedBadge')}</span>
+                          ) : null}
+                          <button
+                            type="button"
+                            className={css.primaryButton}
+                            data-row-details
+                            data-detail-repository={item.repository}
+                            onClick={() => { setDetailSlug(item.repository) }}
+                          >
+                            {t('rowDetails')}
+                          </button>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              ) : null}
             </div>
-          ) : null}
-          {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
-            <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
-          ) : null}
+          </>
+        ) : (
+          <div className={css.marketScroll} data-market-scroll data-detail-scroll>
+            <RepositoryDetailPane
+              slug={detailSlug}
+              state={detailState}
+              installedVersions={installedVersions}
+              t={t}
+              onRetry={() => { setDetailTick(value => value + 1) }}
+              onInstall={(version) => { openRefInstall(detailSlug, version) }}
+            />
+          </div>
+        )}
 
-          {ready !== undefined && ready.pageData.items.length > 0 ? (
-            <ul className={css.resultList} data-market-results>
-              {ready.pageData.items.map(item => {
-                const managed = installed.has(item.repository)
-                return (
-                  <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
-                    <div className={css.resultMain}>
-                      <a
-                        className={css.resultName}
-                        href={item.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        data-market-link
-                        title={item.repository}
-                      >
-                        {item.name}
-                      </a>
-                      {item.description === null ? null : (
-                        <p className={css.resultDescription} data-result-description>{item.description}</p>
-                      )}
-                      <span className={css.resultMeta}>
-                        <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
-                        {item.updatedAt === null ? null : (
-                          <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
-                        )}
-                        <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
-                          {t('repoLinkLabel')}
-                        </a>
-                      </span>
-                    </div>
-                    <div className={css.resultActions}>
-                      {managed ? (
-                        <span className={css.installedBadge} data-installed>{t('installedBadge')}</span>
-                      ) : null}
-                      <button
-                        type="button"
-                        className={css.primaryButton}
-                        data-install-trigger
-                        data-install-repository={item.repository}
-                        disabled={managed}
-                        onClick={() => { if (!managed) setInstallTarget(item.repository) }}
-                      >
-                        {t('installButton')}
-                      </button>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          ) : null}
-        </div>
-
-        {ready !== undefined && ready.pageData.items.length > 0 ? (
+        {detailSlug === null && ready !== undefined && ready.pageData.items.length > 0 ? (
           <footer className={css.pagination} data-pagination>
             <button
               type="button"
@@ -929,10 +1215,11 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
           </footer>
         ) : null}
 
-        {installing ? (
+        {installTarget !== null ? (
           <InstallDialog
-            key={installTarget}
-            repository={installTarget!}
+            key={`${installTarget.repository}@${installTarget.version ?? ''}`}
+            repository={installTarget.repository}
+            version={installTarget.version}
             previewInstall={previewInstall}
             install={install}
             t={t}
@@ -953,7 +1240,7 @@ function GitHubDialog({ t, installed, search, previewInstall, install, onClose, 
 export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const {
     status: readStatus, list, setEnabled, requestRemove, confirmRemove,
-    search, previewInstall, install, t,
+    search, repositoryDetail, previewInstall, install, t,
   } = props
   const mounted = useRef(true)
   const [statusState, setStatusState] = useState<StatusState>({ status: 'loading' })
@@ -1069,6 +1356,26 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     return found
   }, [listState])
 
+  /** Installed version (branch/tag) names per repository, for the detail view.
+   *  Legacy records with `source.version === null` (default-branch installs)
+   *  contribute an empty set: their exact ref is unknown, so no detail entry
+   *  is ever wrongly marked as installed for them. */
+  const installedVersions = useMemo(() => {
+    const found = new Map<string, Set<string>>()
+    if (listState.status !== 'ready') return found
+    for (const view of listState.snapshot.entries) {
+      const source = view.record.source
+      if (source.kind !== 'github') continue
+      let versions = found.get(source.repository)
+      if (versions === undefined) {
+        versions = new Set()
+        found.set(source.repository, versions)
+      }
+      if (source.version !== null) versions.add(source.version)
+    }
+    return found
+  }, [listState])
+
   const configured = statusState.status === 'configured'
 
   return (
@@ -1115,7 +1422,9 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
           key="market"
           t={t}
           installed={installedRepositories}
+          installedVersions={installedVersions}
           search={search}
+          repositoryDetail={repositoryDetail}
           previewInstall={previewInstall}
           install={install}
           onClose={() => { setMarketOpen(false) }}

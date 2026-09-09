@@ -350,6 +350,8 @@ export interface ManagedViewSeed {
   enabled?: boolean
   phase?: ManagedPluginPhase
   lastError?: string | null
+  /** Pinned branch/tag of the record; null models a legacy default-branch install. */
+  version?: string | null
 }
 
 /** Build one ManagedPluginView from a compact seed. */
@@ -360,7 +362,12 @@ export function makeView(seed: ManagedViewSeed): ManagedPluginView {
     key: seed.key as PluginMarketRecord['key'],
     record: {
       key: seed.key as PluginMarketRecord['key'],
-      source: { kind: 'github', repository: seed.repository, version: 'v1.0.0', commit: null },
+      source: {
+        kind: 'github',
+        repository: seed.repository,
+        version: seed.version === undefined ? 'v1.0.0' : seed.version,
+        commit: null,
+      },
       localDirName: `gh-${seed.key}`,
       entry: null,
       installedAt: '2026-01-01T00:00:00.000Z',
@@ -413,6 +420,41 @@ export function makeSearchPage(items: SearchItemSeed[]) {
   return { totalCount: items.length, items: items.map(makeRepoSummary) }
 }
 
+export interface RepositoryDetailSeed {
+  repository: string
+  name?: string
+  description?: string | null
+  stars?: number
+  updatedAt?: string | null
+  url?: string
+  defaultBranch?: string
+  branches?: string[]
+  tags?: string[]
+  /** Raw README markdown; undefined = a README exists with a default body,
+   *  null = the repository has no README. */
+  readme?: string | null
+}
+
+/** Build a RepositoryDetail-shaped fixture for one repository. */
+export function makeRepositoryDetail(seed: RepositoryDetailSeed) {
+  const fallbackUrl = `https://github.com/${seed.repository}`
+  const defaultBranch = seed.defaultBranch ?? 'main'
+  const branches = seed.branches ?? [defaultBranch]
+  return {
+    repository: seed.repository,
+    name: seed.name ?? seed.repository.split('/')[1] ?? seed.repository,
+    description: seed.description ?? 'a dsh plugin',
+    stars: seed.stars ?? 0,
+    updatedAt: seed.updatedAt ?? '2026-01-01T00:00:00.000Z',
+    url: seed.url ?? fallbackUrl,
+    cloneUrl: `${fallbackUrl}.git`,
+    defaultBranch,
+    branches,
+    tags: seed.tags ?? [],
+    readme: seed.readme === undefined ? '# Overview' : seed.readme,
+  }
+}
+
 /** Build market activation status. */
 export function makeStatus(configured: boolean, repositoryPath: string | null = configured ? '/repo' : null) {
   return { configured, repositoryPath }
@@ -424,6 +466,8 @@ export interface InstallReviewSeed {
   degraded?: boolean
   dependencies?: string[]
   peerDependencies?: string[]
+  /** Version resolved by the preview (branch/tag name when pinned). */
+  version?: string
 }
 
 /** Build a PluginInstallReview-shaped fixture for one repository. */
@@ -432,7 +476,7 @@ export function makeInstallReview(seed: InstallReviewSeed) {
   const key = `gh-${slug.replace('/', '-')}`
   const summary = {
     name: slug.split('/')[1] ?? slug,
-    version: '1.0.0',
+    version: seed.version ?? '1.0.0',
     dependencies: {
       dependencies: seed.dependencies ?? ['@deepseek-ai/cordis'],
       peerDependencies: seed.peerDependencies ?? [],
@@ -454,12 +498,16 @@ export function makeInstallReview(seed: InstallReviewSeed) {
 }
 
 /** Build a PluginInstallOutcome-shaped fixture. */
-export function makeInstallOutcome(seed: { repository: string; overwritten?: boolean }) {
+export function makeInstallOutcome(seed: { repository: string; overwritten?: boolean; version?: string }) {
   const key = `gh-${seed.repository.replace('/', '-')}`
   return {
     key,
     overwritten: seed.overwritten === true,
-    record: makeView({ key, repository: seed.repository }).record,
+    record: makeView({
+      key,
+      repository: seed.repository,
+      version: seed.version === undefined ? 'v1.0.0' : seed.version,
+    }).record,
     checkoutDir: `/repo/${key}`,
   }
 }
@@ -477,7 +525,9 @@ export function managePageHarness(overrides: Record<string, unknown> = {}) {
     setEnabled: vi.fn(async () => { throw new Error('unused default setEnabled') }),
     requestRemove: vi.fn(async () => { throw new Error('unused default requestRemove') }),
     confirmRemove: vi.fn(async () => { throw new Error('unused default confirmRemove') }),
-    search: vi.fn(async () => makeSearchPage([])),    previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
+    search: vi.fn(async () => makeSearchPage([])),
+    repositoryDetail: vi.fn(async () => { throw new Error('unused default repositoryDetail') }),
+    previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
     install: vi.fn(async () => { throw new Error('unused default install') }),
   }
   const props = {

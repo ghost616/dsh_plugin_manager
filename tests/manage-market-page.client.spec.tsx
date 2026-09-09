@@ -16,6 +16,7 @@ import {
   makeInstallOutcome,
   makeInstallReview,
   makeList,
+  makeRepositoryDetail,
   makeSearchPage,
   makeStatus,
   managePageHarness,
@@ -211,7 +212,7 @@ describe('ManagePluginsTab GitHub browse modal', () => {
   })
 })
 describe('ManagePluginsTab GitHub browse modal interactions', () => {
-  it('marks installed rows with a badge and disables their install action', async () => {
+  it('marks installed rows with a badge and keeps a details entry for every row', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-octocat-demo-plugin', repository: 'octocat/demo-plugin', enabled: false },
     ]))
@@ -229,52 +230,87 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     const installed = cards[0]!
     expect(installed.getAttribute('data-repository')).toBe('octocat/demo-plugin')
     expect(installed.querySelector('[data-installed]')?.textContent).toContain(zh.installedBadge)
-    expect((installed.querySelector('[data-install-trigger]') as HTMLButtonElement).disabled).toBe(true)
+    // List rows no longer carry a direct install action: they open the detail
+    // view, where the exact branch/tag is chosen.
+    expect(installed.querySelector('[data-install-trigger]')).toBeNull()
+    const details = installed.querySelector('[data-row-details]') as HTMLButtonElement
+    expect(details.disabled).toBe(false)
+    expect(details.getAttribute('data-detail-repository')).toBe('octocat/demo-plugin')
 
     const fresh = cards[1]!
     expect(fresh.querySelector('[data-installed]')).toBeNull()
-    expect((fresh.querySelector('[data-install-trigger]') as HTMLButtonElement).disabled).toBe(false)
+    expect((fresh.querySelector('[data-row-details]') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('installs a fresh result through the two-step preview flow and re-marks it', async () => {
+  it('installs a branch from the detail view through the versioned preview flow and re-marks it', async () => {
     let snapshot = makeList([])
     const list = vi.fn(async () => snapshot)
-    const previewInstall = vi.fn(async (repository: string) => makeInstallReview({ repository }))
-    const install = vi.fn(async (repository: string) => {
-      snapshot = makeList([{ key: `gh-${repository.replace('/', '-')}`, repository, enabled: false }])
-      return makeInstallOutcome({ repository })
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main', 'dev'],
+      tags: ['v1.0.0'],
+    }))
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({ repository, version: version ?? undefined }))
+    const install = vi.fn(async (repository: string, _token: string, version: string | null) => {
+      snapshot = makeList([{
+        key: `gh-${repository.replace('/', '-')}`,
+        repository,
+        version,
+        enabled: false,
+      }])
+      return makeInstallOutcome({ repository, version: version ?? undefined })
     })
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const { props } = managePageHarness({ list, search, previewInstall, install })
+    const { props } = managePageHarness({ list, search, repositoryDetail, previewInstall, install })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
     await searchIn(dialog, 'helper')
 
-    await click(dialog.querySelector('[data-install-trigger]'))
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper')
+
+    const devButton = dialog.querySelector(
+      '[data-branch-item][data-ref-name="dev"] [data-branch-install]',
+    ) as HTMLButtonElement
+    expect(devButton.disabled).toBe(false)
+    await click(devButton)
     await flush()
     const installDialog = dialog.querySelector('[data-dialog="install"]')
     expect(installDialog).not.toBeNull()
-    expect(previewInstall).toHaveBeenCalledWith('acme/helper')
+    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'dev')
 
     await click(installDialog?.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper')
+    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'dev')
     await click(installDialog?.querySelector('[data-dialog-done]'))
     await flush()
     expect(dialog.querySelector('[data-dialog="install"]')).toBeNull()
 
-    // The page reloaded the roster; the result row now carries the badge.
-    const card = dialog.querySelector('[data-market-card]')
-    expect(card?.querySelector('[data-installed]')?.textContent).toContain(zh.installedBadge)
+    // The roster reloaded; the installed branch now carries the version mark
+    // while the untouched main branch stays installable.
+    const devItem = dialog.querySelector('[data-branch-item][data-ref-name="dev"]')
+    expect(devItem?.querySelector('[data-version-installed]')?.textContent).toContain(zh.installedBadge)
+    expect((devItem?.querySelector('[data-branch-install]') as HTMLButtonElement).disabled).toBe(true)
+    expect((dialog.querySelector(
+      '[data-branch-item][data-ref-name="main"] [data-branch-install]',
+    ) as HTMLButtonElement).disabled).toBe(false)
     expect(list).toHaveBeenCalledTimes(2)
   })
 
-  it('shows overwrite and degraded notices when the preview reports them', async () => {
-    const previewInstall = vi.fn(async (repository: string) => makeInstallReview({
+  it('shows overwrite and degraded notices when the detail preview reports them', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const previewInstall = vi.fn(async (repository: string, version: string | null) => makeInstallReview({
+      repository,
+      version: version ?? undefined,
       exists: true,
       degraded: true,
       dependencies: [],
@@ -283,13 +319,15 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const { props } = managePageHarness({ search, previewInstall })
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
     await searchIn(dialog, 'helper')
 
-    await click(dialog.querySelector('[data-install-trigger]'))
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+    await click(dialog.querySelector('[data-branch-install]'))
     await flush()
     const installDialog = dialog.querySelector('[data-dialog="install"]')
     expect(installDialog?.querySelector('[data-overwrite-notice]')).not.toBeNull()
@@ -299,23 +337,33 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
   })
 
   it('keeps the install dialog open on an expired confirmation and offers re-preview', async () => {
-    const previewInstall = vi.fn(async (repository: string) => makeInstallReview({ repository }))
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: ['v1.0.0'],
+    }))
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({ repository, version: version ?? undefined }))
     const install = vi.fn(async () => {
       throw new MarketCallFailure({ code: 'market/confirm-expired', message: 'expired', details: {} })
     })
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const { props } = managePageHarness({ search, previewInstall, install })
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
     await searchIn(dialog, 'helper')
 
-    await click(dialog.querySelector('[data-install-trigger]'))
+    await click(dialog.querySelector('[data-row-details]'))
     await flush()
+    await click(dialog.querySelector('[data-tag-item][data-ref-name="v1.0.0"] [data-tag-install]'))
+    await flush()
+    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'v1.0.0')
     await click(dialog.querySelector('[data-install-confirm]'))
     await flush()
+    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0')
     const error = dialog.querySelector('[data-install-error]')
     expect(error).not.toBeNull()
     expect(error?.getAttribute('data-error-code')).toBe('market/confirm-expired')
@@ -666,5 +714,270 @@ describe('ManagePluginsTab GitHub modal page jump', () => {
     const dialog2 = await openMarket(host2)
     await searchIn(dialog2, 'agents')
     expect(dialog2.querySelector('[data-page-input]')).toBeNull()
+  })
+})
+
+describe('ManagePluginsTab GitHub repository detail view', () => {
+  it('opens the detail view from a row and renders metadata, ref groups and the README', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      name: 'helper',
+      description: 'A helper plugin',
+      stars: 42,
+      updatedAt: '2026-03-02T00:00:00.000Z',
+      branches: ['main', 'dev'],
+      tags: ['v1.0.0', 'v2.0.0'],
+      readme: '# Helper docs\n\n**bold** intro with `code`.\n',
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    expect(repositoryDetail).toHaveBeenCalledTimes(1)
+    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper')
+    // The detail view covers the list zone: search header and pagination hide.
+    expect(dialog.querySelector('[data-market-search-input]')).toBeNull()
+    expect(dialog.querySelector('[data-pagination]')).toBeNull()
+    expect(dialog.querySelector('[data-detail-back]')?.textContent).toContain(zh.detailBack)
+    const view = dialog.querySelector('[data-detail-view]')
+    expect(view?.getAttribute('data-repository')).toBe('acme/helper')
+    expect(view?.querySelector('[data-detail-name]')?.textContent).toContain('helper')
+    expect(view?.querySelector('[data-detail-description]')?.textContent).toContain('A helper plugin')
+    expect(view?.textContent).toContain(zh.starsLabel.replace('{count}', '42'))
+    expect(view?.textContent).toContain(zh.updatedLabel.replace('{date}', '2026-03-02'))
+    expect(view?.querySelector('[data-detail-link]')?.getAttribute('href')).toContain('github.com')
+
+    const branchGroup = view?.querySelector('[data-branch-group]')
+    expect(branchGroup?.querySelector('[data-branch-title]')?.textContent).toContain(zh.branchesTitle)
+    expect(branchGroup?.querySelectorAll('[data-branch-item]')).toHaveLength(2)
+    expect(branchGroup?.querySelector('[data-default-branch]')?.textContent).toContain(zh.defaultBranchLabel)
+    const tagGroup = view?.querySelector('[data-tag-group]')
+    expect(tagGroup?.querySelector('[data-tag-title]')?.textContent).toContain(zh.tagsTitle)
+    expect(tagGroup?.querySelectorAll('[data-tag-item]')).toHaveLength(2)
+
+    const readme = view?.querySelector('[data-readme]')
+    expect(readme).not.toBeNull()
+    expect(readme?.innerHTML).toContain('<h1')
+    expect(readme?.innerHTML).toContain('<strong>bold</strong>')
+    expect(readme?.innerHTML).toContain('<code>code</code>')
+  })
+
+  it('returns from the detail view keeping the current keywords and page', async () => {
+    const seed = (n: number): SearchItemSeed[] => Array.from({ length: 10 }, (_, i) => ({
+      repository: `acme/p${String((n - 1) * 10 + i + 1)}`,
+      name: `p${String((n - 1) * 10 + i + 1)}`,
+    }))
+    const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, seed(page), 25))
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'agents')
+    await click(dialog.querySelector('[data-page-next]'))
+    await flush()
+    expect(dialog.querySelector('[data-page-count]')?.textContent).toContain(zh.pagination
+      .replace('{current}', '2').replace('{total}', '3').replace('{count}', '25'))
+
+    await click(dialog.querySelector('[data-market-card] [data-row-details]'))
+    await flush()
+    expect(dialog.querySelector('[data-detail-view]')).not.toBeNull()
+    const callsBefore = search.mock.calls.length
+    await click(dialog.querySelector('[data-detail-back]'))
+    await flush()
+    // Back never re-runs the search: keywords and page are preserved as-is.
+    expect(search.mock.calls.length).toBe(callsBefore)
+    expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
+    expect(dialog.querySelector('[data-page-count]')?.textContent).toContain(zh.pagination
+      .replace('{current}', '2').replace('{total}', '3').replace('{count}', '25'))
+    const firstCard = dialog.querySelector('[data-market-card]')
+    expect(firstCard?.getAttribute('data-repository')).toBe('acme/p11')
+  })
+
+  it('marks exactly the installed branch/tag refs and leaves legacy null-version records unmarked', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-acme-helper', repository: 'acme/helper', version: 'v1.0.0', enabled: false },
+      { key: 'gh-acme-legacy', repository: 'acme/legacy', version: null, enabled: false },
+    ]))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+      { repository: 'acme/legacy', name: 'legacy' },
+    ]))
+    const repositoryDetail = vi.fn(async (repository: string) => {
+      if (repository === 'acme/helper') {
+        return makeRepositoryDetail({ repository, branches: ['main'], tags: ['v1.0.0', 'v2.0.0'] })
+      }
+      return makeRepositoryDetail({ repository, branches: ['main'], tags: ['v0.9.0'] })
+    })
+    const { props } = managePageHarness({ list, search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'plugins')
+
+    // helper: v1.0.0 matches its record; v2.0.0 and the default branch do not.
+    await click(dialog.querySelector(
+      '[data-market-card][data-repository="acme/helper"] [data-row-details]',
+    ))
+    await flush()
+    const helperTags = dialog.querySelectorAll('[data-tag-group] [data-tag-item]')
+    expect(helperTags[0]?.getAttribute('data-ref-name')).toBe('v1.0.0')
+    expect(helperTags[0]?.querySelector('[data-version-installed]')?.textContent).toContain(zh.installedBadge)
+    expect((helperTags[0]?.querySelector('[data-tag-install]') as HTMLButtonElement).disabled).toBe(true)
+    expect(helperTags[1]?.getAttribute('data-ref-name')).toBe('v2.0.0')
+    expect(helperTags[1]?.querySelector('[data-version-installed]')).toBeNull()
+    expect((helperTags[1]?.querySelector('[data-tag-install]') as HTMLButtonElement).disabled).toBe(false)
+    expect(dialog.querySelector('[data-branch-group] [data-version-installed]')).toBeNull()
+    expect((dialog.querySelector('[data-branch-install]') as HTMLButtonElement).disabled).toBe(false)
+
+    // legacy (version null): the repository is managed but no ref can match.
+    await click(dialog.querySelector('[data-detail-back]'))
+    await flush()
+    await click(dialog.querySelector(
+      '[data-market-card][data-repository="acme/legacy"] [data-row-details]',
+    ))
+    await flush()
+    expect(dialog.querySelectorAll('[data-tag-group] [data-version-installed]')).toHaveLength(0)
+    expect(dialog.querySelectorAll('[data-branch-group] [data-version-installed]')).toHaveLength(0)
+    expect((dialog.querySelector('[data-tag-install]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('renders the README as sanitized HTML with resolved relative links and images', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+      readme: [
+        '# Title',
+        '',
+        '**Bold** and `inline` code.',
+        '',
+        '[guide](./docs/guide.md)',
+        '',
+        '![logo](logo.png)',
+        '',
+        '<script>window.x = 1</script>',
+        '',
+        '<img src="x.png" onerror="alert(1)">',
+        '',
+      ].join('\n'),
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    const readme = dialog.querySelector('[data-readme]')
+    expect(readme).not.toBeNull()
+    const html = readme?.innerHTML ?? ''
+    expect(html).toContain('<h1')
+    expect(html).toContain('<strong>Bold</strong>')
+    expect(html).toContain('<code>inline</code>')
+    // DOMPurify: script elements and event-handler attributes never survive.
+    expect(readme?.querySelector('script')).toBeNull()
+    expect(readme?.querySelector('[onerror]')).toBeNull()
+    expect(html).not.toContain('<script')
+    expect(html).not.toContain('onerror')
+    // Relative links resolve under the default-branch blob base and open in a
+    // new tab; images resolve under the raw base.
+    const guide = readme?.querySelector('a[href*="guide.md"]')
+    expect(guide?.getAttribute('href')).toBe('https://github.com/acme/helper/blob/main/docs/guide.md')
+    expect(guide?.getAttribute('target')).toBe('_blank')
+    expect(guide?.getAttribute('rel')).toContain('noreferrer')
+    const logo = readme?.querySelector('img')
+    expect(logo?.getAttribute('src')).toBe('https://github.com/acme/helper/raw/main/logo.png')
+  })
+
+  it('shows the no-README placeholder when the repository has none', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: ['v1.0.0'],
+      readme: null,
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    expect(dialog.querySelector('[data-readme]')).toBeNull()
+    expect(dialog.querySelector('[data-readme-empty]')?.textContent).toContain(zh.noReadme)
+  })
+
+  it('shows a localized empty placeholder when the repository has no refs', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: [],
+      tags: [],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    expect(dialog.querySelector('[data-branch-group]')).toBeNull()
+    expect(dialog.querySelector('[data-tag-group]')).toBeNull()
+    expect(dialog.querySelector('[data-detail-empty]')?.textContent).toContain(zh.detailEmpty)
+    expect(dialog.querySelector('[data-readme]')).not.toBeNull()
+  })
+
+  it('localizes a detail load failure and recovers through retry', async () => {
+    const repositoryDetail = vi.fn()
+      .mockRejectedValueOnce(new MarketCallFailure({
+        code: 'github/rate-limit',
+        message: 'limited',
+        details: {},
+      }))
+      .mockResolvedValueOnce(makeRepositoryDetail({ repository: 'acme/helper', branches: ['main'], tags: [] }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    const error = dialog.querySelector('[data-detail-error]')
+    expect(error).not.toBeNull()
+    expect(error?.getAttribute('data-error-code')).toBe('github/rate-limit')
+    expect(error?.textContent).toContain(zh.rateLimited)
+
+    await click(dialog.querySelector('[data-detail-retry]'))
+    await flush()
+    expect(repositoryDetail).toHaveBeenCalledTimes(2)
+    expect(dialog.querySelector('[data-detail-error]')).toBeNull()
+    expect(dialog.querySelector('[data-detail-view]')).not.toBeNull()
   })
 })

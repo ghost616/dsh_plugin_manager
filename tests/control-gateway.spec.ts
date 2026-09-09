@@ -45,7 +45,7 @@ function gatewayWith(
 }
 
 describe('MarketControllerGateway host Remote surface', () => {
-  it('publishes the marketControl namespace with eight direct methods', () => {
+  it('publishes the marketControl namespace with nine direct methods', () => {
     const { gateway } = gatewayWith()
     expect(gateway.typertRemote).toMatchObject({
       serviceKey: MARKET_CONTROL_SERVICE_KEY,
@@ -58,6 +58,7 @@ describe('MarketControllerGateway host Remote surface', () => {
       { method: 'requestRemove', invocation: { kind: 'direct' } },
       { method: 'confirmRemove', invocation: { kind: 'direct' } },
       { method: 'search', invocation: { kind: 'direct' } },
+      { method: 'repositoryDetail', invocation: { kind: 'direct' } },
       { method: 'previewInstall', invocation: { kind: 'direct' } },
       { method: 'install', invocation: { kind: 'direct' } },
     ])
@@ -105,6 +106,8 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(remoteErrorOf(idleSearch)).toMatchObject({ code: 'market/idle' })
     const idleInstall = await gateway.install('octocat/demo', 'tok', null).catch((error: unknown) => error)
     expect(remoteErrorOf(idleInstall)).toMatchObject({ code: 'market/idle' })
+    const idleDetail = await gateway.repositoryDetail('octocat/demo').catch((error: unknown) => error)
+    expect(remoteErrorOf(idleDetail)).toMatchObject({ code: 'market/idle' })
   })
 
   it('delegates search to the source engine and forwards the 1-based page', async () => {
@@ -119,6 +122,27 @@ describe('MarketControllerGateway host Remote surface', () => {
     const { gateway, engines } = gatewayWith()
     await gateway.search('agents', null, null)
     expect(engines.searchCalls).toEqual([{ keywords: 'agents', page: 1 }])
+  })
+
+  it('delegates repositoryDetail to the source engine and returns the aggregate', async () => {
+    const { gateway, engines } = gatewayWith()
+    const detail = await gateway.repositoryDetail('octocat/demo-plugin')
+    expect(detail).toMatchObject({
+      repository: 'octocat/demo-plugin',
+      name: 'demo-plugin',
+      defaultBranch: 'main',
+      branches: ['main'],
+      tags: ['v1.0.0'],
+      readme: '# demo plugin\n',
+    })
+    expect(engines.detailCalls.map(call => call.kind)).toEqual(['meta', 'branches', 'tags', 'readme'])
+  })
+
+  it('rejects an invalid repository slug with the github/bad-request wire code', async () => {
+    const { gateway, engines } = gatewayWith()
+    const caught = await gateway.repositoryDetail('not-a-slug').catch((error: unknown) => error)
+    expect(remoteErrorOf(caught)).toMatchObject({ code: 'github/bad-request' })
+    expect(engines.detailCalls).toHaveLength(0)
   })
 
   it('maps MarketControlError to a wire RemoteError with the stable code', () => {

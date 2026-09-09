@@ -255,6 +255,35 @@ export interface PluginInstallOutcome {
   readonly checkoutDir: string
 }
 
+/**
+ * Aggregated read-only detail of one remote GitHub repository, served by the
+ * repositoryDetail channel method (metadata, branch/tag name listings and the
+ * raw README fetched in parallel). README is null when the repository has no
+ * README; every other query failure fails the whole call.
+ */
+export interface RepositoryDetail {
+  /** Validated `owner/repo` slug of the repository. */
+  readonly repository: string
+  readonly name: string
+  readonly description: string | null
+  /** Stargazer count. */
+  readonly stars: number
+  /** ISO-8601 last-push/update timestamp, when the API reported one. */
+  readonly updatedAt: string | null
+  /** Browser URL of the repository. */
+  readonly url: string
+  /** Clone URL used by the install pipeline. */
+  readonly cloneUrl: string
+  /** Default branch reported by the API (fallback 'main'). */
+  readonly defaultBranch: string
+  /** Branch names of the repository (may be empty). */
+  readonly branches: readonly string[]
+  /** Tag names of the repository (may be empty). */
+  readonly tags: readonly string[]
+  /** Raw Markdown of the repository README, or null when it has none. */
+  readonly readme: string | null
+}
+
 /** Step-1 answer of the two-step removal protocol (double confirmation). */
 export interface RemoveRequest {
   readonly key: PluginMarketKey

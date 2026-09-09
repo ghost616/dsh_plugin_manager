@@ -1,11 +1,11 @@
 /**
- * GitHub integration for the plugin market: repository search plus shared
- * low-level HTTP primitives used by the preview pipeline. Credentials are
- * resolved per request through an injectable {@link TokenProvider} (defaults
- * to the `DSH_GITHUB_TOKEN`/`GITHUB_TOKEN` environment variables) and only
- * live in request headers at runtime — they are never persisted, logged or
- * cached on results. Network/rate-limit/auth failures map to stable
- * `github/*` codes.
+ * GitHub integration for the plugin market: repository search, detail queries
+ * (default branch, branch/tag name listings, raw README) plus shared low-level
+ * HTTP primitives used by the preview pipeline. Credentials are resolved per
+ * request through an injectable {@link TokenProvider} (defaults to the
+ * `DSH_GITHUB_TOKEN`/`GITHUB_TOKEN` environment variables) and only live in
+ * request headers at runtime — they are never persisted, logged or cached on
+ * results. Network/rate-limit/auth failures map to stable `github/*` codes.
  */
 
 import type { GitHubRepoSummary, GitHubSearchPage } from '../../types.ts'
@@ -64,6 +64,12 @@ export interface GitHubRequestOptions {
   signal?: AbortSignal
   /** Skip the Authorization header even when a token is present (raw reads). */
   readonly auth?: boolean
+  /**
+   * Accept media type override (default `application/vnd.github+json`); the
+   * README endpoint switches to `application/vnd.github.raw` to receive the
+   * Markdown text directly instead of the base64 JSON envelope.
+   */
+  readonly accept?: string
 }
 
 function collectHeaders(response: FetchResponse): GitHubResponseHeaders {
@@ -85,7 +91,7 @@ export async function githubFetch(
   options: GitHubRequestOptions = {},
 ): Promise<{ readonly text: string; readonly headers: GitHubResponseHeaders }> {
   const headers: Record<string, string> = {
-    accept: 'application/vnd.github+json',
+    accept: options.accept ?? 'application/vnd.github+json',
     'user-agent': 'dsh-plugin-market',
     'x-github-api-version': '2022-11-28',
   }
@@ -196,6 +202,15 @@ export interface GitHubSearchOptions {
 
 /** Repository never offered as an install source: the harness's own checkout. */
 export const SEARCH_EXCLUDED_REPOS: readonly string[] = ['deepseek-ai/deepseek-harness']
+
+/** Page size for the branches/tags listing endpoints (GitHub's maximum). */
+export const GITHUB_LIST_PAGE_SIZE = 100
+
+/** Hard cap on listing pages fetched in one branches/tags call. */
+export const GITHUB_LIST_MAX_PAGES = 5
+
+/** Accept media type that returns the README file content (Markdown) directly. */
+const README_RAW_MEDIA_TYPE = 'application/vnd.github.raw'
 
 /** Options for {@link GitHubMarket}. */
 export interface GitHubMarketOptions {
@@ -318,17 +333,88 @@ export class GitHubMarket {
     }
   }
 
+  /**
+   * Branch names of one repository. Fetched in pages of
+   * {@link GITHUB_LIST_PAGE_SIZE} up to a cap of
+   * {@link GITHUB_LIST_MAX_PAGES} pages; a short page stops the paging early.
+   * Result carries the names only (no commit/credential data).
+   */
+  async branches(slug: string, signal?: AbortSignal): Promise<readonly string[]> {
+    return this.listRefNames('branches', slug, signal)
+  }
+
+  /** Tag names of one repository, paginated exactly like {@link branches}. */
+  async tags(slug: string, signal?: AbortSignal): Promise<readonly string[]> {
+    return this.listRefNames('tags', slug, signal)
+  }
+
+  /**
+   * Raw Markdown of the repository README, or null when the repository has no
+   * README (GitHub answers 404 for the endpoint). Other failures keep their
+   * mapped `github/*` codes.
+   */
+  async readme(slug: string, signal?: AbortSignal): Promise<string | null> {
+    const ownerRepo = parseRepositorySlug(slug)
+    const url = `${this.baseUrl}/repos/${ownerRepo}/readme`
+    const request: GitHubRequestOptions = { token: await this.resolveToken(), accept: README_RAW_MEDIA_TYPE }
+    if (signal !== undefined) request.signal = signal
+    try {
+      const body = await githubFetch(this.fetchImpl, url, request)
+      return body.text
+    } catch (error) {
+      // A missing README is an ordinary "no such file" signal on this endpoint.
+      if (error instanceof MarketError && error.code === 'github/not-found') return null
+      throw error
+    }
+  }
+
   /** Resolve the runtime token (anonymous when none is configured). */
   async resolveToken(): Promise<string | null> {
     if (!this.tokenProvider) return null
     const token = await this.tokenProvider()
     return token && token.length > 0 ? token : null
   }
+
+  /**
+   * Fetch the `name` entries of a paginated branch/tag listing endpoint.
+   * @param kind endpoint suffix: `branches` or `tags`
+   */
+  private async listRefNames(
+    kind: 'branches' | 'tags',
+    slug: string,
+    signal?: AbortSignal,
+  ): Promise<readonly string[]> {
+    const ownerRepo = parseRepositorySlug(slug)
+    const names: string[] = []
+    for (let page = 1; page <= GITHUB_LIST_MAX_PAGES; page += 1) {
+      const url = `${this.baseUrl}/repos/${ownerRepo}/${kind}?per_page=${GITHUB_LIST_PAGE_SIZE}&page=${page}`
+      const request: GitHubRequestOptions = { token: await this.resolveToken() }
+      if (signal !== undefined) request.signal = signal
+      const body = await githubFetch(this.fetchImpl, url, request)
+      const data = parseGitHubJson(body.text, url)
+      if (!Array.isArray(data)) {
+        throw new MarketError('github/bad-response', `The GitHub ${kind} response is not an array.`, { path: url })
+      }
+      for (const raw of data) {
+        const name = refName(raw)
+        if (name !== null) names.push(name)
+      }
+      // A short page means the server has no further entries to return.
+      if (data.length < GITHUB_LIST_PAGE_SIZE) break
+    }
+    return names
+  }
 }
 
 function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
   if (value === undefined || !Number.isInteger(value)) return fallback
   return Math.min(max, Math.max(min, value))
+}
+
+/** Read the `name` of one branch/tag listing entry (null when malformed). */
+function refName(raw: unknown): string | null {
+  if (!isObject(raw) || typeof raw.name !== 'string' || raw.name.length === 0) return null
+  return raw.name
 }
 
 /** Map one GitHub search result object onto the client-safe summary. */

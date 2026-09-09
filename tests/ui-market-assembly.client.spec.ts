@@ -15,6 +15,7 @@ import {
   FakeLocaleRuntime,
   FakeSlotRegistry,
   makeList,
+  makeRepositoryDetail,
   makeSearchPage,
   makeStatus,
   resolveSlotLabel,
@@ -78,9 +79,10 @@ type InjectedFace = {
   setEnabled: (key: string, enabled: boolean) => Promise<unknown>
   requestRemove: (key: string) => Promise<unknown>
   confirmRemove: (key: string, token: string) => Promise<unknown>
-  search: (keywords: string) => Promise<unknown>
-  previewInstall: (repository: string) => Promise<unknown>
-  install: (repository: string, confirmToken: string) => Promise<unknown>
+  search: (keywords: string, page: number) => Promise<unknown>
+  repositoryDetail: (repository: string) => Promise<unknown>
+  previewInstall: (repository: string, version?: string | null) => Promise<unknown>
+  install: (repository: string, confirmToken: string, version?: string | null) => Promise<unknown>
 }
 
 function faceOf(entry: FakeStoredEntry): InjectedFace {
@@ -118,7 +120,7 @@ describe('plugin-market browser half assembly', () => {
     const face = faceOf(entry)
     for (const member of [
       'status', 'list', 'setEnabled', 'requestRemove', 'confirmRemove',
-      'search', 'previewInstall', 'install',
+      'search', 'repositoryDetail', 'previewInstall', 'install',
     ]) {
       expect(typeof (face as Record<string, unknown>)[member]).toBe('function')
     }
@@ -141,7 +143,21 @@ describe('plugin-market browser half assembly', () => {
         method: 'search',
         args: { keywords: 'agents', perPage: 10, page: 2 },
       },
-      { call: () => face.previewInstall('octocat/demo'), method: 'previewInstall', args: { repository: 'octocat/demo' } },
+      {
+        call: () => face.previewInstall('octocat/demo', 'v2.0.0'),
+        method: 'previewInstall',
+        args: { repository: 'octocat/demo', version: 'v2.0.0' },
+      },
+      {
+        call: () => face.repositoryDetail('octocat/demo'),
+        method: 'repositoryDetail',
+        args: { repository: 'octocat/demo' },
+      },
+      {
+        call: () => face.install('octocat/demo', 'tok', 'main'),
+        method: 'install',
+        args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main' },
+      },
     ]
     for (const page of pages) {
       await page.call()
@@ -149,7 +165,7 @@ describe('plugin-market browser half assembly', () => {
       expect(url).toBe(MARKET_CONTROL_WEB_PATH)
       expect(JSON.parse(String(init.body))).toMatchObject({ method: page.method, args: page.args })
     }
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(5)
   })
 
   it('translates wire failures into typed failures with the carrier code', async () => {
@@ -184,6 +200,9 @@ describe('plugin-market browser half assembly', () => {
     const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { method: string }
       if (body.method === 'status') return jsonResponse({ ok: true, value: makeStatus(false) })
+      if (body.method === 'repositoryDetail') {
+        return jsonResponse({ ok: true, value: makeRepositoryDetail({ repository: 'octocat/demo', tags: ['v1.0.0'] }) })
+      }
       return jsonResponse({ ok: true, value: makeSearchPage([{ repository: 'octocat/demo', name: 'demo' }]) })
     })
     stubChannel(fetchMock)
@@ -191,7 +210,12 @@ describe('plugin-market browser half assembly', () => {
     const face = faceOf(tabEntry(slots))
 
     await expect(face.status()).resolves.toEqual(makeStatus(false))
-    await expect(face.search('demo')).resolves.toMatchObject({ totalCount: 1 })
+    await expect(face.search('demo', 1)).resolves.toMatchObject({ totalCount: 1 })
+    await expect(face.repositoryDetail('octocat/demo')).resolves.toMatchObject({
+      repository: 'octocat/demo',
+      defaultBranch: 'main',
+      tags: ['v1.0.0'],
+    })
     void fetchMock
   })
 

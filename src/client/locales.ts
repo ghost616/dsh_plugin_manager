@@ -85,6 +85,28 @@ export const zh = {
   openMarket: '打开 GitHub',
   /** GitHub browse modal title. */
   marketDialogTitle: 'GitHub 插件',
+  /** Detail-view title inside the GitHub browse modal. */
+  detailTitle: '仓库详情',
+  /** Back-to-results action of the detail view. */
+  detailBack: '返回',
+  /** Detail-view in-flight state (metadata + branches/tags + README). */
+  detailLoading: '正在加载仓库详情…',
+  /** Detail-view load failure. */
+  detailError: '无法读取仓库详情。',
+  /** Detail-view empty state (no installable branch or tag). */
+  detailEmpty: '该仓库没有可安装的分支或标签。',
+  /** Search-result row action opening the repository detail view. */
+  rowDetails: '详情',
+  /** Branch-name group heading of the detail view. */
+  branchesTitle: '分支',
+  /** Hint label of the repository default branch inside the branch group. */
+  defaultBranchLabel: '默认分支',
+  /** Tag-name group heading of the detail view. */
+  tagsTitle: '标签',
+  /** README section heading of the detail view. */
+  readmeHeading: 'README',
+  /** Placeholder when the repository has no README. */
+  noReadme: '该仓库没有 README。',
   /** Badge of an already-installed search result row. */
   installedBadge: '已安装',
   /** Previous search page. */
@@ -202,6 +224,17 @@ export const en: Record<MarketManageLocaleKey, string> = {
   searchResults: 'Search results',
   openMarket: 'Browse GitHub',
   marketDialogTitle: 'GitHub plugins',
+  detailTitle: 'Repository details',
+  detailBack: 'Back',
+  detailLoading: 'Loading repository details…',
+  detailError: 'Could not load repository details.',
+  detailEmpty: 'This repository has no installable branches or tags.',
+  rowDetails: 'Details',
+  branchesTitle: 'Branches',
+  defaultBranchLabel: 'default branch',
+  tagsTitle: 'Tags',
+  readmeHeading: 'README',
+  noReadme: 'This repository has no README.',
   installedBadge: 'Installed',
   prevPage: 'Previous page',
   nextPage: 'Next page',

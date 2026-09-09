@@ -1,8 +1,9 @@
 /**
- * Source operations of the market control surface: GitHub search, install
- * preview and the double-confirmed install protocol. These reach the local
- * repository only to answer "already managed?" and to run the download; all
- * network and filesystem work is delegated to injectable host-market engines
+ * Source operations of the market control surface: GitHub search, repository
+ * detail (metadata + branches + tags + README), install preview and the
+ * double-confirmed install protocol. These reach the local repository only to
+ * answer "already managed?" and to run the download; all network and
+ * filesystem work is delegated to injectable host-market engines
  * (GitHubMarket / PluginPreviewer / PluginInstaller), keeping this layer free
  * of fetch and subprocess code and fully unit-testable.
  *
@@ -25,9 +26,10 @@ import type {
   PluginMarketKey,
   PluginMarketRecord,
   PluginPreviewOutcome,
+  RepositoryDetail,
 } from '../../types.ts'
 import type { MarketRepository } from '../market/index.ts'
-import { parseRepositorySlug } from '../market/github.ts'
+import { parseRepositorySlug, type GitHubRepoMeta } from '../market/github.ts'
 import { parsePluginKey } from '../market/keys.ts'
 import { entryModuleName } from './entry-name.ts'
 import { REMOVE_CONFIRM_TTL_MS, MarketControlError, type ControlLogger } from './controller.ts'
@@ -46,6 +48,22 @@ export interface SearchEnginePort {
 /** Preview engine surface of the host manifest previewer. */
 export interface PreviewEnginePort {
   preview(repository: string, signal?: AbortSignal): Promise<PluginPreviewOutcome>
+}
+
+/** Detail engine surface of the host GitHub client (repository detail page). */
+export interface RepositoryDetailPort {
+  /** Repository metadata, resolving its default branch too. */
+  repositoryMeta(slug: string, signal?: AbortSignal): Promise<GitHubRepoMeta>
+  /** Branch names of the repository (may be empty). */
+  branches(slug: string, signal?: AbortSignal): Promise<readonly string[]>
+  /** Tag names of the repository (may be empty). */
+  tags(slug: string, signal?: AbortSignal): Promise<readonly string[]>
+  /**
+   * Raw Markdown of the repository README, or null when the repository has no
+   * README (a GitHub 404 for the endpoint). Engines that map that 404 into a
+   * thrown `github/not-found` are tolerated here as well.
+   */
+  readme(slug: string, signal?: AbortSignal): Promise<string | null>
 }
 
 /** One install handed to the host pipeline (already TrustGate-confirmed). */
@@ -68,6 +86,7 @@ export interface MarketSourceDeps {
   /** The active repository, or null while the market is idle. */
   readonly repository: () => MarketRepository | null
   readonly searchEngine: SearchEnginePort
+  readonly detailEngine: RepositoryDetailPort
   readonly previewEngine: PreviewEnginePort
   /** Builds the install engine bound to one opened repository. */
   readonly installer: (repository: MarketRepository) => InstallerPort
@@ -99,6 +118,15 @@ export function pluginKeyForRepository(repository: string): PluginMarketKey {
 }
 
 /**
+ * Shape check for the stable `github/not-found` code. Structural (not
+ * instanceof) so a not-found thrown by another copy of the error class is
+ * still recognized; the code itself belongs to the shared wire vocabulary.
+ */
+function isGithubNotFound(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'github/not-found'
+}
+
+/**
  * The market's source operations. Never throws for a healthy idle market with
  * a message a caller can show; all failures carry stable wire codes.
  */
@@ -121,6 +149,43 @@ export class MarketSourceOperations {
       ...(options.perPage === undefined ? {} : { perPage: options.perPage }),
       page: options.page ?? 1,
     })
+  }
+
+  /**
+   * Aggregated detail of one remote GitHub repository (metadata, branches,
+   * tags and README), fetched in parallel. Requires a configured repository
+   * (market not idle), like the other source operations. A repository without
+   * a README yields `readme: null` — the GitHub 404 for the endpoint is
+   * tolerated whether the engine mapped it to null or threw
+   * `github/not-found`; any other failure of the four queries fails the whole
+   * call with its stable `github/*` code.
+   */
+  async repositoryDetail(slugRaw: string): Promise<RepositoryDetail> {
+    this.requireRepository()
+    const slug = parseRepositorySlug(slugRaw)
+    const detail = this.deps.detailEngine
+    const [meta, branches, tags, readme] = await Promise.all([
+      detail.repositoryMeta(slug),
+      detail.branches(slug),
+      detail.tags(slug),
+      detail.readme(slug).catch((error: unknown) => {
+        if (isGithubNotFound(error)) return null
+        throw error
+      }),
+    ])
+    return {
+      repository: slug,
+      name: meta.name,
+      description: meta.description,
+      stars: meta.stars,
+      updatedAt: meta.updatedAt,
+      url: meta.url,
+      cloneUrl: meta.cloneUrl,
+      defaultBranch: meta.defaultBranch,
+      branches: [...branches],
+      tags: [...tags],
+      readme,
+    }
   }
 
   /** Review one repository and mint its single-use install confirmation. */
@@ -211,7 +276,7 @@ export class MarketSourceOperations {
     if (repository === null) {
       throw new MarketControlError(
         'market/idle',
-        'The plugin market is idle: configure Config.repositoryPath on plugin-market-host to search, preview or install plugins.',
+        'The plugin market is idle: configure Config.repositoryPath on plugin-market-host to search, inspect or install plugins.',
       )
     }
     return repository

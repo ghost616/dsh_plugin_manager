@@ -61,6 +61,11 @@ async function rejectCode(promise: Promise<unknown>, code: string): Promise<void
   throw new Error(`expected MarketError with code ${code}, but the promise resolved`)
 }
 
+/** Build a branch/tag listing body of `count` name-bearing entries. */
+function refList(count: number, prefix: string): unknown {
+  return Array.from({ length: count }, (_, index) => ({ name: `${prefix}${index}` }))
+}
+
 describe('GitHubMarket.search', () => {
   it('maps a successful response onto client-safe summaries', async () => {
     const { fetchImpl, calls } = stubGitHub((url) => {
@@ -220,5 +225,123 @@ describe('GitHubMarket.repositoryMeta and slug validation', () => {
       new GitHubMarket({ fetchImpl, tokenProvider: () => null }).repositoryMeta('not-a-slug'),
       'github/bad-request',
     )
+  })
+})
+
+describe('GitHubMarket.branches/tags listing', () => {
+  const slug = 'owner/sample-plugin'
+
+  it('pages branches at 100 per page and stops after a short page', async () => {
+    const { fetchImpl, calls } = stubGitHub((url) => {
+      if (url.includes('page=2')) return { status: 200, body: refList(7, 'v2-') }
+      return { status: 200, body: refList(100, 'v1-') }
+    })
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    const names = await market.branches(slug)
+    expect(names).toHaveLength(107)
+    expect(names[0]).toBe('v1-0')
+    expect(names[99]).toBe('v1-99')
+    expect(names[100]).toBe('v2-0')
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.url ?? '').toContain(`/repos/${slug}/branches?per_page=100&page=1`)
+    expect(calls[1]?.url ?? '').toContain(`/repos/${slug}/branches?per_page=100&page=2`)
+  })
+
+  it('caps branches paging at the configured max pages', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, body: refList(100, 'b-') }))
+    const names = await new GitHubMarket({ fetchImpl, tokenProvider: () => null }).branches(slug)
+    expect(names).toHaveLength(100 * 5)
+    expect(calls).toHaveLength(5)
+    expect(calls[4]?.url ?? '').toContain('page=5')
+  })
+
+  it('lists tags names from the tags endpoint', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, body: refList(3, 't-') }))
+    const names = await new GitHubMarket({ fetchImpl, tokenProvider: () => null }).tags(slug)
+    expect(names).toEqual(['t-0', 't-1', 't-2'])
+    expect(calls[0]?.url ?? '').toContain(`/repos/${slug}/tags?per_page=100&page=1`)
+  })
+
+  it('carries only the runtime token in headers, never in the result', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, body: refList(1, 'b-') }))
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => 'secret-token-abc' })
+    const names = await market.branches(slug)
+    const headers = calls[0]?.init?.headers ?? {}
+    expect(headers.authorization).toBe('Bearer secret-token-abc')
+    expect(JSON.stringify(names)).not.toContain('secret-token-abc')
+  })
+
+  it('rejects a non-array listing body as github/bad-response', async () => {
+    const { fetchImpl } = stubGitHub(() => ({ status: 200, body: { items: [] } }))
+    await rejectCode(new GitHubMarket({ fetchImpl, tokenProvider: () => null }).branches(slug), 'github/bad-response')
+  })
+
+  it('rejects a malformed slug with github/bad-request before any request', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, body: [] }))
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    await rejectCode(market.branches('not-a-slug'), 'github/bad-request')
+    await rejectCode(market.tags('not-a-slug'), 'github/bad-request')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('maps listing auth/rate-limit/network failures to github codes', async () => {
+    const authStub = stubGitHub(() => ({ status: 401 }))
+    await rejectCode(new GitHubMarket({ fetchImpl: authStub.fetchImpl, tokenProvider: () => null }).branches(slug), 'github/auth')
+
+    const rateStub = stubGitHub(() => ({
+      status: 403,
+      headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '0' },
+    }))
+    await rejectCode(new GitHubMarket({ fetchImpl: rateStub.fetchImpl, tokenProvider: () => null }).tags(slug), 'github/rate-limit')
+
+    const transport: FetchLike = async () => { throw new TypeError('fetch failed') }
+    await rejectCode(new GitHubMarket({ fetchImpl: transport, tokenProvider: () => null }).branches(slug), 'github/network')
+  })
+})
+
+describe('GitHubMarket.readme', () => {
+  const slug = 'owner/sample-plugin'
+
+  it('returns the raw Markdown text with the raw accept header', async () => {
+    const { fetchImpl, calls } = stubGitHub((_url, init) => {
+      expect(init?.headers?.accept).toBe('application/vnd.github.raw')
+      return { status: 200, rawText: '# Sample\n\nHello **world**' }
+    })
+    const text = await new GitHubMarket({ fetchImpl, tokenProvider: () => null }).readme(slug)
+    expect(text).toBe('# Sample\n\nHello **world**')
+    expect(calls[0]?.url).toContain(`/repos/${slug}/readme`)
+  })
+
+  it('returns null when the repository has no README (404)', async () => {
+    const { fetchImpl } = stubGitHub(() => ({ status: 404, rawText: '404: Not Found' }))
+    const text = await new GitHubMarket({ fetchImpl, tokenProvider: () => null }).readme(slug)
+    expect(text).toBeNull()
+  })
+
+  it('does not cache the token on the returned Markdown', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, rawText: 'plain text' }))
+    const text = await new GitHubMarket({ fetchImpl, tokenProvider: () => 'secret-token-abc' }).readme(slug)
+    expect(text).toBe('plain text')
+    const headers = calls[0]?.init?.headers ?? {}
+    expect(headers.authorization).toBe('Bearer secret-token-abc')
+    expect(text).not.toContain('secret-token-abc')
+  })
+
+  it('rejects a malformed slug with github/bad-request before any request', async () => {
+    const { fetchImpl, calls } = stubGitHub(() => ({ status: 200, rawText: '' }))
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    await rejectCode(market.readme('not-a-slug'), 'github/bad-request')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('maps readme auth/rate-limit/network failures to github codes', async () => {
+    const authStub = stubGitHub(() => ({ status: 401 }))
+    await rejectCode(new GitHubMarket({ fetchImpl: authStub.fetchImpl, tokenProvider: () => null }).readme(slug), 'github/auth')
+
+    const rateStub = stubGitHub(() => ({ status: 429, headers: { 'retry-after': '30' } }))
+    await rejectCode(new GitHubMarket({ fetchImpl: rateStub.fetchImpl, tokenProvider: () => null }).readme(slug), 'github/rate-limit')
+
+    const transport: FetchLike = async () => { throw new TypeError('fetch failed') }
+    await rejectCode(new GitHubMarket({ fetchImpl: transport, tokenProvider: () => null }).readme(slug), 'github/network')
   })
 })

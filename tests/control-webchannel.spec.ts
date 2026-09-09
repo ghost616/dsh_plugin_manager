@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
+import { MarketError } from '../src/host/market/errors.ts'
 // @ts-expect-error -- compiled artifact
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 // @ts-expect-error -- compiled artifact
@@ -221,6 +222,39 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
+  it('serves repositoryDetail over HTTP with README-404 tolerance', async () => {
+    const { router, engines, dispose } = routeFor()
+    await listen(router.server)
+
+    const detail = await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
+    expect(detail.ok).toBe(true)
+    const value = (detail as { ok: true; value: { repository: string; defaultBranch: string; readme: string | null } }).value
+    expect(value).toMatchObject({
+      repository: 'octocat/demo-plugin',
+      name: 'demo-plugin',
+      defaultBranch: 'main',
+      readme: '# demo plugin\n',
+    })
+    expect(engines.detailCalls).toHaveLength(4)
+
+    // A GitHub 404 for the README is tolerated: value.readme becomes null and
+    // the rest of the detail still resolves.
+    engines.readmeError = new MarketError('github/not-found', 'no README', {
+      path: 'https://api.github.com/repos/octocat/demo-plugin/readme',
+    })
+    const tolerant = await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
+    expect(tolerant.ok).toBe(true)
+    expect((tolerant as { ok: true; value: { readme: string | null } }).value.readme).toBeNull()
+
+    // A non-404 detail failure surfaces as an ok:false envelope with the
+    // stable github/* code, never a transport error.
+    engines.branchesError = new MarketError('github/network', 'offline', { path: 'https://api.github.com' })
+    const failed = await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
+    expect(failed.ok).toBe(false)
+    if (!failed.ok) expect(failed.error.code).toBe('github/network')
+    dispose()
+  })
+
   it('surfaces market/idle and bad-argument branches over HTTP', async () => {
     const { router, dispose } = routeFor({ idle: true })
     await listen(router.server)
@@ -236,9 +270,17 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(idleInstall.ok).toBe(false)
     if (!idleInstall.ok) expect(idleInstall.error.code).toBe('market/idle')
 
+    const idleDetail = await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
+    expect(idleDetail.ok).toBe(false)
+    if (!idleDetail.ok) expect(idleDetail.error.code).toBe('market/idle')
+
     const missing = await post(router, { method: 'previewInstall', args: {} }, 400)
     expect(missing.body.ok).toBe(false)
     if (!missing.body.ok) expect(missing.body.error.code).toBe('market/bad-request')
+
+    const missingDetail = await post(router, { method: 'repositoryDetail', args: {} }, 400)
+    expect(missingDetail.body.ok).toBe(false)
+    if (!missingDetail.body.ok) expect(missingDetail.body.error.code).toBe('market/bad-request')
 
     const get = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, { method: 'GET' })
     expect(get.status).toBe(405)

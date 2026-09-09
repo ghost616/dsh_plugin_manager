@@ -32,12 +32,14 @@ import type {
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
+  RepositoryDetail,
 } from '../types.ts'
 import {
   confirmRemove as channelConfirmRemove,
   install as channelInstall,
   listManaged,
   previewInstall as channelPreviewInstall,
+  repositoryDetail as channelRepositoryDetail,
   requestRemove as channelRequestRemove,
   search as channelSearch,
   setEnabled,
@@ -95,13 +97,17 @@ export function apply(ctx: Context): void {
     async (keywords: string, page: number): Promise<GitHubSearchPage> => {
       return unwrap(await channelSearch(keywords, SEARCH_PAGE_SIZE, page))
     }
+  const repositoryDetailRecord: ManagePluginsTabInjected['repositoryDetail'] =
+    async (repository: string): Promise<RepositoryDetail> => {
+      return unwrap(await channelRepositoryDetail(repository))
+    }
   const previewInstallRecord: ManagePluginsTabInjected['previewInstall'] =
-    async (repository: string): Promise<PluginInstallReview> => {
-      return unwrap(await channelPreviewInstall(repository))
+    async (repository: string, version?: string | null): Promise<PluginInstallReview> => {
+      return unwrap(await channelPreviewInstall(repository, version ?? null))
     }
   const installRecord: ManagePluginsTabInjected['install'] =
-    async (repository: string, confirmToken: string): Promise<PluginInstallOutcome> => {
-      return unwrap(await channelInstall(repository, confirmToken))
+    async (repository: string, confirmToken: string, version?: string | null): Promise<PluginInstallOutcome> => {
+      return unwrap(await channelInstall(repository, confirmToken, version ?? null))
     }
   const injected = (): ManagePluginsTabInjected => ({
     status,
@@ -110,6 +116,7 @@ export function apply(ctx: Context): void {
     requestRemove: requestRemoveRecord,
     confirmRemove: confirmRemoveRecord,
     search: searchRecord,
+    repositoryDetail: repositoryDetailRecord,
     previewInstall: previewInstallRecord,
     install: installRecord,
   })
