@@ -16,6 +16,7 @@ import type {
 } from '../../src/types.ts'
 import { parsePluginKey } from '../../src/host/market/keys.ts'
 import type { GitHubRepoMeta } from '../../src/host/market/github.ts'
+import { refSegOf } from '../../src/host/market/paths.ts'
 import {
   MarketPluginController,
   type MarketControllerDeps,
@@ -209,7 +210,7 @@ export class FakeEngines {
     summary: { name: 'demo-plugin', version: '1.0.0', dependencies: { dependencies: ['@deepseek-ai/cordis'], peerDependencies: [] } },
   }
   previewCalls: string[] = []
-  installCalls: { repositoryRoot: string; key: string; repository: string; version: string | null }[] = []
+  installCalls: { repositoryRoot: string; key: string; repository: string; version: string | null; refKind?: 'branch' | 'tag' }[] = []
   /** Returned record; built on demand unless preset. */
   installedRecord: PluginMarketRecord | null = null
   installError: unknown = undefined
@@ -278,9 +279,15 @@ export class FakeEngines {
       install: async (input) => {
         this.installCalls.push(input)
         if (this.installError !== undefined) throw this.installError
+        // v2 ref installs register the per-tuple layout `<owner>/<repo>/<kind>/<refSeg>`
+        // and a source carrying refKind; legacy installs keep the key as the
+        // single-segment checkout and no ref kind (old-record compatible).
+        const v2DirName = input.refKind === undefined ? null : refDirName(input.repository, input.refKind, input.version)
         const record = this.installedRecord ?? makeRecord(input.key, {
-          source: makeSource(input.repository),
-          localDirName: input.key,
+          source: input.refKind === undefined
+            ? makeSource(input.repository)
+            : { kind: 'github', repository: input.repository, refKind: input.refKind, version: input.version, commit: null },
+          localDirName: v2DirName ?? input.key,
           entry: 'index.js',
           trusted: 'trusted',
           trustedAt: '2026-01-01T00:00:00.000Z',
@@ -295,7 +302,7 @@ export class FakeEngines {
           trusted: 'trusted',
           trustedAt: record.trustedAt,
         })
-        return { record, checkoutDir: `${input.repositoryRoot}/${input.key}` }
+        return { record, checkoutDir: `${input.repositoryRoot}/${v2DirName ?? input.key}` }
       },
     }
   }
@@ -356,6 +363,23 @@ export function sourceTestbed(): {
 
 export function makeSource(repository = 'octocat/demo-plugin'): PluginMarketGithubSource {
   return { kind: 'github', repository, version: 'v1.0.0', commit: 'abc123' }
+}
+
+/**
+ * v2 per-ref checkout dir `<owner>/<repo>/<kind>/<refSeg>` — mirrors the host
+ * installer's destination so fake records line up with real v2 records.
+ */
+export function refDirName(
+  repository: string,
+  refKind: 'branch' | 'tag',
+  ref: string | null,
+): string | null {
+  if (ref === null || ref.length === 0) return null
+  const slash = repository.indexOf('/')
+  const owner = repository.slice(0, slash)
+  const repo = repository.slice(slash + 1)
+  const refSeg = refSegOf(ref)
+  return refSeg === null ? null : `${owner}/${repo}/${refKind}/${refSeg}`
 }
 
 export function makeRecord(keyRaw: string, partial: Partial<PluginMarketRecord> = {}): PluginMarketRecord {

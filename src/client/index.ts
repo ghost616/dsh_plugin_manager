@@ -24,6 +24,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   GitHubSearchPage,
+  GithubRefKind,
   ManagedPluginList,
   MarketStatus,
   PluginInstallOutcome,
@@ -102,12 +103,12 @@ export function apply(ctx: Context): void {
       return unwrap(await channelRepositoryDetail(repository))
     }
   const previewInstallRecord: ManagePluginsTabInjected['previewInstall'] =
-    async (repository: string, version?: string | null): Promise<PluginInstallReview> => {
-      return unwrap(await channelPreviewInstall(repository, version ?? null))
+    async (repository: string, version?: string | null, refKind?: GithubRefKind): Promise<PluginInstallReview> => {
+      return unwrap(await channelPreviewInstall(repository, version ?? null, refKind))
     }
   const installRecord: ManagePluginsTabInjected['install'] =
-    async (repository: string, confirmToken: string, version?: string | null): Promise<PluginInstallOutcome> => {
-      return unwrap(await channelInstall(repository, confirmToken, version ?? null))
+    async (repository: string, confirmToken: string, version?: string | null, refKind?: GithubRefKind): Promise<PluginInstallOutcome> => {
+      return unwrap(await channelInstall(repository, confirmToken, version ?? null, refKind))
     }
   const injected = (): ManagePluginsTabInjected => ({
     status,

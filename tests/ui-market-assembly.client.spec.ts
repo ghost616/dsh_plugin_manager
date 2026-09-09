@@ -14,6 +14,7 @@ import { en, zh } from '../src/client/locales.ts'
 import {
   FakeLocaleRuntime,
   FakeSlotRegistry,
+  makeInstallReview,
   makeList,
   makeRepositoryDetail,
   makeSearchPage,
@@ -81,8 +82,8 @@ type InjectedFace = {
   confirmRemove: (key: string, token: string) => Promise<unknown>
   search: (keywords: string, page: number) => Promise<unknown>
   repositoryDetail: (repository: string) => Promise<unknown>
-  previewInstall: (repository: string, version?: string | null) => Promise<unknown>
-  install: (repository: string, confirmToken: string, version?: string | null) => Promise<unknown>
+  previewInstall: (repository: string, version?: string | null, refKind?: 'branch' | 'tag') => Promise<unknown>
+  install: (repository: string, confirmToken: string, version?: string | null, refKind?: 'branch' | 'tag') => Promise<unknown>
 }
 
 function faceOf(entry: FakeStoredEntry): InjectedFace {
@@ -144,9 +145,9 @@ describe('plugin-market browser half assembly', () => {
         args: { keywords: 'agents', perPage: 10, page: 2 },
       },
       {
-        call: () => face.previewInstall('octocat/demo', 'v2.0.0'),
+        call: () => face.previewInstall('octocat/demo', 'v2.0.0', 'tag'),
         method: 'previewInstall',
-        args: { repository: 'octocat/demo', version: 'v2.0.0' },
+        args: { repository: 'octocat/demo', version: 'v2.0.0', refKind: 'tag' },
       },
       {
         call: () => face.repositoryDetail('octocat/demo'),
@@ -154,9 +155,9 @@ describe('plugin-market browser half assembly', () => {
         args: { repository: 'octocat/demo' },
       },
       {
-        call: () => face.install('octocat/demo', 'tok', 'main'),
+        call: () => face.install('octocat/demo', 'tok', 'main', 'branch'),
         method: 'install',
-        args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main' },
+        args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main', refKind: 'branch' },
       },
     ]
     for (const page of pages) {
@@ -166,6 +167,32 @@ describe('plugin-market browser half assembly', () => {
       expect(JSON.parse(String(init.body))).toMatchObject({ method: page.method, args: page.args })
     }
     expect(fetchMock).toHaveBeenCalledTimes(5)
+  })
+
+  it('omits refKind from the wire when a legacy review/install is requested', async () => {
+    const { slots } = await bench()
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ ok: true, value: makeInstallReview({ repository: 'octocat/demo' }) }))
+    stubChannel(fetchMock)
+    declareTab(slots)
+    const face = faceOf(tabEntry(slots))
+
+    await face.previewInstall('octocat/demo', 'v2.0.0')
+    await face.install('octocat/demo', 'tok', 'main')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    // Legacy calls never serialize a refKind key: the host treats the absence
+    // as the pre-v2 default-branch review/install.
+    const preview = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(preview[1].body))).toEqual({
+      method: 'previewInstall',
+      args: { repository: 'octocat/demo', version: 'v2.0.0' },
+    })
+    const installCall = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(String(installCall[1].body))).toEqual({
+      method: 'install',
+      args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main' },
+    })
   })
 
   it('translates wire failures into typed failures with the carrier code', async () => {

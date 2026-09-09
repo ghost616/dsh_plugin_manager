@@ -8,7 +8,12 @@ import type {
 import { MarketError } from './errors.ts'
 import { errorCode, NodeFs, type FsLike } from './fs.ts'
 import { isValidPluginKey } from './keys.ts'
-import { isCheckoutEntryPath, isLocalDirSegment } from './paths.ts'
+import {
+  isCheckoutEntryPath,
+  isManagedLocalDirName,
+  parseRefSeg,
+  splitManagedLocalDir,
+} from './paths.ts'
 
 /** Schema version written by this store (`plugins.json` records file v1). */
 export const RECORDS_SCHEMA_VERSION = 1 as const
@@ -18,7 +23,11 @@ export interface NewPluginRecord {
   /** Stable loader-safe key (no colon), e.g. `gh-owner-repo`. */
   readonly key: PluginMarketKey
   readonly source: PluginMarketSource
-  /** Directory name of the plugin's source checkout under the repository root. */
+  /**
+   * Checkout location of the plugin relative to the repository root: the
+   * legacy single directory name (e.g. `gh-owner-repo`) or the v2 multi-level
+   * ref path `<owner>/<repo>/<branch|tag>/<refSeg>` (see paths.ts).
+   */
   readonly localDirName: string
   /**
    * Plugin entry file relative to `localDirName` (optional). Records created
@@ -253,6 +262,8 @@ function validateRecord(value: unknown, filePath: string): PluginMarketRecord {
   const key = expectValidKey(value.key, filePath, 'record key')
   const source = expectSource(value.source, filePath, key)
   const localDirName = expectLocalDirName(value.localDirName, filePath, key)
+  const problem = refDirConsistencyProblem(localDirName, source)
+  if (problem !== null) corrupt(filePath, `record "${key}" ${problem}`)
   const entry = value.entry === undefined || value.entry === null
     ? null
     : expectEntry(value.entry, filePath, key)
@@ -280,18 +291,28 @@ function expectSource(value: unknown, filePath: string, key: PluginMarketKey): P
   const repository = typeof value.repository === 'string' && value.repository.length > 0
     ? value.repository
     : corrupt(filePath, `record "${key}" has an invalid github source "repository"`)
+  // refKind is optional (legacy v1 records predate it); when present it must
+  // be exactly branch/tag.
+  const refKind = value.refKind === undefined || value.refKind === null
+    ? undefined
+    : value.refKind === 'branch' || value.refKind === 'tag'
+      ? value.refKind
+      : corrupt(filePath, `record "${key}" has an invalid github source "refKind"`)
   const version = value.version === null || typeof value.version === 'string'
     ? (value.version ?? null)
     : corrupt(filePath, `record "${key}" has an invalid github source "version"`)
   const commit = value.commit === null || typeof value.commit === 'string'
     ? (value.commit ?? null)
     : corrupt(filePath, `record "${key}" has an invalid github source "commit"`)
-  return { kind: 'github', repository, version, commit }
+  // exactOptionalPropertyTypes: only attach refKind when the record carries it.
+  return refKind === undefined
+    ? { kind: 'github', repository, version, commit }
+    : { kind: 'github', refKind, repository, version, commit }
 }
 
 function expectLocalDirName(value: unknown, filePath: string, key: PluginMarketKey): string {
-  if (typeof value !== 'string' || !isLocalDirSegment(value)) {
-    corrupt(filePath, `record "${key}" has an invalid "localDirName"`)
+  if (typeof value !== 'string' || !isManagedLocalDirName(value)) {
+    corrupt(filePath, `record "${key}" has an invalid "localDirName": either a single legacy checkout segment or the v2 path <owner>/<repo>/<branch|tag>/<refSeg>`)
   }
   return value
 }
@@ -332,12 +353,16 @@ function assertValidInput(input: NewPluginRecord, filePath: string): void {
   if (!isValidPluginKey(input.key)) {
     throw new MarketError('record/key-invalid', `"${input.key}" is not a valid stable plugin-market key.`, { path: filePath })
   }
-  if (!isLocalDirSegment(input.localDirName)) {
+  if (!isManagedLocalDirName(input.localDirName)) {
     throw new MarketError(
       'record/invalid',
-      `localDirName "${input.localDirName}" is not a valid checkout directory name (a single path segment without separators).`,
+      `localDirName "${input.localDirName}" is not a valid checkout location: either a single legacy checkout segment or the v2 path <owner>/<repo>/<branch|tag>/<refSeg>.`,
       { path: filePath },
     )
+  }
+  const problem = refDirConsistencyProblem(input.localDirName, input.source)
+  if (problem !== null) {
+    throw new MarketError('record/invalid', problem, { path: filePath })
   }
   if (input.entry !== undefined && !isCheckoutEntryPath(input.entry)) {
     throw new MarketError(
@@ -346,6 +371,34 @@ function assertValidInput(input: NewPluginRecord, filePath: string): void {
       { path: filePath },
     )
   }
+}
+
+/**
+ * A v2 multi-level localDirName must agree with the record's github source:
+ * the owner/repo/kind segments identify the same repository + ref kind as the
+ * source, and the trailing refSeg must decode to the source `version` (the
+ * pinned branch/tag name). Legacy single-segment dirs carry no such coupling
+ * and are left as-is. Returns a human description of the mismatch, or null
+ * when the pair is consistent.
+ */
+function refDirConsistencyProblem(localDirName: string, source: PluginMarketSource): string | null {
+  const parts = splitManagedLocalDir(localDirName)
+  if (parts === null) return null
+  if (source.kind !== 'github') {
+    return `uses a v2 ref directory "${localDirName}" with a non-github source`
+  }
+  const { owner, repo, kind, refSeg } = parts
+  if (source.repository !== `${owner}/${repo}`) {
+    return `has a v2 directory "${localDirName}" whose owner/repo do not match its github source "${source.repository}"`
+  }
+  if (source.refKind !== kind) {
+    return `has a v2 directory kind "${kind}" that disagrees with its source refKind ${JSON.stringify(source.refKind)}`
+  }
+  const refName = parseRefSeg(refSeg)
+  if (source.version === null || refName === null || source.version !== refName) {
+    return `has a v2 refSeg "${refSeg}" that does not decode to its source version`
+  }
+  return null
 }
 
 /** One persisted record with the enforced activation/trust defaults. */

@@ -266,6 +266,7 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
         key: `gh-${repository.replace('/', '-')}`,
         repository,
         version,
+        refKind: 'branch',
         enabled: false,
       }])
       return makeInstallOutcome({ repository, version: version ?? undefined })
@@ -298,11 +299,11 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     const installDialog = dialog.querySelector('[data-dialog="install"]')
     expect(installDialog).not.toBeNull()
-    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'dev')
+    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'dev', 'branch')
 
     await click(installDialog?.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'dev')
+    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'dev', 'branch')
     await click(installDialog?.querySelector('[data-dialog-done]'))
     await flush()
     expect(dialog.querySelector('[data-dialog="install"]')).toBeNull()
@@ -351,7 +352,7 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     await click(dialog.querySelector('[data-ref-install]'))
     await flush()
-    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'main')
+    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'main', 'branch')
     const installDialog = dialog.querySelector('[data-dialog="install"]')
     expect(installDialog?.querySelector('[data-overwrite-notice]')).not.toBeNull()
     const degraded = installDialog?.querySelector('[data-degraded-notice]')
@@ -385,10 +386,10 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     await click(dialog.querySelector('[data-ref-install]'))
     await flush()
-    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'v1.0.0')
+    expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'v1.0.0', 'tag')
     await click(dialog.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0')
+    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0', 'tag')
     const error = dialog.querySelector('[data-install-error]')
     expect(error).not.toBeNull()
     expect(error?.getAttribute('data-error-code')).toBe('market/confirm-expired')
@@ -912,6 +913,76 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     await selectIn(dialog.querySelector('[data-ref-select]'), 'tag:v0.9.0')
     await flush()
     expect((dialog.querySelector('[data-ref-install]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('marks a tag and a branch of the same name independently when the record carries refKind', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-acme-both-tag', repository: 'acme/both', version: 'v1', refKind: 'tag', enabled: false },
+    ]))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/both', name: 'both' },
+    ]))
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main', 'v1'],
+      tags: ['v1'],
+    }))
+    const { props } = managePageHarness({ list, search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'both')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    // The kinded tag record marks the tag option only: the same-named branch
+    // stays a fresh install target instead of being mis-marked installed.
+    const select = dialog.querySelector('[data-ref-select]')
+    const tagOption = select?.querySelector('option[data-ref-name="v1"][data-ref-kind="tag"]')
+    const branchOption = select?.querySelector('option[data-ref-name="v1"][data-ref-kind="branch"]')
+    expect(tagOption?.getAttribute('data-ref-installed')).toBe('true')
+    expect(tagOption?.textContent).toContain(zh.installedBadge)
+    expect(branchOption?.getAttribute('data-ref-installed')).toBeNull()
+
+    const installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
+    await selectIn(select, 'branch:v1')
+    await flush()
+    expect(installAction.disabled).toBe(false)
+    expect(installAction.textContent).toContain(zh.installButton)
+    await selectIn(select, 'tag:v1')
+    await flush()
+    expect(installAction.disabled).toBe(true)
+    expect(installAction.textContent).toContain(zh.installedBadge)
+  })
+
+  it('falls back to a name-only match for legacy records without ref metadata', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-acme-legacy2', repository: 'acme/legacy2', version: 'v1', enabled: false },
+    ]))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/legacy2', name: 'legacy2' },
+    ]))
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main', 'v1'],
+      tags: ['v1'],
+    }))
+    const { props } = managePageHarness({ list, search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'legacy2')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    // Without ref metadata the exact ref is unknowable: the legacy record
+    // marks every same-named option, branch and tag alike.
+    const select = dialog.querySelector('[data-ref-select]')
+    expect(select?.querySelector('option[data-ref-name="v1"][data-ref-kind="tag"]')
+      ?.getAttribute('data-ref-installed')).toBe('true')
+    expect(select?.querySelector('option[data-ref-name="v1"][data-ref-kind="branch"]')
+      ?.getAttribute('data-ref-installed')).toBe('true')
+    expect(select?.querySelector('option[data-ref-name="main"]')?.getAttribute('data-ref-installed')).toBeNull()
   })
 
   it('renders the README as sanitized HTML with resolved relative links and images', async () => {

@@ -6,6 +6,12 @@ import {
   MARKET_CONFIG_DEFAULTS,
   MarketRepositoryService,
   GitHubMarket,
+  isManagedLocalDirName,
+  parseRefSeg,
+  parsePluginKey,
+  pluginKeyForGithubRef,
+  refSegOf,
+  resolveInstallTarget,
   normalizeMarketConfig,
   openMarketRepository,
 } from '../src/host/market/index.ts'
@@ -27,6 +33,20 @@ describe('plugin-market-host public export surface', () => {
     expect(typeof GitHubMarket).toBe('function')
     expect(GITHUB_LIST_PAGE_SIZE).toBe(100)
     expect(GITHUB_LIST_MAX_PAGES).toBe(5)
+  })
+
+  it('re-exports the v2 directory/key helpers from the market index', () => {
+    expect(typeof parsePluginKey).toBe('function')
+    expect(typeof pluginKeyForGithubRef).toBe('function')
+    expect(typeof refSegOf).toBe('function')
+    expect(typeof parseRefSeg).toBe('function')
+    expect(typeof isManagedLocalDirName).toBe('function')
+    expect(typeof resolveInstallTarget).toBe('function')
+    const key = pluginKeyForGithubRef('owner/repo', 'branch', 'main')
+    expect(key).toBe(parsePluginKey(key))
+    expect(parseRefSeg(refSegOf('feature/x'))).toBe('feature/x')
+    expect(isManagedLocalDirName('owner/repo/branch/main')).toBe(true)
+    expect(isManagedLocalDirName('gh-owner-repo')).toBe(true)
   })
 
   it('keeps activation defaults: createIfMissing=false, harness linking on', () => {

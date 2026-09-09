@@ -1,7 +1,7 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { PluginMarketKey, PluginMarketSource } from '../src/types.ts'
+import type { PluginMarketGithubSource, PluginMarketKey, PluginMarketSource } from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { NodeFs, type FsLike, type FsStat } from '../src/host/market/fs.ts'
 import { parsePluginKey } from '../src/host/market/keys.ts'
@@ -380,5 +380,130 @@ describe('PluginRecordStore.register (add-or-replace for install updates)', () =
       store.register({ key: key('gh-owner-repo'), source: githubSource, localDirName: 'bad/name' }),
       'record/invalid',
     )
+  })
+})
+
+describe('v2 ref-layout records (owner/repo/kind/refSeg)', () => {
+  let tmp: string
+  let filePath: string
+  beforeAll(async () => {
+    tmp = await makeSuiteTmp('records-v2')
+    filePath = join(tmp, 'plugins.json')
+  })
+  afterAll(async () => { await removeTmp(tmp) })
+
+  const v2BranchSource: PluginMarketSource = {
+    kind: 'github',
+    refKind: 'branch',
+    repository: 'deepseek-ai/cordis',
+    version: 'main',
+    commit: null,
+  }
+
+  it('accepts and round-trips a multi-level ref localDirName with refKind', async () => {
+    const store = new PluginRecordStore(filePath)
+    const v2Key = key('gh-deepseek-ai~cordis~branch~main')
+    const record = await store.add({
+      key: v2Key,
+      source: v2BranchSource,
+      localDirName: 'deepseek-ai/cordis/branch/main',
+      entry: 'lib/index.js',
+    })
+    expect(record.localDirName).toBe('deepseek-ai/cordis/branch/main')
+    expect(record.source.refKind).toBe('branch')
+    const seen = await new PluginRecordStore(filePath).get(v2Key)
+    expect(seen?.source).toEqual(v2BranchSource)
+    expect(seen?.localDirName).toBe('deepseek-ai/cordis/branch/main')
+  })
+
+  it('rejects a v2 dir whose refSeg does not match its source version', async () => {
+    const store = new PluginRecordStore(filePath)
+    await rejectCode(
+      store.add({
+        key: key('gh-deepseek-ai~cordis~branch~main'),
+        source: { ...v2BranchSource, version: 'dev' },
+        localDirName: 'deepseek-ai/cordis/branch/main',
+      }),
+      'record/invalid',
+    )
+  })
+
+  it('rejects a v2 dir whose owner/repo disagree with the source repository', async () => {
+    const store = new PluginRecordStore(filePath)
+    await rejectCode(
+      store.add({
+        key: key('gh-other-org~cordis~branch~main'),
+        source: v2BranchSource,
+        localDirName: 'other-org/cordis/branch/main',
+      }),
+      'record/invalid',
+    )
+  })
+
+  it('rejects a v2 dir whose kind disagrees with source.refKind', async () => {
+    const store = new PluginRecordStore(filePath)
+    await rejectCode(
+      store.add({
+        key: key('gh-deepseek-ai~cordis~tag~main'),
+        source: { ...v2BranchSource, refKind: 'tag' },
+        localDirName: 'deepseek-ai/cordis/branch/main',
+      }),
+      'record/invalid',
+    )
+  })
+
+  it('rejects escaping/traversal attempts in a multi-level localDirName', async () => {
+    const store = new PluginRecordStore(filePath)
+    for (const bad of [
+      'deepseek-ai/../evil/branch/main',
+      '../deepseek-ai/cordis/branch/main',
+      'deepseek-ai/cordis/branch/a/../main',
+      'deepseek-ai/cordis/branch/main/extra',
+    ]) {
+      await rejectCode(
+        store.add({ key: key('gh-x'), source: v2BranchSource, localDirName: bad }),
+        'record/invalid',
+      )
+    }
+  })
+})
+
+describe('legacy single-level records stay readable (no auto-migration)', () => {
+  let tmp: string
+  let legacyFile: string
+  beforeAll(async () => {
+    tmp = await makeSuiteTmp('records-legacy')
+    legacyFile = join(tmp, 'plugins.json')
+  })
+  afterAll(async () => { await removeTmp(tmp) })
+
+  it('loads a pre-v2 record file whose records carry no refKind and a single-segment dir', async () => {
+    // Written the way the pre-ref pipeline serialized installs: github source
+    // without refKind + a single-segment localDirName.
+    const legacy = {
+      schemaVersion: 1,
+      records: {
+        'gh-owner-repo': {
+          key: 'gh-owner-repo',
+          source: { kind: 'github', repository: 'owner/repo', version: 'v1.0.0', commit: 'abc123' },
+          localDirName: 'gh-owner-repo',
+          entry: null,
+          installedAt: '2024-01-01T00:00:00.000Z',
+          enabled: false,
+          trusted: 'untrusted',
+          trustedAt: null,
+        },
+      },
+    }
+    const fs = NodeFs
+    await fs.writeFile(legacyFile, JSON.stringify(legacy))
+    const store = new PluginRecordStore(legacyFile)
+    const records = await store.list()
+    expect(records).toHaveLength(1)
+    expect(records[0]?.localDirName).toBe('gh-owner-repo')
+    expect((records[0]?.source as PluginMarketGithubSource).refKind).toBeUndefined()
+    // Removal by the recorded (single-level) path still works via the record.
+    expect(await store.remove(key('gh-owner-repo'))).toBe(true)
+    expect(await store.list()).toEqual([])
   })
 })

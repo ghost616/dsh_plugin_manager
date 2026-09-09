@@ -10,7 +10,9 @@
  * Confirmation model (mirrors the requestRemove/confirmRemove pattern):
  * - `previewInstall` reviews the remote manifest, reports the already-managed
  *   / overwrite state and mints a short-lived single-use confirmation token
- *   bound to the repository slug;
+ *   bound to the reviewed install key — the slug-derived legacy key for a
+ *   no-refKind (default-branch) review, or the per-`(owner, repo, ref-kind,
+ *   ref)` tuple key for a `refKind: 'branch' | 'tag'` review;
  * - `install` refuses without that token (`market/confirm-required`), rejects
  *   wrong/expired tokens, re-checks the protection list, then runs the host
  *   install pipeline with `confirmed: true` (the host TrustGate stays as the
@@ -30,7 +32,7 @@ import type {
 } from '../../types.ts'
 import type { MarketRepository } from '../market/index.ts'
 import { parseRepositorySlug, type GitHubRepoMeta } from '../market/github.ts'
-import { parsePluginKey } from '../market/keys.ts'
+import { parsePluginKey, pluginKeyForGithubRef } from '../market/keys.ts'
 import { entryModuleName } from './entry-name.ts'
 import { REMOVE_CONFIRM_TTL_MS, MarketControlError, type ControlLogger } from './controller.ts'
 import type { ProtectionPolicy } from './protect.ts'
@@ -72,7 +74,15 @@ export interface SourceInstallInput {
   readonly key: PluginMarketKey
   /** Validated `owner/repo` slug. */
   readonly repository: string
-  /** Optional tag/branch pin. */
+  /**
+   * v2 ref kind of the install. When set, the key is the per-ref tuple key of
+   * `pluginKeyForGithubRef(repository, refKind, version)` and the host places
+   * the checkout at `<owner>/<repo>/<kind>/<refSeg>`. When absent the install
+   * is legacy-compatible: the slug-derived key and single-level checkout are
+   * kept, and `version` acts as the pre-v2 pin.
+   */
+  readonly refKind?: 'branch' | 'tag'
+  /** Optional tag/branch pin; the ref name of a v2 install when refKind is set. */
   readonly version: string | null
 }
 
@@ -101,14 +111,62 @@ export interface MarketSourceDeps {
   readonly logger?: ControlLogger
 }
 
-/** One pending install confirmation, keyed by the repository slug. */
+/** One pending install confirmation, keyed by the derived install key. */
 interface PendingInstall {
   readonly token: string
   readonly expiresAt: number
   readonly version: string | null
 }
 
-/** Derive the stable loader key of a repository slug (`gh-owner-repo`). */
+/** Branch/tag discriminator of one v2 install tuple. */
+export type SourceRefKind = 'branch' | 'tag'
+
+/**
+ * Normalize the optional wire `refKind`. Absent (null/undefined) selects the
+ * legacy-compatible default-branch install; `'branch'`/`'tag'` select the v2
+ * per-ref tuple install. Anything else is a caller bug surfaced as
+ * `market/bad-request`.
+ */
+function normalizeRefKind(refKind: string | null | undefined): SourceRefKind | undefined {
+  if (refKind === undefined || refKind === null) return undefined
+  if (refKind === 'branch' || refKind === 'tag') return refKind
+  throw new MarketControlError(
+    'market/bad-request',
+    `The "refKind" must be "branch", "tag" or omitted (null); got ${JSON.stringify(refKind)}.`,
+  )
+}
+
+/**
+ * The stable key of one install intent: slug legacy or per-ref tuple key. The
+ * ref is only read on the v2 branch (legacy keys ignore it); callers already
+ * require a non-empty ref name for v2, so the empty guard below is defensive —
+ * `pluginKeyForGithubRef` answers `record/key-invalid` if it ever fires.
+ */
+function deriveInstallKey(slug: string, refKind: SourceRefKind | undefined, ref: string | null): PluginMarketKey {
+  return refKind === undefined ? pluginKeyForRepository(slug) : pluginKeyForGithubRef(slug, refKind, ref ?? '')
+}
+
+/**
+ * A v2 install needs its branch/tag name to derive the tuple key and checkout
+ * path; the name rides in the legacy `version` argument (the wire keeps the
+ * pre-v2 parameter name). Without one the caller should omit refKind entirely
+ * and get the legacy default-branch install instead.
+ */
+function requireRefName(slug: string, refKind: SourceRefKind, ref: string | null): string {
+  if (ref === null || ref.length === 0) {
+    throw new MarketControlError(
+      'market/bad-request',
+      `Installing the ${refKind} of "${slug}" requires its name in "version" (choose a branch/tag from the repository detail); omit refKind to install the default branch the legacy way.`,
+    )
+  }
+  return ref
+}
+
+/**
+ * Derive the stable loader key of a repository slug for a legacy (no refKind)
+ * install: `gh-owner-repo`. Kept for pre-v2 compatibility — old records use
+ * exactly this key and a no-refKind install must keep overwriting them.
+ */
 export function pluginKeyForRepository(repository: string): PluginMarketKey {
   const normalized = parseRepositorySlug(repository)
   const slash = normalized.indexOf('/')
@@ -188,11 +246,25 @@ export class MarketSourceOperations {
     }
   }
 
-  /** Review one repository and mint its single-use install confirmation. */
-  async previewInstall(repositoryRaw: string, version: string | null = null): Promise<PluginInstallReview> {
+  /**
+   * Review one repository (or one ref of it) and mint the single-use install
+   * confirmation. With `refKind` omitted the review targets the
+   * legacy-compatible default-branch install of the slug (its key stays
+   * `gh-owner-repo`, so pre-v2 records without a ref kind keep matching);
+   * with `refKind: 'branch' | 'tag'` it targets that specific ref, keyed by
+   * the `(owner, repo, ref-kind, ref)` tuple — a branch and a tag of the same
+   * name review as two independent plugins.
+   */
+  async previewInstall(
+    repositoryRaw: string,
+    refKind: string | null = null,
+    version: string | null = null,
+  ): Promise<PluginInstallReview> {
     const repository = this.requireRepository()
     const slug = parseRepositorySlug(repositoryRaw)
-    const key = pluginKeyForRepository(slug)
+    const kind = normalizeRefKind(refKind)
+    const ref = kind === undefined ? version : requireRefName(slug, kind, version)
+    const key = deriveInstallKey(slug, kind, ref)
     const existing = await repository.records.get(key)
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
@@ -200,10 +272,10 @@ export class MarketSourceOperations {
     const token = randomBytes(16).toString('hex')
     const now = (this.deps.now ?? (() => new Date()))()
     const ttl = this.deps.confirmTtlMs ?? REMOVE_CONFIRM_TTL_MS
-    this.pending.set(slug, {
+    this.pending.set(key, {
       token,
       expiresAt: now.getTime() + ttl,
-      version,
+      version: ref,
     })
     return {
       repository: slug,
@@ -214,44 +286,53 @@ export class MarketSourceOperations {
       existing,
       confirmToken: token,
       expiresAt: new Date(now.getTime() + ttl).toISOString(),
+      ...(kind === undefined ? {} : { refKind: kind }),
     }
   }
 
-  /** Run the confirmed install (single-use token, protection re-check). */
+  /**
+   * Run the confirmed install (single-use token, protection re-check). The
+   * refKind/version pair must match the reviewed tuple: tokens are bound to
+   * the derived key, so a branch and a tag of the same name each need (and
+   * consume) their own confirmation.
+   */
   async install(
     repositoryRaw: string,
     confirmToken: string,
+    refKind: string | null = null,
     version: string | null = null,
   ): Promise<PluginInstallOutcome> {
     const repository = this.requireRepository()
     const slug = parseRepositorySlug(repositoryRaw)
-    const pending = this.pending.get(slug)
+    const kind = normalizeRefKind(refKind)
+    const ref = kind === undefined ? version : requireRefName(slug, kind, version)
+    const key = deriveInstallKey(slug, kind, ref)
+    const pending = this.pending.get(key)
     if (pending === undefined) {
       throw new MarketControlError(
         'market/confirm-required',
-        `Installing "${slug}" needs a previewInstall() confirmation first.`,
-        { key: pluginKeyForRepository(slug) },
+        `Installing "${slug}" needs a previewInstall() confirmation for this ref first.`,
+        { key },
       )
     }
     if (pending.token !== confirmToken) {
       throw new MarketControlError(
         'market/confirm-invalid',
         `The install confirmation token for "${slug}" does not match.`,
-        { key: pluginKeyForRepository(slug) },
+        { key },
       )
     }
     const now = (this.deps.now ?? (() => new Date()))()
     if (now.getTime() >= pending.expiresAt) {
-      this.pending.delete(slug)
+      this.pending.delete(key)
       throw new MarketControlError(
         'market/confirm-expired',
         `The install confirmation for "${slug}" expired; review the plugin again.`,
-        { key: pluginKeyForRepository(slug) },
+        { key },
       )
     }
-    this.pending.delete(slug)
+    this.pending.delete(key)
 
-    const key = pluginKeyForRepository(slug)
     const existing = await repository.records.get(key)
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
@@ -260,7 +341,8 @@ export class MarketSourceOperations {
       repositoryRoot: repository.root,
       key,
       repository: slug,
-      version: version ?? pending.version ?? null,
+      ...(kind === undefined ? {} : { refKind: kind }),
+      version: ref ?? pending.version ?? null,
     })
     await this.deps.syncRecord(outcome.record)
     return {

@@ -12,22 +12,33 @@
  * trust decision (`trusted` + `trustedAt`) is written in the same step. A
  * same-key re-install is an overwrite update and requires its own
  * confirmation.
+ *
+ * Directory conventions:
+ * - v2 ref installs (`refKind` + `ref` supplied) clone into the multi-level
+ *   target `<root>/<owner>/<repo>/<branch|tag>/<refSeg>` and register the
+ *   record with a per-`(owner, repo, ref-kind, ref)` key and a source carrying
+ *   `refKind`. Distinct refs of the same repository coexist as independent
+ *   records; reinstalling the same tuple is an overwrite update of its own
+ *   checkout.
+ * - legacy installs (no `refKind`) keep the pre-v2 behavior: checkout under a
+ *   caller-provided single-level `localDirName` (defaulting to the key).
  */
 
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { PluginMarketKey, PluginMarketRecord } from '../../types.ts'
 import { MarketError, type MarketErrorOptions } from './errors.ts'
 import { NodeFs, type FsLike } from './fs.ts'
 import { parseRepositorySlug } from './github.ts'
+import { isValidPluginKey, pluginKeyForGithubRef } from './keys.ts'
 import { RepositoryDirectory } from './directory.ts'
 import { repositoryRecordsPath } from './layout.ts'
 import {
   isCheckoutEntryPath,
   isLocalDirSegment,
   normalizeCheckoutEntry,
+  refSegOf,
 } from './paths.ts'
-import { isValidPluginKey } from './keys.ts'
 import { PluginRecordStore } from './records.ts'
 
 /** Conventional plugin entry used when the manifest resolves none. */
@@ -82,15 +93,26 @@ export const nodeCommandRunner: CommandRunner = (command, args, options = {}) =>
 export interface InstallPluginInput {
   /** Validated repository root (must already exist and be writable). */
   readonly repositoryRoot: string
-  /** Stable loader-safe key, e.g. `gh-owner-repo`. */
+  /**
+   * Stable loader-safe key. For v2 ref installs it must equal
+   * `pluginKeyForGithubRef(ownerRepo, refKind, ref)`; legacy installs keep
+   * using the caller-provided key (e.g. `gh-owner-repo`).
+   */
   readonly key: PluginMarketKey
   /** `owner/repo` slug to clone. */
   readonly ownerRepo: string
-  /** Optional tag/branch pin. */
+  /** v2 ref kind; when set the checkout lands at the multi-level ref target. */
+  readonly refKind?: 'branch' | 'tag'
+  /** Branch/tag name to clone (required together with `refKind`). */
+  readonly ref?: string
+  /** Optional tag/branch pin (legacy alias of `ref`, pre-v2 callers). */
   readonly version?: string | null
   /** Optional commit override; the cloned HEAD sha is recorded otherwise. */
   readonly commit?: string | null
-  /** Checkout directory name under the repository root (default: the key). */
+  /**
+   * Checkout location under the repository root. Legacy installs default it
+   * to the key; v2 ref installs derive it from the ref tuple.
+   */
   readonly localDirName?: string
   /** Explicit entry override; otherwise resolved from the manifest. */
   readonly entry?: string
@@ -147,10 +169,15 @@ export class PluginInstaller {
     if (!isValidPluginKey(input.key)) {
       throw new MarketError('record/key-invalid', `"${input.key}" is not a valid stable plugin-market key.`)
     }
-    const dirName = input.localDirName ?? input.key
-    if (!isLocalDirSegment(dirName)) {
-      throw new MarketError('record/invalid', `localDirName "${dirName}" is not a valid checkout directory name.`)
-    }
+
+    // Resolve the target tuple: v2 ref installs derive key + localDirName from
+    // the (owner, repo, ref-kind, ref) identity; legacy installs use the
+    // caller-provided key and single-level directory.
+    const target = resolveInstallTarget(ownerRepo, input)
+    const key = target.key
+    const dirName = target.dirName
+    const refKind = target.refKind
+    const refName = target.refName
     if (input.entry !== undefined && !isCheckoutEntryPath(input.entry)) {
       throw new MarketError('record/invalid', `entry "${input.entry}" is not a valid checkout-relative entry path.`)
     }
@@ -159,16 +186,17 @@ export class PluginInstaller {
     // dependency step; ensureLayout is idempotent.
     await new RepositoryDirectory(this.fs).ensureLayout(root)
     const store = this.store ?? new PluginRecordStore(repositoryRecordsPath(root), { fs: this.fs })
-    const existing = await store.get(input.key)
-    await this.assertTargetFree(store, input.key, dirName, root)
+    const existing = await store.get(key)
+    await this.assertTargetFree(store, key, dirName, root)
 
-    const finalDir = join(root, dirName)
-    const tmpDir = join(root, `.install-${input.key}-${process.pid}-${nextTempId++}`)
-    const oldDir = existing && existing.localDirName !== dirName ? join(root, existing.localDirName) : null
+    const finalDir = join(root, ...dirName.split('/'))
+    const tmpDir = join(root, `.install-${key}-${process.pid}-${nextTempId++}`)
+    const oldDir = existing && existing.localDirName !== dirName ? join(root, ...existing.localDirName.split('/')) : null
     try {
       await this.cloneSource(ownerRepo, tmpDir, {
         depth: input.depth ?? 1,
-        version: input.version ?? null,
+        refKind,
+        ref: refName,
       })
       await this.installDependencies(tmpDir)
       const manifest = await this.readManifest(tmpDir)
@@ -177,17 +205,16 @@ export class PluginInstaller {
       const headSha = await this.readHeadSha(tmpDir)
 
       // Swap the staged checkout into place (previous one is removed first).
+      // Nested v2 targets need their parent chain created before the rename.
+      await this.fs.mkdirp(dirname(finalDir))
       if ((await this.fs.lstat(finalDir)) !== null) await this.fs.rmrf(finalDir)
       await this.fs.rename(tmpDir, finalDir)
 
       const record = await store.register({
-        key: input.key,
-        source: {
-          kind: 'github',
-          repository: ownerRepo,
-          version: input.version ?? null,
-          commit: input.commit ?? headSha ?? null,
-        },
+        key,
+        source: refKind === undefined
+          ? { kind: 'github', repository: ownerRepo, version: refName ?? input.version ?? null, commit: input.commit ?? headSha ?? null }
+          : { kind: 'github', refKind, repository: ownerRepo, version: refName, commit: input.commit ?? headSha ?? null },
         localDirName: dirName,
         entry,
       }, { trusted: true })
@@ -216,10 +243,10 @@ export class PluginInstaller {
       throw new MarketError(
         'install/dir-in-use',
         `The checkout directory "${dirName}" is already used by plugin "${other.key}".`,
-        { path: join(root, dirName) },
+        { path: join(root, ...dirName.split('/')) },
       )
     }
-    const stat = await this.fs.lstat(join(root, dirName))
+    const stat = await this.fs.lstat(join(root, ...dirName.split('/')))
     if (stat === null) return
     const existing = await store.get(key)
     if (existing?.localDirName === dirName) return // overwrite update of our own checkout
@@ -228,11 +255,11 @@ export class PluginInstaller {
     // hand-made git repository, sources, notes) and refused: the presence of
     // `.git` alone is not proof of a managed checkout, and letting it through
     // would make the swap step's rmrf delete it. Fail loudly instead.
-    if (!(await this.isEmptyDir(join(root, dirName)))) {
+    if (!(await this.isEmptyDir(join(root, ...dirName.split('/'))))) {
       throw new MarketError(
         'install/dir-exists',
         `The directory "${dirName}" already exists and is not a checkout managed by this plugin manager; refusing to overwrite it.`,
-        { path: join(root, dirName) },
+        { path: join(root, ...dirName.split('/')) },
       )
     }
   }
@@ -245,11 +272,26 @@ export class PluginInstaller {
     }
   }
 
-  private async cloneSource(slug: string, target: string, opts: { depth: number; version: string | null }): Promise<void> {
+  private async cloneSource(
+    slug: string,
+    target: string,
+    opts: { depth: number; refKind: 'branch' | 'tag' | undefined; ref: string | null },
+  ): Promise<void> {
     const args: string[] = ['clone']
-    if (opts.depth > 0) {
-      args.push('--depth', String(opts.depth))
-      if (opts.version) args.push('--branch', opts.version, '--single-branch')
+    if (opts.refKind === undefined) {
+      // Legacy behavior: a caller-supplied pin (branch or tag name) is
+      // selected through git's --branch inside the shallow block.
+      if (opts.depth > 0) {
+        args.push('--depth', String(opts.depth))
+        if (opts.ref) args.push('--branch', opts.ref, '--single-branch')
+      }
+    } else if (opts.refKind === 'branch') {
+      if (opts.depth > 0) args.push('--depth', String(opts.depth))
+      if (opts.ref) args.push('--branch', opts.ref, '--single-branch')
+    } else {
+      // Tag install: git resolves a --branch tag into a detached checkout.
+      // Annotated tags need the tag object, so do not force --single-branch.
+      if (opts.ref && opts.ref.length > 0) args.push('--branch', opts.ref)
     }
     args.push(`https://github.com/${slug}.git`, target)
     await this.runChecked('git', args, undefined, 'install/git-failed', 'The git clone step failed.')
@@ -319,6 +361,73 @@ export class PluginInstaller {
 }
 
 let nextTempId = 0
+
+/** Normalized install destination of one {@link PluginInstaller.install} run. */
+interface InstallTarget {
+  readonly key: PluginMarketKey
+  readonly dirName: string
+  /** Set for v2 ref installs (legacy installs leave it undefined). */
+  readonly refKind: 'branch' | 'tag' | undefined
+  /** Branch/tag name to clone (null for a legacy unpinned install). */
+  readonly refName: string | null
+}
+
+/**
+ * Resolve the checkout destination from the install input. A v2 ref install
+ * (`refKind` + `ref`) derives its key through {@link pluginKeyForGithubRef}
+ * and its `<owner>/<repo>/<kind>/<refSeg>` localDirName; a legacy install uses
+ * the caller-supplied key and single-level directory name.
+ */
+export function resolveInstallTarget(repository: string, input: InstallPluginInput): InstallTarget {
+  const slug = parseRepositorySlug(repository)
+  if (input.refKind === undefined) {
+    const dirName = input.localDirName ?? input.key
+    if (!isLocalDirSegment(dirName)) {
+      throw new MarketError('record/invalid', `localDirName "${dirName}" is not a valid single-segment checkout directory name (legacy installs must not carry a multi-level ref path; pass refKind + ref instead).`)
+    }
+    return {
+      key: input.key,
+      dirName,
+      refKind: undefined,
+      refName: input.ref ?? input.version ?? null,
+    }
+  }
+  if (input.refKind !== 'branch' && input.refKind !== 'tag') {
+    throw new MarketError('record/invalid', `refKind "${String(input.refKind)}" must be "branch" or "tag".`)
+  }
+  const ref = input.ref ?? input.version ?? null
+  if (ref === null || ref.length === 0) {
+    throw new MarketError('record/invalid', 'A v2 ref install requires a branch/tag name in "ref".', { path: slug })
+  }
+  const slash = slug.indexOf('/')
+  const owner = slug.slice(0, slash)
+  const repo = slug.slice(slash + 1)
+  if (!isLocalDirSegment(owner) || !isLocalDirSegment(repo)) {
+    throw new MarketError(
+      'record/invalid',
+      `The slug "${slug}" cannot be used as directory segments (owner/repo must each be a path-safe single segment).`,
+      { path: slug },
+    )
+  }
+  const refSeg = refSegOf(ref)
+  if (refSeg === null) {
+    throw new MarketError('record/invalid', `The ref "${ref}" cannot be encoded into a path-safe ref segment.`, { path: slug })
+  }
+  const key = pluginKeyForGithubRef(slug, input.refKind, ref)
+  if (input.key !== key) {
+    throw new MarketError(
+      'record/key-invalid',
+      `The v2 ref install key must equal pluginKeyForGithubRef("${slug}", "${input.refKind}", "${ref}") — got "${input.key}".`,
+      { path: slug },
+    )
+  }
+  return {
+    key,
+    dirName: `${owner}/${repo}/${input.refKind}/${refSeg}`,
+    refKind: input.refKind,
+    refName: ref,
+  }
+}
 
 /**
  * Resolve the plugin entry of one checkout: explicit override, then

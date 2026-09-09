@@ -104,8 +104,10 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(remoteErrorOf(idle)).toMatchObject({ code: 'market/idle' })
     const idleSearch = await gateway.search('demo', null).catch((error: unknown) => error)
     expect(remoteErrorOf(idleSearch)).toMatchObject({ code: 'market/idle' })
-    const idleInstall = await gateway.install('octocat/demo', 'tok', null).catch((error: unknown) => error)
+    const idleInstall = await gateway.install('octocat/demo', 'tok', null, null).catch((error: unknown) => error)
     expect(remoteErrorOf(idleInstall)).toMatchObject({ code: 'market/idle' })
+    const idlePreview = await gateway.previewInstall('octocat/demo', 'tag', 'v1').catch((error: unknown) => error)
+    expect(remoteErrorOf(idlePreview)).toMatchObject({ code: 'market/idle' })
     const idleDetail = await gateway.repositoryDetail('octocat/demo').catch((error: unknown) => error)
     expect(remoteErrorOf(idleDetail)).toMatchObject({ code: 'market/idle' })
   })
@@ -143,6 +145,26 @@ describe('MarketControllerGateway host Remote surface', () => {
     const caught = await gateway.repositoryDetail('not-a-slug').catch((error: unknown) => error)
     expect(remoteErrorOf(caught)).toMatchObject({ code: 'github/bad-request' })
     expect(engines.detailCalls).toHaveLength(0)
+  })
+
+  it('forwards refKind to the source and derives per-tuple keys for same-name refs', async () => {
+    const { gateway, engines } = gatewayWith()
+    const branchReview = await gateway.previewInstall('octocat/demo-plugin', 'branch', 'v1.2.3')
+    expect(branchReview).toMatchObject({ repository: 'octocat/demo-plugin', refKind: 'branch' })
+    const tagReview = await gateway.previewInstall('octocat/demo-plugin', 'tag', 'v1.2.3')
+    expect(tagReview.refKind).toBe('tag')
+    expect(branchReview.key).not.toBe(tagReview.key)
+
+    await gateway.install('octocat/demo-plugin', branchReview.confirmToken, 'branch', 'v1.2.3')
+    await gateway.install('octocat/demo-plugin', tagReview.confirmToken, 'tag', 'v1.2.3')
+    expect(engines.installCalls.map(call => call.key)).toEqual([branchReview.key, tagReview.key])
+    expect(engines.installCalls.map(call => call.refKind)).toEqual(['branch', 'tag'])
+  })
+
+  it('maps a v2 ref-less preview to the market/bad-request wire code', async () => {
+    const { gateway } = gatewayWith()
+    const caught = await gateway.previewInstall('octocat/demo-plugin', 'tag', null).catch((error: unknown) => error)
+    expect(remoteErrorOf(caught)).toMatchObject({ code: 'market/bad-request' })
   })
 
   it('maps MarketControlError to a wire RemoteError with the stable code', () => {

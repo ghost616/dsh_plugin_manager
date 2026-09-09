@@ -28,6 +28,13 @@ export type PluginMarketKey = string & { readonly [pluginMarketKeyBrand]: 'plugi
 export type PluginMarketTrustState = 'untrusted' | 'trusted' | 'revoked'
 
 /**
+ * Kind of one GitHub ref a v2 record/review pins to. Branch and tag refs share
+ * one name namespace on the remote, so installs and installed markers pair the
+ * ref name with this kind to tell same-name branches and tags apart.
+ */
+export type GithubRefKind = 'branch' | 'tag'
+
+/**
  * Stable failure vocabulary shared by Host errors and future wire codes,
  * shaped `domain/reason`. Host failures throw `MarketError` with one of
  * these codes; never string-match ad hoc.
@@ -79,7 +86,13 @@ export interface PluginMarketGithubSource {
   readonly kind: 'github'
   /** `owner/repo` slug that identifies the repository. */
   readonly repository: string
-  /** Tag/version the checkout is pinned to, when known. */
+  /**
+   * Whether the installed checkout was pinned to a branch or a tag. Absent on
+   * legacy pre-v2 records that predate the ref-kind metadata (they installed
+   * whatever the default branch was at the time); v2 installs always carry it.
+   */
+  readonly refKind?: GithubRefKind
+  /** Branch/tag name the checkout is pinned to, when known. */
   readonly version: string | null
   /** Commit the local checkout is at, when known. */
   readonly commit: string | null
@@ -93,10 +106,20 @@ export interface PluginMarketGithubSource {
  * market.
  */
 export interface PluginMarketRecord {
-  /** Stable loader-safe key (no colon), e.g. `gh-owner-repo`. */
+  /**
+   * Stable loader-safe key (no colon), e.g. `gh-owner-repo`. V2 installs are
+   * keyed uniquely per `(owner, repo, ref-kind, ref)` tuple
+   * (see `pluginKeyForGithubRef`); legacy single-ref records keep their
+   * pre-v2 slug-derived keys.
+   */
   readonly key: PluginMarketKey
   readonly source: PluginMarketSource
-  /** Directory name of the plugin's source checkout under the repository root. */
+  /**
+   * Checkout location of the plugin relative to the repository root,
+   * forward-slash separated. V2 ref installs store the multi-level ref path
+   * `<owner>/<repo>/<branch|tag>/<refSeg>`; legacy records carry the former
+   * single-segment checkout directory name and keep loading/working as-is.
+   */
   readonly localDirName: string
   /**
    * Cordis plugin entry file of the checkout, relative to `localDirName`
@@ -229,6 +252,15 @@ export interface MarketStatus {
 export interface PluginInstallReview {
   /** Validated `owner/repo` slug of the reviewed repository. */
   readonly repository: string
+  /**
+   * Ref kind the review was minted for. V2 reviews carry `'branch'`/`'tag'`
+   * and a key unique to the `(owner, repo, ref-kind, ref)` tuple, so a branch
+   * and a tag of the same name review (and later install) independently.
+   * Absent on legacy default-branch reviews (the caller provided no refKind),
+   * whose key keeps the pre-v2 `gh-owner-repo` convention and stays
+   * compatible with old records that carry no ref kind.
+   */
+  readonly refKind?: GithubRefKind
   /** Stable loader-safe key derived from the slug (e.g. `gh-owner-repo`). */
   readonly key: PluginMarketKey
   /** Manifest summary (ready) or repository-metadata fallback (degraded). */

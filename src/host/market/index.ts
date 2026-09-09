@@ -138,6 +138,7 @@ export {
   PluginInstaller,
   nodeCommandRunner,
   resolveCheckoutEntry,
+  resolveInstallTarget,
   type CommandOutcome,
   type CommandRunner,
   type InstallPluginInput,
@@ -145,3 +146,20 @@ export {
   type PluginInstallerOptions,
   type RunOptions,
 } from './install.ts'
+
+export {
+  parsePluginKey,
+  isValidPluginKey,
+  pluginKeyForGithubRef,
+  PLUGIN_MARKET_KEY_MAX_LENGTH,
+} from './keys.ts'
+
+export {
+  refSegOf,
+  parseRefSeg,
+  isManagedLocalDirName,
+  splitManagedLocalDir,
+  isLocalDirSegment,
+  LOCAL_DIR_NAME_MAX_LENGTH,
+  REF_SEG_MAX_LENGTH,
+} from './paths.ts'

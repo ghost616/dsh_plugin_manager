@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { MarketError } from '../src/host/market/errors.ts'
+import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
-import { key, makeSourceOps, testbed } from './support/control-testbed.ts'
+import { key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
 
 /** Repository slug → derived key convention under test. */
 const SLUG = 'octocat/demo-plugin'
@@ -206,12 +207,13 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     })
   })
 
-  it('pins the reviewed version on the install', async () => {
+  it('pins the reviewed version on a legacy (no refKind) install', async () => {
     const bed = testbed()
     const source = ops(bed)
-    const review = await source.previewInstall(SLUG, 'v2.0.0')
-    await source.install(SLUG, review.confirmToken, 'v2.0.0')
+    const review = await source.previewInstall(SLUG, null, 'v2.0.0')
+    await source.install(SLUG, review.confirmToken, null, 'v2.0.0')
     expect(bed.engines.installCalls[0]?.version).toBe('v2.0.0')
+    expect(bed.engines.installCalls[0]?.refKind).toBeUndefined()
   })
 
   it('rejects expired confirmations with market/confirm-expired', async () => {
@@ -242,5 +244,90 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
       code: 'install/git-failed',
     })
+  })
+})
+
+describe('MarketSourceOperations v2 refs (refKind)', () => {
+  it('reviews a branch ref under its per-tuple key and carries refKind in the review', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG, 'branch', 'dev')
+    expect(review.refKind).toBe('branch')
+    expect(review.key).toBe(pluginKeyForGithubRef(SLUG, 'branch', 'dev'))
+    expect(review.exists).toBe(false)
+    expect(review.overwrite).toBe(false)
+    expect(bed.engines.previewCalls).toEqual([SLUG])
+
+    const outcome = await source.install(SLUG, review.confirmToken, 'branch', 'dev')
+    expect(outcome.key).toBe(pluginKeyForGithubRef(SLUG, 'branch', 'dev'))
+    expect(bed.engines.installCalls[0]).toMatchObject({
+      repositoryRoot: '/repo',
+      key: pluginKeyForGithubRef(SLUG, 'branch', 'dev'),
+      repository: SLUG,
+      refKind: 'branch',
+      version: 'dev',
+    })
+    expect((outcome.record.source as { refKind?: string }).refKind).toBe('branch')
+    expect(outcome.record.localDirName).toBe(refDirName(SLUG, 'branch', 'dev'))
+  })
+
+  it('installs same-name branch and tag separately with unique keys and dirs', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const branchKey = pluginKeyForGithubRef(SLUG, 'branch', 'v1.2.3')
+    const tagKey = pluginKeyForGithubRef(SLUG, 'tag', 'v1.2.3')
+    expect(branchKey).not.toBe(tagKey)
+    expect(refDirName(SLUG, 'branch', 'v1.2.3')).not.toBe(refDirName(SLUG, 'tag', 'v1.2.3'))
+
+    const branchReview = await source.previewInstall(SLUG, 'branch', 'v1.2.3')
+    expect(branchReview.key).toBe(branchKey)
+    const branchOutcome = await source.install(SLUG, branchReview.confirmToken, 'branch', 'v1.2.3')
+
+    // The same-name tag is an independent plugin: no exists/overwrite flags
+    // against the installed branch, and its token is its own.
+    const tagReview = await source.previewInstall(SLUG, 'tag', 'v1.2.3')
+    expect(tagReview.key).toBe(tagKey)
+    expect(tagReview.exists).toBe(false)
+    expect(tagReview.overwrite).toBe(false)
+    await expect(source.install(SLUG, tagReview.confirmToken, 'branch', 'v1.2.3'))
+      .rejects.toMatchObject({ code: 'market/confirm-required' })
+    const tagOutcome = await source.install(SLUG, tagReview.confirmToken, 'tag', 'v1.2.3')
+
+    expect(branchOutcome.key).not.toBe(tagOutcome.key)
+    expect(await bed.records.get(branchKey)).not.toBeNull()
+    expect(await bed.records.get(tagKey)).not.toBeNull()
+    expect(bed.engines.installCalls.map(call => call.key)).toEqual([branchKey, tagKey])
+    expect(bed.engines.installCalls.map(call => call.refKind)).toEqual(['branch', 'tag'])
+  })
+
+  it('reports an already-installed tuple as an overwrite update only for that tuple', async () => {
+    const bed = testbed()
+    bed.records.seed(pluginKeyForGithubRef(SLUG, 'tag', 'v1.2.3'), {
+      localDirName: refDirName(SLUG, 'tag', 'v1.2.3') ?? GH_KEY,
+    })
+    const source = ops(bed)
+    const tagReview = await source.previewInstall(SLUG, 'tag', 'v1.2.3')
+    expect(tagReview.exists).toBe(true)
+    expect(tagReview.overwrite).toBe(true)
+    const branchReview = await source.previewInstall(SLUG, 'branch', 'v1.2.3')
+    expect(branchReview.exists).toBe(false)
+    expect(branchReview.overwrite).toBe(false)
+  })
+
+  it('refuses a v2 install without its ref name (market/bad-request, no engine call)', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await expect(source.previewInstall(SLUG, 'tag')).rejects.toMatchObject({ code: 'market/bad-request' })
+    await expect(source.previewInstall(SLUG, 'branch', null)).rejects.toMatchObject({ code: 'market/bad-request' })
+    expect(bed.engines.previewCalls).toHaveLength(0)
+  })
+
+  it('refuses an unknown refKind with market/bad-request', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await expect(source.previewInstall(SLUG, 'release')).rejects.toMatchObject({ code: 'market/bad-request' })
+    await expect(source.install(SLUG, 'tok', 'release', 'v1')).rejects.toMatchObject({ code: 'market/bad-request' })
+    expect(bed.engines.previewCalls).toHaveLength(0)
+    expect(bed.engines.installCalls).toHaveLength(0)
   })
 })

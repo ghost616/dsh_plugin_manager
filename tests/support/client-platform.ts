@@ -12,6 +12,7 @@
 
 import { vi } from 'vitest'
 import type {
+  GithubRefKind,
   ManagedPluginPhase,
   ManagedPluginList,
   ManagedPluginView,
@@ -352,6 +353,8 @@ export interface ManagedViewSeed {
   lastError?: string | null
   /** Pinned branch/tag of the record; null models a legacy default-branch install. */
   version?: string | null
+  /** V2 ref kind of the pinned ref; absent = legacy record without ref metadata. */
+  refKind?: GithubRefKind
 }
 
 /** Build one ManagedPluginView from a compact seed. */
@@ -367,6 +370,7 @@ export function makeView(seed: ManagedViewSeed): ManagedPluginView {
         repository: seed.repository,
         version: seed.version === undefined ? 'v1.0.0' : seed.version,
         commit: null,
+        ...(seed.refKind === undefined ? {} : { refKind: seed.refKind }),
       },
       localDirName: `gh-${seed.key}`,
       entry: null,

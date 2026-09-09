@@ -102,15 +102,20 @@ const METHODS: Record<string, MethodMeta> = {
   },
   previewInstall: {
     parameters: ['repository'],
-    optional: ['version'],
-    call: (gateway, args) => gateway.previewInstall(String(args.repository), optionalVersion(args.version)),
+    optional: ['refKind', 'version'],
+    call: (gateway, args) => gateway.previewInstall(
+      String(args.repository),
+      optionalRefKind(args.refKind),
+      optionalVersion(args.version),
+    ),
   },
   install: {
     parameters: ['repository', 'confirmToken'],
-    optional: ['version'],
+    optional: ['refKind', 'version'],
     call: (gateway, args) => gateway.install(
       String(args.repository),
       String(args.confirmToken),
+      optionalRefKind(args.refKind),
       optionalVersion(args.version),
     ),
   },
@@ -267,6 +272,14 @@ function optionalNumber(value: unknown): number | null {
 function optionalVersion(value: unknown): string | null {
   if (value === undefined || value === null) return null
   if (typeof value !== 'string') throw new HttpRefusal(400, 'The "version" argument must be a string or null.')
+  return value
+}
+
+function optionalRefKind(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (value !== 'branch' && value !== 'tag') {
+    throw new HttpRefusal(400, 'The "refKind" argument must be "branch", "tag" or null.')
+  }
   return value
 }
 

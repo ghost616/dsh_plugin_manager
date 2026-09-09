@@ -216,21 +216,38 @@ export class MarketControllerGateway extends TypertRemoteService {
     }
   }
 
-  /** Review one repository and mint its single-use install confirmation. */
+  /**
+   * Review one repository (or one of its refs) and mint its single-use install
+   * confirmation. `refKind` null/omitted ⇒ legacy default-branch review;
+   * `'branch'`/`'tag'` ⇒ that ref's per-tuple review (requires `version`).
+   */
   @Remote('previewInstall')
-  async previewInstall(repository: string, version: string | null): Promise<PluginInstallReview> {
+  async previewInstall(
+    repository: string,
+    refKind: string | null,
+    version: string | null,
+  ): Promise<PluginInstallReview> {
     try {
-      return await this.deps.source.previewInstall(repository, version ?? null)
+      return await this.deps.source.previewInstall(repository, refKind ?? null, version ?? null)
     } catch (error) {
       throw toRemoteError(error)
     }
   }
 
-  /** Run the double-confirmed install for a reviewed repository. */
+  /**
+   * Run the double-confirmed install for a reviewed repository/ref. The
+   * `refKind`/`version` pair must reproduce the reviewed tuple (the token is
+   * bound to its derived key).
+   */
   @Remote('install')
-  async install(repository: string, confirmToken: string, version: string | null): Promise<PluginInstallOutcome> {
+  async install(
+    repository: string,
+    confirmToken: string,
+    refKind: string | null,
+    version: string | null,
+  ): Promise<PluginInstallOutcome> {
     try {
-      return await this.deps.source.install(repository, confirmToken, version ?? null)
+      return await this.deps.source.install(repository, confirmToken, refKind ?? null, version ?? null)
     } catch (error) {
       throw toRemoteError(error)
     }

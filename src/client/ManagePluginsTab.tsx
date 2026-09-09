@@ -9,6 +9,7 @@ import {
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   GitHubSearchPage,
+  GithubRefKind,
   ManagedPluginList,
   ManagedPluginPhase,
   ManagedPluginView,
@@ -44,11 +45,22 @@ export interface ManagePluginsTabInjected {
   search: (keywords: string, page: number) => Promise<GitHubSearchPage>
   /** Aggregated repository detail (metadata, refs, README). */
   repositoryDetail: (repository: string) => Promise<RepositoryDetail>
-  /** Review one repository ref (default branch when no version) and mint its
-   *  single-use install confirmation. */
-  previewInstall: (repository: string, version?: string | null) => Promise<PluginInstallReview>
-  /** Run the double-confirmed install for a reviewed repository ref. */
-  install: (repository: string, confirmToken: string, version?: string | null) => Promise<PluginInstallOutcome>
+  /** Review one repository ref and mint its single-use install confirmation.
+   *  `version` null/omitted + no `refKind` reviews the default branch the
+   *  legacy way; a v2 per-ref review pairs `version` with `refKind`. */
+  previewInstall: (
+    repository: string,
+    version?: string | null,
+    refKind?: GithubRefKind,
+  ) => Promise<PluginInstallReview>
+  /** Run the double-confirmed install for a reviewed repository ref; the
+   *  optional `refKind`/`version` pair must reproduce the reviewed tuple. */
+  install: (
+    repository: string,
+    confirmToken: string,
+    version?: string | null,
+    refKind?: GithubRefKind,
+  ) => Promise<PluginInstallOutcome>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -310,10 +322,12 @@ type InstallPhase =
   | { readonly phase: 'install-error'; readonly review: PluginInstallReview; readonly failure: ManageUiFailure }
   | { readonly phase: 'done'; readonly outcome: PluginInstallOutcome }
 
-function InstallDialog({ repository, version, previewInstall, install, t, onClose, onInstalled }: {
+function InstallDialog({ repository, version, refKind, previewInstall, install, t, onClose, onInstalled }: {
   readonly repository: string
-  /** Branch/tag ref being installed; null = the repository default branch. */
+  /** Branch/tag ref name being installed; null = the legacy default branch. */
   readonly version?: string | null
+  /** V2 ref kind of the pinned branch/tag (omitted on legacy reviews). */
+  readonly refKind?: GithubRefKind
   readonly previewInstall: ManagePluginsTabInjected['previewInstall']
   readonly install: ManagePluginsTabInjected['install']
   readonly t: Translate
@@ -333,18 +347,18 @@ function InstallDialog({ repository, version, previewInstall, install, t, onClos
     let current = true
     setPhase({ phase: 'preview' })
     void Promise.resolve()
-      .then(() => previewInstall(repository, version ?? null))
+      .then(() => previewInstall(repository, version ?? null, refKind))
       .then(
         (review) => { if (current) setPhase({ phase: 'review', review }) },
         (error: unknown) => { if (current) setPhase({ phase: 'preview-error', failure: toUiFailure(error) }) },
       )
     return () => { current = false }
-  }, [previewInstall, install, previewTick, repository, version])
+  }, [previewInstall, install, previewTick, repository, version, refKind])
 
   const confirm = (review: PluginInstallReview): void => {
     if (phase.phase === 'installing') return
     setPhase({ phase: 'installing', review })
-    void install(repository, review.confirmToken, version ?? null)
+    void install(repository, review.confirmToken, version ?? null, refKind)
       .then(
         (outcome) => {
           if (!mounted.current) return
@@ -625,8 +639,10 @@ type MarketSearchState =
 /** One install target selected from the detail view (branch or tag). */
 interface MarketInstallTarget {
   readonly repository: string
-  /** Branch/tag ref to install; null = the repository default branch. */
-  readonly version: string | null
+  /** Branch/tag ref name to install (the picker always supplies one). */
+  readonly version: string
+  /** Kind of the selected ref: keeps same-name branches and tags apart. */
+  readonly refKind: RefKind
 }
 
 /** Load state of the repository detail view. */
@@ -635,13 +651,32 @@ type MarketDetailState =
   | { readonly status: 'error'; readonly failure: ManageUiFailure }
   | { readonly status: 'ready'; readonly detail: RepositoryDetail }
 
-/** One installed-ref marker query over the roster projection. */
+/**
+ * Installed-ref projection of one repository. Names come in two families:
+ * kind-tagged v2 refs (matched by kind AND name, so a same-name branch and
+ * tag never cross-mark) and legacy refs from records without ref metadata
+ * (matched by name alone, the pre-v2 fallback).
+ */
+export interface InstalledRefs {
+  /** Names of legacy (refKind-less) records — matched by name alone. */
+  readonly legacy: ReadonlySet<string>
+  /** Names of v2 records per kind — matched by kind AND name. */
+  readonly byKind: Readonly<Record<RefKind, ReadonlySet<string>>>
+}
+
+/** Per-repository installed-ref projection (marker input of the detail view). */
+export type InstalledRefsByRepository = ReadonlyMap<string, InstalledRefs>
+
+/** Whether the roster marks this exact (kind, name) ref of the repository. */
 function isRefInstalled(
-  installedVersions: ReadonlyMap<string, ReadonlySet<string>>,
+  installedRefs: InstalledRefsByRepository,
   repository: string,
-  version: string,
+  choice: RefChoice,
 ): boolean {
-  return installedVersions.get(repository)?.has(version) ?? false
+  const refs = installedRefs.get(repository)
+  if (refs === undefined) return false
+  return refs.legacy.has(choice.name)
+    || refs.byKind[choice.kind].has(choice.name)
 }
 
 /* ------------------------------------------------------------------------ */
@@ -649,7 +684,7 @@ function isRefInstalled(
 /* ------------------------------------------------------------------------ */
 
 /** One installable ref of a repository: a branch or a tag. */
-export type RefKind = 'branch' | 'tag'
+export type RefKind = GithubRefKind
 
 /** One installable ref of a repository: a branch or a tag. */
 export interface RefChoice {
@@ -730,26 +765,26 @@ function DetailReadme({ readme, url, defaultBranch, t }: {
  * Rendered inside the modal's scrolling zone so long README documents scroll
  * instead of stretching the dialog shell.
  */
-function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
+function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
   readonly detail: RepositoryDetail
-  readonly installedVersions: ReadonlyMap<string, ReadonlySet<string>>
+  readonly installedRefs: InstalledRefsByRepository
   readonly t: Translate
   /** Open the install review for one branch/tag ref of this repository. */
-  readonly onInstall: (version: string) => void
+  readonly onInstall: (choice: RefChoice) => void
 }): ReactNode {
   const selectId = useId()
   const [selectedValue, setSelectedValue] = useState('')
   const hasRefs = detail.branches.length > 0 || detail.tags.length > 0
   const selection = parseRefValue(selectedValue)
   const selectedInstalled = selection !== null
-    && isRefInstalled(installedVersions, detail.repository, selection.name)
+    && isRefInstalled(installedRefs, detail.repository, selection)
   const branchChoices: readonly RefChoice[] =
     orderedBranchNames(detail.branches, detail.defaultBranch).map(name => ({ kind: 'branch', name }))
   const tagChoices: readonly RefChoice[] =
     detail.tags.map(name => ({ kind: 'tag', name }))
 
   const renderOption = (choice: RefChoice): ReactNode => {
-    const installed = isRefInstalled(installedVersions, detail.repository, choice.name)
+    const installed = isRefInstalled(installedRefs, detail.repository, choice)
     const isDefault = choice.kind === 'branch' && choice.name === detail.defaultBranch
     return (
       <option
@@ -820,7 +855,7 @@ function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
               className={css.primaryButton}
               data-ref-install
               disabled={selection === null || selectedInstalled}
-              onClick={() => { if (selection !== null) onInstall(selection.name) }}
+              onClick={() => { if (selection !== null) onInstall(selection) }}
             >
               {selectedInstalled ? t('installedBadge') : t('installButton')}
             </button>
@@ -851,13 +886,13 @@ function RepositoryDetailBody({ detail, installedVersions, t, onInstall }: {
  * detail to {@link RepositoryDetailBody}. Lives inside the shared modal shell
  * and its scrolling zone; the list search/pagination are hidden while it is up.
  */
-function RepositoryDetailPane({ slug, state, installedVersions, t, onRetry, onInstall }: {
+function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstall }: {
   readonly slug: string
   readonly state: MarketDetailState
-  readonly installedVersions: ReadonlyMap<string, ReadonlySet<string>>
+  readonly installedRefs: InstalledRefsByRepository
   readonly t: Translate
   readonly onRetry: () => void
-  readonly onInstall: (version: string) => void
+  readonly onInstall: (choice: RefChoice) => void
 }): ReactNode {
   return (
     <div data-detail-pane data-detail-slug={slug}>
@@ -875,7 +910,7 @@ function RepositoryDetailPane({ slug, state, installedVersions, t, onRetry, onIn
       {state.status === 'ready' ? (
         <RepositoryDetailBody
           detail={state.detail}
-          installedVersions={installedVersions}
+          installedRefs={installedRefs}
           t={t}
           onInstall={onInstall}
         />
@@ -884,12 +919,12 @@ function RepositoryDetailPane({ slug, state, installedVersions, t, onRetry, onIn
   )
 }
 
-function GitHubDialog({ t, installed, installedVersions, search, repositoryDetail, previewInstall, install, onClose, onInstalled }: {
+function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, previewInstall, install, onClose, onInstalled }: {
   readonly t: Translate
   /** Repositories that already own a managed record (row badge markers). */
   readonly installed: ReadonlySet<string>
-  /** Installed version names per repository (detail-view per-ref markers). */
-  readonly installedVersions: ReadonlyMap<string, ReadonlySet<string>>
+  /** Kind-aware installed-ref markers per repository (detail-view dropdown). */
+  readonly installedRefs: InstalledRefsByRepository
   readonly search: ManagePluginsTabInjected['search']
   readonly repositoryDetail: ManagePluginsTabInjected['repositoryDetail']
   readonly previewInstall: ManagePluginsTabInjected['previewInstall']
@@ -950,8 +985,8 @@ function GitHubDialog({ t, installed, installedVersions, search, repositoryDetai
   }
 
   /** Open the install review for one branch/tag ref of the shown repository. */
-  const openRefInstall = (repository: string, version: string): void => {
-    setInstallTarget({ repository, version })
+  const openRefInstall = (repository: string, choice: RefChoice): void => {
+    setInstallTarget({ repository, version: choice.name, refKind: choice.kind })
   }
 
   const detailInView = detailSlug !== null
@@ -1205,10 +1240,10 @@ function GitHubDialog({ t, installed, installedVersions, search, repositoryDetai
             <RepositoryDetailPane
               slug={detailSlug}
               state={detailState}
-              installedVersions={installedVersions}
+              installedRefs={installedRefs}
               t={t}
               onRetry={() => { setDetailTick(value => value + 1) }}
-              onInstall={(version) => { openRefInstall(detailSlug, version) }}
+              onInstall={(choice) => { openRefInstall(detailSlug, choice) }}
             />
           </div>
         )}
@@ -1269,9 +1304,10 @@ function GitHubDialog({ t, installed, installedVersions, search, repositoryDetai
 
         {installTarget !== null ? (
           <InstallDialog
-            key={`${installTarget.repository}@${installTarget.version ?? ''}`}
+            key={`${installTarget.repository}@${installTarget.refKind}:${installTarget.version}`}
             repository={installTarget.repository}
             version={installTarget.version}
+            refKind={installTarget.refKind}
             previewInstall={previewInstall}
             install={install}
             t={t}
@@ -1408,24 +1444,34 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     return found
   }, [listState])
 
-  /** Installed version (branch/tag) names per repository, for the detail view.
-   *  Legacy records with `source.version === null` (default-branch installs)
-   *  contribute an empty set: their exact ref is unknown, so no detail entry
-   *  is ever wrongly marked as installed for them. */
-  const installedVersions = useMemo(() => {
-    const found = new Map<string, Set<string>>()
-    if (listState.status !== 'ready') return found
+  /** Kind-aware installed-ref markers per repository, for the detail view.
+   *  V2 records tag their ref with a kind (a same-name branch and tag never
+   *  cross-mark); legacy records without ref metadata fall back to matching
+   *  the ref name alone. Records with `source.version === null`
+   *  (default-branch installs) contribute nothing: their exact ref is unknown,
+   *  so no detail entry is ever wrongly marked as installed for them. */
+  const installedRefs = useMemo<InstalledRefsByRepository>(() => {
+    const mutable = new Map<string, { legacy: Set<string>; byKind: Record<RefKind, Set<string>> }>()
+    if (listState.status !== 'ready') return new Map<string, InstalledRefs>()
     for (const view of listState.snapshot.entries) {
       const source = view.record.source
-      if (source.kind !== 'github') continue
-      let versions = found.get(source.repository)
-      if (versions === undefined) {
-        versions = new Set()
-        found.set(source.repository, versions)
+      if (source.kind !== 'github' || source.version === null) continue
+      let refs = mutable.get(source.repository)
+      if (refs === undefined) {
+        refs = { legacy: new Set(), byKind: { branch: new Set(), tag: new Set() } }
+        mutable.set(source.repository, refs)
       }
-      if (source.version !== null) versions.add(source.version)
+      if (source.refKind === undefined) refs.legacy.add(source.version)
+      else refs.byKind[source.refKind].add(source.version)
     }
-    return found
+    const result = new Map<string, InstalledRefs>()
+    for (const [repository, refs] of mutable) {
+      result.set(repository, {
+        legacy: refs.legacy,
+        byKind: { branch: refs.byKind.branch, tag: refs.byKind.tag },
+      })
+    }
+    return result
   }, [listState])
 
   const configured = statusState.status === 'configured'
@@ -1474,7 +1520,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
           key="market"
           t={t}
           installed={installedRepositories}
-          installedVersions={installedVersions}
+          installedRefs={installedRefs}
           search={search}
           repositoryDetail={repositoryDetail}
           previewInstall={previewInstall}

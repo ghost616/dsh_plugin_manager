@@ -21,6 +21,7 @@
 
 import type {
   GitHubSearchPage,
+  GithubRefKind,
   ManagedPluginList,
   MarketStatus,
   MarketWireErrorCode,
@@ -139,24 +140,41 @@ export async function repositoryDetail(
   return post<RepositoryDetail>('repositoryDetail', { repository })
 }
 
-/** Review one repository and mint its single-use install confirmation. */
+/**
+ * Review one repository (or one of its refs) and mint its single-use install
+ * confirmation. `refKind` selects the v2 per-ref review (`'branch'`/`'tag'`,
+ * requires `version`); omitting it reviews the default branch the legacy way.
+ */
 export async function previewInstall(
   repository: string,
   version?: string | null,
+  refKind?: GithubRefKind,
 ): Promise<MarketCallResult<PluginInstallReview>> {
-  const args: { repository: string; version?: string } = { repository }
+  const args: { repository: string; version?: string; refKind?: GithubRefKind } = { repository }
   if (version !== undefined && version !== null) args.version = version
+  if (refKind !== undefined) args.refKind = refKind
   return post<PluginInstallReview>('previewInstall', args)
 }
 
-/** Run the double-confirmed install for a reviewed repository. */
+/**
+ * Run the double-confirmed install for a reviewed repository/ref. The
+ * `refKind`/`version` pair must reproduce the reviewed tuple (the token is
+ * bound to its derived key).
+ */
 export async function install(
   repository: string,
   confirmToken: string,
   version?: string | null,
+  refKind?: GithubRefKind,
 ): Promise<MarketCallResult<PluginInstallOutcome>> {
-  const args: { repository: string; confirmToken: string; version?: string } = { repository, confirmToken }
+  const args: {
+    repository: string
+    confirmToken: string
+    version?: string
+    refKind?: GithubRefKind
+  } = { repository, confirmToken }
   if (version !== undefined && version !== null) args.version = version
+  if (refKind !== undefined) args.refKind = refKind
   return post<PluginInstallOutcome>('install', args)
 }
 

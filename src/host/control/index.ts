@@ -87,7 +87,14 @@ export function apply(ctx: Context, config?: Config): void {
             repositoryRoot: input.repositoryRoot,
             key: input.key,
             ownerRepo: input.repository,
-            version: input.version ?? null,
+            // v2 ref installs hand the host refKind + ref (the checkout lands
+            // at the per-ref tuple target the key already encodes); legacy
+            // installs stay on the pre-v2 pin path with `version`. The source
+            // layer already rejected null/empty refs for v2, so the `?? ''`
+            // guard is unreachable; the host validates the ref defensively.
+            ...(input.refKind === undefined
+              ? { version: input.version ?? null }
+              : { refKind: input.refKind, ref: input.version ?? '' }),
             confirmed: true,
           })
           return { record: outcome.record, checkoutDir: outcome.checkoutDir }

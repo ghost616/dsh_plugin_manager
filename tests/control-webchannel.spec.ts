@@ -222,6 +222,78 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
+  it('serves v2 refKind preview/install with per-tuple keys over HTTP', async () => {
+    const { router, engines, dispose } = routeFor()
+    await listen(router.server)
+
+    // A branch and a tag of the same name preview as two independent plugins.
+    const branch = await call(router, 'previewInstall', {
+      repository: 'octocat/demo-plugin', refKind: 'branch', version: 'v1.2.3',
+    })
+    expect(branch.ok).toBe(true)
+    const branchValue = (branch as { ok: true; value: { key: string; refKind: string; confirmToken: string } }).value
+    expect(branchValue.refKind).toBe('branch')
+    const tag = await call(router, 'previewInstall', {
+      repository: 'octocat/demo-plugin', refKind: 'tag', version: 'v1.2.3',
+    })
+    expect(tag.ok).toBe(true)
+    const tagValue = (tag as { ok: true; value: { key: string; refKind: string; confirmToken: string } }).value
+    expect(tagValue.refKind).toBe('tag')
+    expect(branchValue.key).not.toBe(tagValue.key)
+
+    const branchInstalled = await call(router, 'install', {
+      repository: 'octocat/demo-plugin', confirmToken: branchValue.confirmToken, refKind: 'branch', version: 'v1.2.3',
+    })
+    expect(branchInstalled.ok).toBe(true)
+    const tagInstalled = await call(router, 'install', {
+      repository: 'octocat/demo-plugin', confirmToken: tagValue.confirmToken, refKind: 'tag', version: 'v1.2.3',
+    })
+    expect(tagInstalled.ok).toBe(true)
+    const tagOutcome = (tagInstalled as { ok: true; value: { key: string; record: { source?: { refKind?: string } } } }).value
+    expect(tagOutcome.key).toBe(tagValue.key)
+    // The ref kind lives on the record source (PluginMarketGithubSource),
+    // mirroring how host installs and the source spec model it.
+    expect(tagOutcome.record.source?.refKind).toBe('tag')
+    expect(engines.installCalls.map(call => call.key)).toEqual([branchValue.key, tagValue.key])
+    expect(engines.installCalls.map(call => call.refKind)).toEqual(['branch', 'tag'])
+
+    // The same-name branch installed earlier is not an overwrite target of the
+    // tag review: an immediate re-review of the tag tuple now overwrites only
+    // its own record.
+    const tagAgain = await call(router, 'previewInstall', {
+      repository: 'octocat/demo-plugin', refKind: 'tag', version: 'v1.2.3',
+    })
+    expect(tagAgain.ok).toBe(true)
+    expect((tagAgain as { ok: true; value: { overwrite: boolean } }).value.overwrite).toBe(true)
+
+    // A v2 preview without its ref name is a market/bad-request envelope.
+    const missingRef = await call(router, 'previewInstall', {
+      repository: 'octocat/demo-plugin', refKind: 'tag',
+    })
+    expect(missingRef.ok).toBe(false)
+    if (!missingRef.ok) expect(missingRef.error.code).toBe('market/bad-request')
+    dispose()
+  })
+
+  it('rejects an invalid refKind value with a 400 transport envelope', async () => {
+    const { router, dispose } = routeFor()
+    await listen(router.server)
+    for (const method of ['previewInstall', 'install']) {
+      const refused = await post(router, {
+        method,
+        args: {
+          repository: 'octocat/demo-plugin',
+          ...(method === 'install' ? { confirmToken: 'tok' } : {}),
+          refKind: 'release',
+          version: 'v1',
+        },
+      }, 400)
+      expect(refused.body.ok).toBe(false)
+      if (!refused.body.ok) expect(refused.body.error.code).toBe('market/bad-request')
+    }
+    dispose()
+  })
+
   it('serves repositoryDetail over HTTP with README-404 tolerance', async () => {
     const { router, engines, dispose } = routeFor()
     await listen(router.server)

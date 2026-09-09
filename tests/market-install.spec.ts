@@ -7,10 +7,11 @@ import {
   DEFAULT_CHECKOUT_ENTRY,
   PluginInstaller,
   resolveCheckoutEntry,
+  resolveInstallTarget,
   type CommandOutcome,
   type CommandRunner,
 } from '../src/host/market/install.ts'
-import { parsePluginKey } from '../src/host/market/keys.ts'
+import { parsePluginKey, pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { repositoryRecordsPath } from '../src/host/market/layout.ts'
 import { PluginRecordStore } from '../src/host/market/records.ts'
 import { makeSuiteTmp, removeTmp } from './support/tmpdir.ts'
@@ -343,6 +344,188 @@ describe('PluginInstaller.install', () => {
       }),
       'install/dir-in-use',
     )
+  })
+
+  describe('v2 multi-level ref installs', () => {
+    async function freshRefRepo(name: string): Promise<string> {
+      const root = join(tmp, name)
+      await mkdir(root)
+      return root
+    }
+
+    it('installs a branch into <owner>/<repo>/branch/<refSeg> with a tuple key', async () => {
+      const root = await freshRefRepo('v2-branch')
+      const slug = 'owner/sample-plugin'
+      const installKey = pluginKeyForGithubRef(slug, 'branch', 'main')
+      const { run, calls } = fakeRunner({ manifest: { main: 'lib/index.js' }, files: ['lib/index.js'] })
+      const result = await new PluginInstaller({ run }).install({
+        repositoryRoot: root,
+        key: installKey,
+        ownerRepo: slug,
+        refKind: 'branch',
+        ref: 'main',
+        confirmed: true,
+      })
+      expect(result.record.key).toBe(installKey)
+      expect(result.record.localDirName).toBe('owner/sample-plugin/branch/main')
+      const source = result.record.source as PluginMarketGithubSource
+      expect(source.refKind).toBe('branch')
+      expect(source.version).toBe('main')
+      expect(await readdir(join(root, 'owner', 'sample-plugin', 'branch', 'main', '.git'))).toEqual([])
+      const cloneCall = calls.find((call) => call.command === 'git' && call.args[0] === 'clone')
+      expect(cloneCall?.args).toContain('--branch')
+      expect(cloneCall?.args).toContain('main')
+    })
+
+    it('installs a tag under tag/<refSeg>', async () => {
+      const root = await freshRefRepo('v2-tag')
+      const slug = 'owner/sample-plugin'
+      const installKey = pluginKeyForGithubRef(slug, 'tag', 'v1.2.3')
+      const { run } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+      const result = await new PluginInstaller({ run }).install({
+        repositoryRoot: root,
+        key: installKey,
+        ownerRepo: slug,
+        refKind: 'tag',
+        ref: 'v1.2.3',
+        confirmed: true,
+      })
+      expect(result.record.key).toBe(installKey)
+      expect(result.record.localDirName).toBe('owner/sample-plugin/tag/v1%2e2%2e3')
+      expect((result.record.source as PluginMarketGithubSource).refKind).toBe('tag')
+      expect((result.record.source as PluginMarketGithubSource).version).toBe('v1.2.3')
+    })
+
+    it('coexists: two refs of the same repository are independent records/dirs', async () => {
+      const root = await freshRefRepo('v2-coexist')
+      const slug = 'owner/sample-plugin'
+      const mainKey = pluginKeyForGithubRef(slug, 'branch', 'main')
+      const devKey = pluginKeyForGithubRef(slug, 'branch', 'feature/dev')
+      const installer = new PluginInstaller({ run: fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'] }).run })
+      await installer.install({
+        repositoryRoot: root, key: mainKey, ownerRepo: slug, refKind: 'branch', ref: 'main', confirmed: true,
+      })
+      await installer.install({
+        repositoryRoot: root, key: devKey, ownerRepo: slug, refKind: 'branch', ref: 'feature/dev', confirmed: true,
+      })
+      const store = new PluginRecordStore(repositoryRecordsPath(root))
+      const records = await store.list()
+      expect(records).toHaveLength(2)
+      expect(records.map((record) => record.key).sort()).toEqual([mainKey, devKey].sort())
+      const dirs = records.map((record) => record.localDirName).sort()
+      expect(dirs).toEqual(['owner/sample-plugin/branch/feature%2fdev', 'owner/sample-plugin/branch/main'])
+    })
+
+    it('overwrite-updates the same tuple (same key/dir) into one record', async () => {
+      const root = await freshRefRepo('v2-overwrite')
+      const slug = 'owner/sample-plugin'
+      const installKey = pluginKeyForGithubRef(slug, 'branch', 'main')
+      const first = fakeRunner({ manifest: { main: 'a.js' }, files: ['a.js'] })
+      await new PluginInstaller({ run: first.run }).install({
+        repositoryRoot: root, key: installKey, ownerRepo: slug, refKind: 'branch', ref: 'main', confirmed: true,
+      })
+      const second = fakeRunner({ manifest: { main: 'b.js' }, files: ['b.js'] })
+      const result = await new PluginInstaller({ run: second.run }).install({
+        repositoryRoot: root, key: installKey, ownerRepo: slug, refKind: 'branch', ref: 'main', confirmed: true,
+      })
+      expect(result.record.entry).toBe('b.js')
+      const store = new PluginRecordStore(repositoryRecordsPath(root))
+      const all = await store.list()
+      expect(all).toHaveLength(1)
+      expect(all[0]?.localDirName).toBe('owner/sample-plugin/branch/main')
+      const pkg = JSON.parse(await readFile(join(root, 'owner', 'sample-plugin', 'branch', 'main', 'package.json'), 'utf8')) as { main: string }
+      expect(pkg.main).toBe('b.js')
+    })
+
+    it('rejects a mismatched v2 key before cloning anything', async () => {
+      const root = await freshRefRepo('v2-bad-key')
+      const slug = 'owner/sample-plugin'
+      const { run, calls } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+      await rejectCode(
+        new PluginInstaller({ run }).install({
+          repositoryRoot: root,
+          key: key('gh-wrong-key'),
+          ownerRepo: slug,
+          refKind: 'branch',
+          ref: 'main',
+          confirmed: true,
+        }),
+        'record/key-invalid',
+      )
+      expect(calls).toEqual([])
+    })
+
+    it('refuses to overwrite a non-managed non-empty directory at the v2 target', async () => {
+      const root = await freshRefRepo('v2-occupied')
+      const slug = 'owner/sample-plugin'
+      const target = join(root, 'owner', 'sample-plugin', 'branch', 'main')
+      await mkdir(target, { recursive: true })
+      await writeFile(join(target, 'notes.txt'), 'user file', 'utf8')
+      const installKey = pluginKeyForGithubRef(slug, 'branch', 'main')
+      const { run, calls } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+      await rejectCode(
+        new PluginInstaller({ run }).install({
+          repositoryRoot: root,
+          key: installKey,
+          ownerRepo: slug,
+          refKind: 'branch',
+          ref: 'main',
+          confirmed: true,
+        }),
+        'install/dir-exists',
+      )
+      expect(await readFile(join(target, 'notes.txt'), 'utf8')).toBe('user file')
+      expect(calls).toEqual([])
+    })
+  })
+})
+
+describe('resolveInstallTarget', () => {
+  const base = { repositoryRoot: '/store', ownerRepo: 'owner/sample-plugin', confirmed: true }
+
+  it('maps a v2 branch tuple to a derived key and multi-level dir', () => {
+    const target = resolveInstallTarget('owner/sample-plugin', {
+      ...base,
+      key: pluginKeyForGithubRef('owner/sample-plugin', 'branch', 'main'),
+      refKind: 'branch',
+      ref: 'main',
+    })
+    expect(target.key).toBe(pluginKeyForGithubRef('owner/sample-plugin', 'branch', 'main'))
+    expect(target.dirName).toBe('owner/sample-plugin/branch/main')
+    expect(target.refName).toBe('main')
+  })
+
+  it('escapes a slash-containing branch into its refSeg dir', () => {
+    const key = pluginKeyForGithubRef('owner/sample-plugin', 'branch', 'feature/x')
+    const target = resolveInstallTarget('owner/sample-plugin', {
+      ...base, key, refKind: 'branch', ref: 'feature/x',
+    })
+    expect(target.dirName).toBe('owner/sample-plugin/branch/feature%2fx')
+  })
+
+  it('keeps a legacy install (no refKind) on the caller-provided single dir', () => {
+    const target = resolveInstallTarget('owner/sample-plugin', {
+      ...base, key: key('gh-owner-repo'), localDirName: 'gh-owner-repo',
+    })
+    expect(target.refKind).toBeUndefined()
+    expect(target.dirName).toBe('gh-owner-repo')
+    expect(target.key).toBe(key('gh-owner-repo'))
+  })
+
+  it('rejects a missing ref on a v2 install', () => {
+    expect(() => resolveInstallTarget('owner/sample-plugin', {
+      ...base, key: key('gh-x'), refKind: 'branch',
+    })).toThrow(MarketError)
+  })
+
+  it('rejects a slug that cannot form safe directory segments', () => {
+    const slug = 'owner/..'
+    expect(() => resolveInstallTarget(slug, {
+      ...base,
+      key: parsePluginKey('gh-x'),
+      refKind: 'branch',
+      ref: 'main',
+    })).toThrow(MarketError)
   })
 })
 
