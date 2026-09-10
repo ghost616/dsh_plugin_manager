@@ -18,19 +18,26 @@
  *   very-unconventional candidate can be classified before any local checkout
  *   exists.
  * - {@link runCheckoutAnalysis} runs the host `InstallAnalyzer` over one
- *   snapshot and maps its verdict onto the control decision shape: a `plugin`
- *   verdict (its entry is runnable) is installable; a `market/unsupported-*`
- *   rejection becomes a refusal carrying the classified kind and the model's
- *   reason.
+ *   snapshot and returns its classification distribution (the persisted
+ *   `plugin` | `skills` | `other` tag, the entry that came with it, the model
+ *   rationale and the build-required flag). Classifying is not a gate: the
+ *   caller files the checkout with that tag, while an analyzer failure is
+ *   explicitly NOT a green light either — the caller falls back to the
+ *   conservative `other` classification and keeps the review installable.
  *
  * Nothing here touches a Cordis context: the llm service is passed in as a
  * structural value so unit tests feed scripted chunk streams.
  */
 
 import { InstallAnalyzer } from '../market/analyze.ts'
-import type { CheckoutManifestSummary, CheckoutSnapshot, LlmCompletion } from '../market/analyze.ts'
+import type {
+  CheckoutManifestSummary,
+  CheckoutSnapshot,
+  LlmCompletion,
+  PluginAnalysisDistribution,
+} from '../market/analyze.ts'
 import { MarketError, marketError } from '../market/errors.ts'
-import type { MarketCheckoutKind, PluginPreviewOutcome } from '../../types.ts'
+import type { PluginMarketClassification, PluginPreviewOutcome } from '../../types.ts'
 
 /* ------------------------------------------------------------------------ */
 /* ctx.llm structural surface (the narrow seam we consume)                  */
@@ -243,22 +250,12 @@ export function snapshotFromPreview(readme: string | null, preview: PluginPrevie
 /* ------------------------------------------------------------------------ */
 
 /**
- * Checkout classification kinds exposed to the control decision. `tooling` is
- * folded into `other` at the wire boundary (the host rejection code
- * `market/unsupported-other` does not distinguish them).
+ * Checkout classification kinds exposed to the control decision: the persisted
+ * classification label vocabulary (`plugin` | `skills` | `other`). The richer
+ * analyzer vocabulary (preset/tooling) is folded into `other` by the host
+ * analyzer, so a review never carries a kind the classification tag cannot.
  */
-export type AnalysisCheckoutKind = Exclude<MarketCheckoutKind, 'tooling'> | 'other'
-
-/** One smart-install analysis decision for the source layer. */
-export type CheckoutAnalysisDecision =
-  | { readonly installable: true }
-  | {
-    readonly installable: false
-    /** The checkout kind the model classified this repository into. */
-    readonly kind: AnalysisCheckoutKind
-    /** User-facing rationale (the model's reason). */
-    readonly reason: string
-  }
+export type AnalysisCheckoutKind = PluginMarketClassification
 
 /** Options for {@link runCheckoutAnalysis}. */
 export interface RunCheckoutAnalysisOptions {
@@ -276,71 +273,27 @@ export interface RunCheckoutAnalysisOptions {
 }
 
 /**
- * Run the host analyzer over one checkout snapshot and map its verdict:
- * - a `plugin` verdict (its entry file is present) → installable;
- * - a `market/unsupported-*` rejection → a refusal with the classified kind
- *   and the model's reason (kind `plugin` means the checkout looks like a
- *   plugin but needs a build step first);
- * - any other failure propagates with its stable code.
+ * Run the host analyzer over one checkout snapshot and return its
+ * classification distribution as-is. This is NOT a gate: a `skills`/`other`
+ * distribution (or a plugin whose entry still needs a build) is a filing
+ * decision the caller carries into the record and the review, never a refusal
+ * — an unconventional checkout is downloaded, classified and kept.
  *
- * When no llm provider/model is configured the analyzer throws
- * `market/llm-unconfigured` first, which this function lets propagate.
- *
- * Analysis failure is never silently allowed: every non-installable outcome —
- * a refusal verdict OR a propagated error — means the candidate stays
- * unclassified and must not install.
+ * Analyzer failures (an unconfigured endpoint, model transport errors,
+ * unparsable output, an I/O failure while probing the entry) still propagate
+ * with their stable codes: the caller then falls back to the conservative
+ * `other` classification (see `MarketSourceOperations`) instead of blocking the
+ * review.
  */
 export async function runCheckoutAnalysis(
   snapshot: CheckoutSnapshot,
   options: RunCheckoutAnalysisOptions,
-): Promise<CheckoutAnalysisDecision> {
+): Promise<PluginAnalysisDistribution> {
   const analyzer = new InstallAnalyzer({
     complete: options.complete,
     ...(options.provider === undefined ? {} : { provider: options.provider }),
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.hasFile === undefined ? {} : { hasFile: options.hasFile }),
   })
-  try {
-    // The host analyzer only resolves (rather than rejects) genuine plugin
-    // verdicts; every non-installable classification is a thrown rejection.
-    await analyzer.analyze(snapshot)
-    return { installable: true }
-  } catch (error) {
-    const refusal = refusalFrom(error)
-    if (refusal !== null) return refusal
-    throw error
-  }
-}
-
-/** Map a market rejection onto a decision refusal (null when not a rejection). */
-function refusalFrom(error: unknown): CheckoutAnalysisDecision | null {
-  if (!(error instanceof MarketError) || !error.code.startsWith('market/unsupported-')) return null
-  switch (error.code) {
-    case 'market/unsupported-skills':
-      return { installable: false, kind: 'skills', reason: error.message }
-    case 'market/unsupported-preset':
-      return { installable: false, kind: 'preset', reason: error.message }
-    case 'market/unsupported-build':
-      return { installable: false, kind: 'plugin', reason: error.message }
-    case 'market/unsupported-other':
-      return { installable: false, kind: 'other', reason: error.message }
-    default:
-      return null
-  }
-}
-
-/**
- * Map an analysis refusal kind onto the wire code install() rejects with
- * (mirrors the host verdict mapping). `plugin` refusals are the build-first
- * case (`market/unsupported-build`); `tooling` and `other` both fold into
- * `market/unsupported-other`.
- */
-export function refusalWireCode(kind: MarketCheckoutKind): 'market/unsupported-skills' | 'market/unsupported-preset' | 'market/unsupported-build' | 'market/unsupported-other' {
-  switch (kind) {
-    case 'skills': return 'market/unsupported-skills'
-    case 'preset': return 'market/unsupported-preset'
-    case 'plugin': return 'market/unsupported-build'
-    case 'tooling': return 'market/unsupported-other'
-    case 'other': return 'market/unsupported-other'
-  }
+  return analyzer.analyze(snapshot)
 }

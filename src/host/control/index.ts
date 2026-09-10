@@ -26,12 +26,12 @@ import type { Context, Plugin } from '@deepseek-ai/cordis'
 import type { MarketRepository } from '../market/index.ts'
 import { GitHubMarket } from '../market/github.ts'
 import { PluginPreviewer } from '../market/preview.ts'
-import { PluginInstaller } from '../market/install.ts'
 import { NodeFs } from '../market/fs.ts'
 import { requireMarketLlm, type MarketLlmConfig } from '../market/config.ts'
 import { MarketPluginController } from './controller.ts'
 import { entryDirectoryPath, entryModuleName } from './entry-name.ts'
 import { MarketControllerGateway } from './gateway.ts'
+import { createInstallerPort } from './installer-port.ts'
 import { createLoaderAdapter } from './loader-adapter.ts'
 import { createProtectionPolicy } from './protect.ts'
 import { MarketSourceOperations, type InstallAnalysisEngine, type InstallerPort } from './source.ts'
@@ -59,7 +59,9 @@ export interface Config {
    * Optional LLM endpoint of the smart-install analyzer. When both
    * `provider`/`model` are present the control wires an analysis engine over
    * the live `ctx.llm` service; otherwise an unconventional checkout is
-   * refused with `market/llm-unconfigured` and a model-config hint.
+   * reviewed with the conservative `other` classification and a
+   * `note.kind: 'analysis-unavailable'` hint the client renders as its
+   * model-configuration guidance (nothing is refused any more).
    */
   readonly llm?: MarketLlmConfig
 }
@@ -92,7 +94,9 @@ export function apply(ctx: Context, config?: Config): void {
   // unconventional; the llm service is read live on each call so a chat
   // provider mounted after this row still serves analysis. The preview
   // snapshot is approximated from the remote README + preview outcome (no
-  // checkout exists at preview time).
+  // checkout exists at preview time). Classification never blocks a review:
+  // the source layer falls back to `other` when this engine is missing or its
+  // analysis fails.
   const llmConfig = config?.llm
   let analysisEngine: InstallAnalysisEngine | undefined
   if (llmConfig !== undefined) {
@@ -100,7 +104,7 @@ export function apply(ctx: Context, config?: Config): void {
       const endpoint = requireMarketLlm(llmConfig.provider, llmConfig.model)
       const complete = createLlmCompletion({ llm: () => liveLlm(ctx) })
       analysisEngine = {
-        async analyze({ repository, preview }) {
+        async analyze({ repository, preview, hasFile }) {
           let readme: string | null = null
           try {
             readme = await github.readme(repository)
@@ -110,19 +114,20 @@ export function apply(ctx: Context, config?: Config): void {
             logger.warn(`Smart-install analysis: README of "${repository}" unreadable (${error instanceof Error ? error.message : String(error)}); classifying from the preview outcome.`)
           }
           const snapshot = snapshotFromPreview(readme, preview)
-          const decision = await runCheckoutAnalysis(snapshot, {
+          return await runCheckoutAnalysis(snapshot, {
             complete,
             provider: endpoint.provider,
             model: endpoint.model,
+            // The reviewed checkout is not on disk yet at preview time, so the
+            // production assembly injects no probe and a plugin verdict cannot
+            // be verified as runnable here (see PluginInstallReview.buildRequired).
+            ...(hasFile === undefined ? {} : { hasFile }),
           })
-          return decision.installable
-            ? null
-            : { installable: false, kind: decision.kind, reason: decision.reason }
         },
       }
     } catch (error) {
-      // Partial/blank llm section: leave the engine unset so unconventional
-      // previews are refused with market/llm-unconfigured and a config hint.
+      // Partial/blank llm section: leave the engine unset, so unconventional
+      // previews are reviewed with the conservative `other` classification.
       logger.warn(`Smart-install analysis disabled: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -132,28 +137,7 @@ export function apply(ctx: Context, config?: Config): void {
     detailEngine: github,
     previewEngine: new PluginPreviewer(),
     ...(analysisEngine === undefined ? {} : { analysis: analysisEngine }),
-    installer: (repository): InstallerPort => {
-      const installer = new PluginInstaller({ store: repository.records })
-      return {
-        async install(input) {
-          const outcome = await installer.install({
-            repositoryRoot: input.repositoryRoot,
-            key: input.key,
-            ownerRepo: input.repository,
-            // v2 ref installs hand the host refKind + ref (the checkout lands
-            // at the per-ref tuple target the key already encodes); legacy
-            // installs stay on the pre-v2 pin path with `version`. The source
-            // layer already rejected null/empty refs for v2, so the `?? ''`
-            // guard is unreachable; the host validates the ref defensively.
-            ...(input.refKind === undefined
-              ? { version: input.version ?? null }
-              : { refKind: input.refKind, ref: input.version ?? '' }),
-            confirmed: true,
-          })
-          return { record: outcome.record, checkoutDir: outcome.checkoutDir }
-        },
-      }
-    },
+    installer: (repository): InstallerPort => createInstallerPort(repository),
     protection,
     syncRecord: async (record) => {
       await runtime?.controller.syncRecordRow(record)

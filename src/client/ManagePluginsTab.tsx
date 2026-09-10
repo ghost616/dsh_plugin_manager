@@ -15,15 +15,22 @@ import type {
   ManagedPluginList,
   ManagedPluginPhase,
   ManagedPluginView,
-  MarketCheckoutKind,
+  MarketInstallNote,
   MarketStatus,
   PluginInstallOutcome,
   PluginInstallReview,
+  PluginMarketClassification,
   PluginMarketKey,
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
   RepositoryDetail,
+} from '../types.ts'
+// Value imports of the shared record-classification helpers: the SAME module
+// both faces compile, so the UI can never disagree with the host load gate.
+import {
+  DEFAULT_PLUGIN_MARKET_CLASSIFICATION,
+  recordNotLoadableReason,
 } from '../types.ts'
 import { renderReadmeHtml } from './readme.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
@@ -202,6 +209,32 @@ function rowFailed(view: ManagedPluginView): boolean {
     && (view.runtime.phase === 'failed' || view.runtime.lastError !== null)
 }
 
+/** Localized tag key of one persisted record classification. */
+const CLASSIFICATION_KEYS = {
+  plugin: 'classificationPlugin',
+  skills: 'classificationSkills',
+  other: 'classificationOther',
+} satisfies Record<PluginMarketClassification, MarketManageLocaleKey>
+
+/**
+ * Classification of one record for display: the persisted tag, or the shared
+ * backward-compatible default for records written before the tag existed.
+ */
+function classificationOf(record: PluginMarketRecord): PluginMarketClassification {
+  return record.classification ?? DEFAULT_PLUGIN_MARKET_CLASSIFICATION
+}
+
+/**
+ * Accessible name of one row's enable switch. A row whose checkout can never be
+ * registered as a live plugin entry (a skills/other classification, or a plugin
+ * without a resolved entry) carries the refusal copy instead of a toggle verb:
+ * its switch is disabled, and the same tooltip explains why.
+ */
+function switchLabel(view: ManagedPluginView, name: string, t: Translate): string {
+  if (recordNotLoadableReason(view.record) !== null) return t('switchNotLoadable', { name })
+  return view.record.enabled ? t('switchDisable', { name }) : t('switchEnable', { name })
+}
+
 /** Display name of a managed row: the GitHub slug when the source is GitHub. */
 function displayName(view: ManagedPluginView): string {
   const source = view.record.source
@@ -308,6 +341,15 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
               : view.record.enabled ? t('stateEnabled') : t('stateDisabled')
             const runtimeError = view.runtime.lastError
             const name = displayName(view)
+            const busy = busyKeys.has(view.key)
+            /** Why this checkout can never be registered (null = it can). */
+            const notLoadable = recordNotLoadableReason(view.record)
+            const classification = classificationOf(view.record)
+            // The row tooltip prefers the "cannot load" fact over a stale
+            // runtime error: an unloadable checkout is never a retry candidate.
+            const rowTitle = notLoadable !== null
+              ? t('switchNotLoadable', { name })
+              : failed && runtimeError !== null ? runtimeError : undefined
             return (
               <li
                 key={view.key}
@@ -317,11 +359,20 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
                 data-plugin-state={stateKind}
                 data-phase={view.runtime.phase ?? undefined}
                 data-failed={failed ? 'true' : undefined}
-                title={failed && runtimeError !== null ? runtimeError : undefined}
+                data-classification={classification}
+                data-loadable={notLoadable === null ? 'true' : 'false'}
+                title={rowTitle}
               >
                 <div className={css.rowMain}>
                   <strong className={css.rowName}>{name}</strong>
                   <span className={css.rowMeta}>
+                    <span
+                      className={css.classificationTag}
+                      data-classification-tag
+                      data-kind={classification}
+                    >
+                      {t(CLASSIFICATION_KEYS[classification])}
+                    </span>
                     <span data-source-kind>{view.record.source.kind === 'github' ? t('kindGithub') : view.record.source.kind}</span>
                     <code data-plugin-key-value>{view.key}</code>
                   </span>
@@ -349,14 +400,21 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
                     role="switch"
                     className={css.switch}
                     aria-checked={view.record.enabled}
-                    aria-label={view.record.enabled ? t('switchDisable', { name }) : t('switchEnable', { name })}
-                    aria-busy={busyKeys.has(view.key)}
+                    aria-label={switchLabel(view, name, t)}
+                    aria-busy={busy}
                     data-plugin-toggle
-                    data-busy={busyKeys.has(view.key) ? 'true' : undefined}
-                    disabled={busyKeys.has(view.key)}
+                    data-busy={busy ? 'true' : undefined}
+                    data-not-loadable={notLoadable === null ? undefined : notLoadable}
+                    disabled={busy || notLoadable !== null}
+                    title={notLoadable === null ? undefined : t('switchNotLoadable', { name })}
                     onClick={() => { onToggle(view) }}
                   />
                 </div>
+                {notLoadable === null ? null : (
+                  <p className={css.rowNote} data-toggle-disabled-note>
+                    {t('switchNotLoadable', { name })}
+                  </p>
+                )}
                 {rowFailures.get(view.key) === undefined ? null : (
                   <p
                     className={css.rowFailure}
@@ -388,19 +446,30 @@ type InstallPhase =
   | { readonly phase: 'install-error'; readonly review: PluginInstallReview; readonly failure: ManageUiFailure }
   | { readonly phase: 'done'; readonly outcome: PluginInstallOutcome }
 
-/** Localized refusal-heading key of one analysis kind. The `plugin` kind is
- *  the build-first refusal; `tooling` and `other` share the generic copy. */
-const ANALYSIS_KIND_KEYS = {
-  plugin: 'analysisKindBuild',
-  skills: 'analysisKindSkills',
-  preset: 'analysisKindPreset',
-  tooling: 'analysisKindTooling',
-  other: 'analysisKindOther',
-} satisfies Record<MarketCheckoutKind, MarketManageLocaleKey>
+/**
+ * Localized classification tag of one review: the label the confirmed download
+ * will file the checkout under (see {@link PluginMarketClassification}). The
+ * tag never blocks the download — a skills/other checkout is fetched and filed
+ * as-is, only its loader registration is withheld.
+ */
+function reviewClassificationText(review: PluginInstallReview, t: Translate): string {
+  return t(CLASSIFICATION_KEYS[review.classification ?? DEFAULT_PLUGIN_MARKET_CLASSIFICATION])
+}
 
-/** Localized refusal heading of one review analysis verdict. */
-function analysisKindText(kind: MarketCheckoutKind, t: Translate): string {
-  return t(ANALYSIS_KIND_KEYS[kind])
+/**
+ * Localized guidance of one review's structured note, or null when the note
+ * needs no extra copy. The Host never ships user-facing prose for a note (see
+ * {@link MarketInstallNote}): the copy for `analysis-unavailable` is the same
+ * model-configuration guidance the preview failure path shows, so a checkout
+ * the analyzer could not classify still tells the user how to enable it.
+ */
+function reviewNoteGuide(note: MarketInstallNote | undefined, t: Translate): string | null {
+  if (note === undefined) return null
+  switch (note.kind) {
+    case 'analysis-unavailable': return t('analysisConfigGuide')
+    case 'classified':
+    case 'entry-missing': return null
+  }
 }
 
 function InstallDialog({ repository, version, refKind, previewInstall, install, t, onClose, onInstalled }: {
@@ -461,9 +530,6 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
   const review = phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error'
     ? phase.review
     : undefined
-  /** Smart-analysis refusal attached to the review: the candidate is not
-   *  installable, so the confirmation flow is replaced by the refusal state. */
-  const refusal = review?.analysis
   const busy = phase.phase === 'installing' || phase.phase === 'preview'
 
   return (
@@ -500,17 +566,20 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
           </div>
         ) : null}
 
-        {refusal !== undefined ? (
-          <div className={css.analysisBlock} data-analysis-blocked data-analysis-kind={refusal.kind}>
-            <p className={css.analysisTitle} role="status" data-analysis-title>
-              {analysisKindText(refusal.kind, t)}
-            </p>
-            <p className={css.analysisReason} data-analysis-reason>{refusal.reason}</p>
-          </div>
-        ) : null}
-
-        {review !== undefined && refusal === undefined ? (
+        {review !== undefined ? (
           <>
+            <p className={css.classificationNotice} data-download-classification>
+              {t('classificationNotice', { classification: reviewClassificationText(review, t) })}
+            </p>
+            {review.entryNote === undefined ? null : (
+              <p className={css.classificationNote} data-classification-note>{review.entryNote}</p>
+            )}
+            {reviewNoteGuide(review.note, t) === null ? null : (
+              <p className={css.analysisGuide} data-download-analysis-guide>{reviewNoteGuide(review.note, t)}</p>
+            )}
+            {review.buildRequired === true ? (
+              <p className={css.warning} data-build-required>{t('buildRequiredNotice')}</p>
+            ) : null}
             {review.preview.status === 'degraded' ? (
               <p className={css.warning} data-degraded-notice data-degraded-code={review.preview.code}>
                 {t('degradedNotice', { code: review.preview.code })}
@@ -565,11 +634,6 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
         ) : null}
 
         <footer className={css.dialogActions}>
-          {refusal !== undefined ? (
-            <button type="button" className={css.textButton} data-analysis-close onClick={onClose}>
-              {t('closeButton')}
-            </button>
-          ) : null}
           {phase.phase === 'preview-error' ? (
             <>
               {phase.failure.code === 'market/llm-unconfigured' ? null : (
@@ -594,23 +658,21 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
             </button>
           ) : null}
           {phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error' ? (
-            refusal === undefined ? (
-              <>
-                <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
-                  {busy ? t('downloading') : t('downloadButton')}
+            <>
+              <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
+                {busy ? t('downloading') : t('downloadButton')}
+              </button>
+              {phase.phase === 'install-error' ? (
+                // Every download failure (not only a consumed confirmation)
+                // offers a fresh review: the old token may be spent already.
+                <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
+                  {t('repreviewButton')}
                 </button>
-                {phase.phase === 'install-error' ? (
-                  // Every download failure (not only a consumed confirmation)
-                  // offers a fresh review: the old token may be spent already.
-                  <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
-                    {t('repreviewButton')}
-                  </button>
-                ) : null}
-                <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
-                  {t('cancelButton')}
-                </button>
-              </>
-            ) : null
+              ) : null}
+              <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
+                {t('cancelButton')}
+              </button>
+            </>
           ) : null}
         </footer>
       </section>
@@ -743,34 +805,6 @@ type MarketDetailState =
   | { readonly status: 'error'; readonly failure: ManageUiFailure }
   | { readonly status: 'ready'; readonly detail: RepositoryDetail }
 
-/**
- * Installed-ref projection of one repository. Names come in two families:
- * kind-tagged v2 refs (matched by kind AND name, so a same-name branch and
- * tag never cross-mark) and legacy refs from records without ref metadata
- * (matched by name alone, the pre-v2 fallback).
- */
-export interface InstalledRefs {
-  /** Names of legacy (refKind-less) records — matched by name alone. */
-  readonly legacy: ReadonlySet<string>
-  /** Names of v2 records per kind — matched by kind AND name. */
-  readonly byKind: Readonly<Record<RefKind, ReadonlySet<string>>>
-}
-
-/** Per-repository installed-ref projection (marker input of the detail view). */
-export type InstalledRefsByRepository = ReadonlyMap<string, InstalledRefs>
-
-/** Whether the roster marks this exact (kind, name) ref of the repository. */
-function isRefInstalled(
-  installedRefs: InstalledRefsByRepository,
-  repository: string,
-  choice: RefChoice,
-): boolean {
-  const refs = installedRefs.get(repository)
-  if (refs === undefined) return false
-  return refs.legacy.has(choice.name)
-    || refs.byKind[choice.kind].has(choice.name)
-}
-
 /* ------------------------------------------------------------------------ */
 /* Merged branch/tag picker model                                            */
 /* ------------------------------------------------------------------------ */
@@ -812,19 +846,20 @@ function orderedBranchNames(
   return [defaultBranch, ...branches.filter(name => name !== defaultBranch)]
 }
 
-/** Human dropdown text of one ref: the name plus optional localized marks. */
+/**
+ * Human dropdown text of one ref: the name plus the default-branch mark.
+ * Downloading is never gated on a previous download, so no ref is ever marked
+ * or disabled here — the review dialog reports an existing record instead.
+ */
 function refDisplayText(
   choice: RefChoice,
   defaultBranch: string,
-  installed: boolean,
   t: Translate,
 ): string {
-  const marks: string[] = []
   if (choice.kind === 'branch' && choice.name === defaultBranch) {
-    marks.push(t('defaultBranchLabel'))
+    return `${choice.name} (${t('defaultBranchLabel')})`
   }
-  if (installed) marks.push(t('installedBadge'))
-  return marks.length === 0 ? choice.name : `${choice.name} (${marks.join(', ')})`
+  return choice.name
 }
 
 /**
@@ -855,11 +890,14 @@ function DetailReadme({ readme, url, defaultBranch, t }: {
  * Ready detail content: repository metadata header, one merged branch/tag
  * dropdown with the single download action below it, and the README block.
  * Rendered inside the GitHub tab's own scrolling zone so a long README scrolls
- * with the page instead of stretching the tab panel.
+ * with the content instead of stretching the tab panel.
+ *
+ * Nothing here is gated on a previous download: the action is disabled only
+ * while no ref is picked, so a repository that was downloaded before can be
+ * downloaded again (the review reports the existing record).
  */
-function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
+function RepositoryDetailBody({ detail, t, onInstall }: {
   readonly detail: RepositoryDetail
-  readonly installedRefs: InstalledRefsByRepository
   readonly t: Translate
   /** Open the download review for one branch/tag ref of this repository. */
   readonly onInstall: (choice: RefChoice) => void
@@ -868,15 +906,12 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
   const [selectedValue, setSelectedValue] = useState('')
   const hasRefs = detail.branches.length > 0 || detail.tags.length > 0
   const selection = parseRefValue(selectedValue)
-  const selectedInstalled = selection !== null
-    && isRefInstalled(installedRefs, detail.repository, selection)
   const branchChoices: readonly RefChoice[] =
     orderedBranchNames(detail.branches, detail.defaultBranch).map(name => ({ kind: 'branch', name }))
   const tagChoices: readonly RefChoice[] =
     detail.tags.map(name => ({ kind: 'tag', name }))
 
   const renderOption = (choice: RefChoice): ReactNode => {
-    const installed = isRefInstalled(installedRefs, detail.repository, choice)
     const isDefault = choice.kind === 'branch' && choice.name === detail.defaultBranch
     return (
       <option
@@ -886,15 +921,14 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
         data-ref-kind={choice.kind}
         data-ref-name={choice.name}
         data-default-branch={isDefault ? 'true' : undefined}
-        data-ref-installed={installed ? 'true' : undefined}
       >
-        {refDisplayText(choice, detail.defaultBranch, installed, t)}
+        {refDisplayText(choice, detail.defaultBranch, t)}
       </option>
     )
   }
 
   return (
-    <div className={css.detailBody} data-detail-view data-repository={detail.repository}>
+    <div className={css.detailBody} style={PANEL_FILL_STYLE} data-detail-view data-repository={detail.repository}>
       <div className={css.detailHeader} data-detail-header>
         <a
           className={css.detailName}
@@ -950,16 +984,16 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
               type="button"
               className={css.primaryButton}
               data-ref-install
-              disabled={selection === null || selectedInstalled}
+              disabled={selection === null}
               onClick={() => { if (selection !== null) onInstall(selection) }}
             >
-              {selectedInstalled ? t('installedBadge') : t('downloadButton')}
+              {t('downloadButton')}
             </button>
           </div>
         </section>
       )}
 
-      <section className={css.readmeSection} data-readme-section aria-label={t('readmeHeading')}>
+      <section className={css.readmeSection} style={PANEL_FILL_STYLE} data-readme-section aria-label={t('readmeHeading')}>
         <h4 className={css.groupTitle} data-readme-title>{t('readmeHeading')}</h4>
         {detail.readme === null ? (
           <p className={css.status} role="status" data-readme-empty>{t('noReadme')}</p>
@@ -983,10 +1017,9 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
  * its scrolling zone; the list search form and pagination are hidden while it
  * is up, and the owner's own header offers the way back to the list.
  */
-function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstall }: {
+function RepositoryDetailPane({ slug, state, t, onRetry, onInstall }: {
   readonly slug: string
   readonly state: MarketDetailState
-  readonly installedRefs: InstalledRefsByRepository
   readonly t: Translate
   readonly onRetry: () => void
   readonly onInstall: (choice: RefChoice) => void
@@ -1007,7 +1040,6 @@ function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstal
       {state.status === 'ready' ? (
         <RepositoryDetailBody
           detail={state.detail}
-          installedRefs={installedRefs}
           t={t}
           onInstall={onInstall}
         />
@@ -1024,12 +1056,8 @@ function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstal
  * download review it opens is owned and rendered by the page itself (see
  * {@link ManagePluginsTab}), never inside this switchable panel.
  */
-function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, onInstall }: {
+function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
   readonly t: Translate
-  /** Repositories that already own a managed record (row badge markers). */
-  readonly installed: ReadonlySet<string>
-  /** Kind-aware installed-ref markers per repository (detail-view dropdown). */
-  readonly installedRefs: InstalledRefsByRepository
   readonly search: ManagePluginsTabInjected['search']
   readonly repositoryDetail: ManagePluginsTabInjected['repositoryDetail']
   /** Ask the page to open the download review for one ref of a repository. */
@@ -1160,7 +1188,7 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, on
   }
 
   return (
-    <section className={css.githubPanel} data-github-panel onKeyDown={onPanelKeyDown}>
+    <section className={css.githubPanel} style={PANEL_FILL_STYLE} data-github-panel onKeyDown={onPanelKeyDown}>
       {detailInView ? (
         <div className={css.detailToolbar} data-github-detail-header>
           <button
@@ -1194,7 +1222,7 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, on
         </form>
       )}
 
-      <div className={css.marketScroll} data-market-scroll>
+      <div className={css.marketScroll} style={PANEL_FILL_STYLE} data-market-scroll>
         {detailSlug === null ? (
           <>
             {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
@@ -1218,60 +1246,53 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, on
 
             {ready !== undefined && ready.pageData.items.length > 0 ? (
               <ul className={css.resultList} data-market-results>
-                {ready.pageData.items.map(item => {
-                  const managed = installed.has(item.repository)
-                  return (
-                    <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
-                      <div className={css.resultMain}>
-                        <a
-                          className={css.resultName}
-                          href={item.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          data-market-link
-                          title={item.repository}
-                        >
-                          {item.name}
-                        </a>
-                        {item.description === null ? null : (
-                          <p className={css.resultDescription} data-result-description>{item.description}</p>
+                {ready.pageData.items.map(item => (
+                  <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
+                    <div className={css.resultMain}>
+                      <a
+                        className={css.resultName}
+                        href={item.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        data-market-link
+                        title={item.repository}
+                      >
+                        {item.name}
+                      </a>
+                      {item.description === null ? null : (
+                        <p className={css.resultDescription} data-result-description>{item.description}</p>
+                      )}
+                      <span className={css.resultMeta}>
+                        <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
+                        {item.updatedAt === null ? null : (
+                          <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
                         )}
-                        <span className={css.resultMeta}>
-                          <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
-                          {item.updatedAt === null ? null : (
-                            <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
-                          )}
-                          <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
-                            {t('repoLinkLabel')}
-                          </a>
-                        </span>
-                      </div>
-                      <div className={css.resultActions}>
-                        {managed ? (
-                          <span className={css.installedBadge} data-installed>{t('installedBadge')}</span>
-                        ) : null}
-                        <button
-                          type="button"
-                          className={css.primaryButton}
-                          data-row-details
-                          data-detail-repository={item.repository}
-                          onClick={() => { setDetailSlug(item.repository) }}
-                        >
-                          {t('rowDetails')}
-                        </button>
-                      </div>
-                    </li>
-                  )
-                })}
+                        <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
+                          {t('repoLinkLabel')}
+                        </a>
+                      </span>
+                    </div>
+                    <div className={css.resultActions}>
+                      <button
+                        type="button"
+                        className={css.primaryButton}
+                        data-row-details
+                        data-detail-repository={item.repository}
+                        onClick={() => { setDetailSlug(item.repository) }}
+                      >
+                        {t('rowDetails')}
+                      </button>
+                    </div>
+                  </li>
+                ))}
               </ul>
             ) : null}
           </>
         ) : (
-          <div data-detail-scroll>
+          <div className={css.detailScroll} style={PANEL_FILL_STYLE} data-detail-scroll>
             <RepositoryDetailPane
               slug={detailSlug}
               state={detailState}
-              installedRefs={installedRefs}
               t={t}
               onRetry={() => { setDetailTick(value => value + 1) }}
               onInstall={(choice) => { openRefInstall(detailSlug, choice) }}
@@ -1340,6 +1361,17 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, on
 /* ------------------------------------------------------------------------ */
 /* Page                                                                     */
 /* ------------------------------------------------------------------------ */
+
+/**
+ * Inline layout guarantees of the height-adaptive page. The stylesheet carries
+ * the same contract, but the three facts that make "scroll inside the page"
+ * work — the root takes the host height, every panel/scroll zone owns the
+ * leftover space, and every such zone may shrink below its content — are also
+ * expressed in the DOM so no later rule (or a host with its own flex rules) can
+ * silently break the chain.
+ */
+const PAGE_FILL_STYLE = { height: '100%', minHeight: 0 } as const
+const PANEL_FILL_STYLE = { flex: '1 1 auto', minHeight: 0 } as const
 
 /** The page's own tab ids, in strip order (local repository, then GitHub). */
 const PAGE_TABS = ['local', 'github'] as const
@@ -1478,51 +1510,10 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     })()
   }
 
-  /** Downloaded markers: repositories recorded by the market (GitHub only). */
-  const installedRepositories = useMemo(() => {
-    const found = new Set<string>()
-    if (listState.status !== 'ready') return found
-    for (const view of listState.snapshot.entries) {
-      const source = view.record.source
-      if (source.kind === 'github') found.add(source.repository)
-    }
-    return found
-  }, [listState])
-
-  /** Kind-aware installed-ref markers per repository, for the detail view.
-   *  V2 records tag their ref with a kind (a same-name branch and tag never
-   *  cross-mark); legacy records without ref metadata fall back to matching
-   *  the ref name alone. Records with `source.version === null`
-   *  (default-branch downloads) contribute nothing: their exact ref is unknown,
-   *  so no detail entry is ever wrongly marked as downloaded for them. */
-  const installedRefs = useMemo<InstalledRefsByRepository>(() => {
-    const mutable = new Map<string, { legacy: Set<string>; byKind: Record<RefKind, Set<string>> }>()
-    if (listState.status !== 'ready') return new Map<string, InstalledRefs>()
-    for (const view of listState.snapshot.entries) {
-      const source = view.record.source
-      if (source.kind !== 'github' || source.version === null) continue
-      let refs = mutable.get(source.repository)
-      if (refs === undefined) {
-        refs = { legacy: new Set(), byKind: { branch: new Set(), tag: new Set() } }
-        mutable.set(source.repository, refs)
-      }
-      if (source.refKind === undefined) refs.legacy.add(source.version)
-      else refs.byKind[source.refKind].add(source.version)
-    }
-    const result = new Map<string, InstalledRefs>()
-    for (const [repository, refs] of mutable) {
-      result.set(repository, {
-        legacy: refs.legacy,
-        byKind: { branch: refs.byKind.branch, tag: refs.byKind.tag },
-      })
-    }
-    return result
-  }, [listState])
-
   const configured = statusState.status === 'configured'
 
   return (
-    <div className={css.page} data-market-page>
+    <div className={css.page} style={PAGE_FILL_STYLE} data-market-page>
       <div className={css.tabs} role="tablist" aria-label={t('tabsLabel')}>
         {PAGE_TABS.map((tab, index) => {
           const selected = tab === activeTab
@@ -1565,12 +1556,13 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
       <div
         id={`${tabsId}-panel-local`}
         className={css.panel}
+        style={PANEL_FILL_STYLE}
         role="tabpanel"
         aria-labelledby={`${tabsId}-tab-local`}
         hidden={activeTab !== 'local'}
         data-market-panel="local"
       >
-        <div className={css.localPanel} data-manage-tab>
+        <div className={css.localPanel} style={PANEL_FILL_STYLE} data-manage-tab>
           <StatusHeader state={statusState} t={t} onRetry={loadStatus} />
 
           {configured ? (
@@ -1605,6 +1597,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
       <div
         id={`${tabsId}-panel-github`}
         className={css.panel}
+        style={PANEL_FILL_STYLE}
         role="tabpanel"
         aria-labelledby={`${tabsId}-tab-github`}
         hidden={activeTab !== 'github'}
@@ -1613,8 +1606,6 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
         {visitedTabs.has('github') ? (
           <GitHubPanel
             t={t}
-            installed={installedRepositories}
-            installedRefs={installedRefs}
             search={search}
             repositoryDetail={repositoryDetail}
             onInstall={setInstallTarget}

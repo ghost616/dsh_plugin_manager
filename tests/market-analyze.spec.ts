@@ -310,48 +310,57 @@ describe('parseAnalysisOutput', () => {
 })
 
 describe('resolveAnalysisVerdict', () => {
-  it('returns a plugin verdict from an entryHint with entryPresent unknown/default', () => {
+  it('classifies a plugin answer with an entryHint as plugin (entry kept, no refusal)', () => {
     const raw = rawOf({ entryHint: 'lib/index.js' })
     expect(resolveAnalysisVerdict(raw)).toEqual({
-      verdict: 'plugin',
+      classification: 'plugin',
       entry: 'lib/index.js',
       entryHint: 'lib/index.js',
       reason: 'A Cordis/dsh plugin',
+      buildRequired: false,
     })
   })
 
   it('falls back to the conventional entry when no entryHint was given', () => {
     const verdict = resolveAnalysisVerdict(rawOf({ entryHint: null }))
+    expect(verdict.classification).toBe('plugin')
     expect(verdict.entry).toBe(DEFAULT_CHECKOUT_ENTRY)
     expect(verdict.entryHint).toBeNull()
   })
 
-  it('rejects a plugin whose entry file is not present as market/unsupported-build', () => {
-    const error = expectMarketError(
-      () => resolveAnalysisVerdict(rawOf({ entryHint: 'lib/index.js', reason: 'needs pnpm build' }), { entryPresent: false }),
-      'market/unsupported-build',
+  it('classifies a plugin without a present entry as other (build first), never a refusal', () => {
+    const verdict = resolveAnalysisVerdict(
+      rawOf({ entryHint: 'lib/index.js', reason: 'needs pnpm build' }),
+      { entryPresent: false },
     )
-    expect(error.message).toContain('"lib/index.js"')
-    expect(error.message).toContain('build it first')
-    expect(error.message).toContain('needs pnpm build')
+    expect(verdict.classification).toBe('other')
+    expect(verdict.entry).toBeNull()
+    expect(verdict.buildRequired).toBe(true)
+    expect(verdict.reason).toContain('"lib/index.js"')
+    expect(verdict.reason).toContain('build')
+    expect(verdict.reason).toContain('needs pnpm build')
   })
 
   it('accepts a plugin whose entry file is present', () => {
     const verdict = resolveAnalysisVerdict(rawOf({ entryHint: 'lib/index.js' }), { entryPresent: true })
-    expect(verdict.verdict).toBe('plugin')
+    expect(verdict.classification).toBe('plugin')
     expect(verdict.entry).toBe('lib/index.js')
+    expect(verdict.buildRequired).toBe(false)
   })
 
-  it('maps skills/preset/tooling/other to their stable rejection codes', () => {
-    const expectations: Array<[RawCheckoutAnalysis, string]> = [
-      [rawOf({ kind: 'skills', reason: 'A Claude skills collection' }), 'market/unsupported-skills'],
-      [rawOf({ kind: 'preset', reason: 'An include-tree preset' }), 'market/unsupported-preset'],
-      [rawOf({ kind: 'tooling', reason: 'A CLI utility' }), 'market/unsupported-other'],
-      [rawOf({ kind: 'other', reason: 'Just documentation' }), 'market/unsupported-other'],
+  it('folds skills into the skills tag and preset/tooling/other into other (reason preserved)', () => {
+    const expectations: Array<[RawCheckoutAnalysis, 'skills' | 'other']> = [
+      [rawOf({ kind: 'skills', reason: 'A Claude skills collection' }), 'skills'],
+      [rawOf({ kind: 'preset', reason: 'An include-tree preset' }), 'other'],
+      [rawOf({ kind: 'tooling', reason: 'A CLI utility' }), 'other'],
+      [rawOf({ kind: 'other', reason: 'Just documentation' }), 'other'],
     ]
-    for (const [raw, code] of expectations) {
-      const error = expectMarketError(() => resolveAnalysisVerdict(raw), code)
-      expect(error.message).toContain(raw.reason)
+    for (const [raw, classification] of expectations) {
+      const verdict = resolveAnalysisVerdict(raw)
+      expect(verdict.classification).toBe(classification)
+      expect(verdict.entry).toBeNull()
+      expect(verdict.buildRequired).toBe(false)
+      expect(verdict.reason).toBe(raw.reason)
     }
   })
 })
@@ -369,21 +378,26 @@ describe('InstallAnalyzer', () => {
     const analyzer = new InstallAnalyzer({ complete, provider: 'ds-provider', model: 'deepseek-chat' })
     const verdict = await analyzer.analyze(snapshotOf())
     expect(verdict).toEqual({
-      verdict: 'plugin',
+      classification: 'plugin',
       entry: 'index.js',
       entryHint: 'index.js',
       reason: 'A Cordis/dsh plugin',
+      buildRequired: false,
     })
     expect(complete).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects plugin checkouts whose entry is absent via the hasFile probe', async () => {
+  it('classifies a plugin checkout whose entry is absent via the hasFile probe as other', async () => {
     const complete = vi.fn<LlmCompletion>(async () => pluginJson({ entryHint: 'lib/index.js', reason: 'TypeScript source; build first' }))
     const hasFile = vi.fn(async () => false)
     const analyzer = new InstallAnalyzer({ complete, provider: 'ds-provider', model: 'deepseek-chat', hasFile })
-    const error = await expectAsyncMarketError(() => analyzer.analyze(snapshotOf()), 'market/unsupported-build')
+    const verdict = await analyzer.analyze(snapshotOf())
     expect(hasFile).toHaveBeenCalledWith('lib/index.js')
-    expect(error.message).toContain('build it first')
+    expect(verdict.classification).toBe('other')
+    expect(verdict.entry).toBeNull()
+    expect(verdict.buildRequired).toBe(true)
+    expect(verdict.reason).toContain('build')
+    expect(verdict.reason).toContain('TypeScript source; build first')
   })
 
   it('does not call the completion without a configured provider/model', async () => {
@@ -417,17 +431,20 @@ describe('InstallAnalyzer', () => {
     await expectAsyncMarketError(() => analyzer.analyze(snapshotOf()), 'market/llm-bad-output')
   })
 
-  it('rejects non-plugin kinds end to end with their stable codes', async () => {
-    const expectations: Array<[Record<string, unknown>, string]> = [
-      [{ kind: 'skills', reason: 'a skills pack' }, 'market/unsupported-skills'],
-      [{ kind: 'preset', reason: 'a preset' }, 'market/unsupported-preset'],
-      [{ kind: 'tooling', reason: 'a tool' }, 'market/unsupported-other'],
-      [{ kind: 'other', reason: 'other stuff' }, 'market/unsupported-other'],
+  it('classifies non-plugin kinds end to end without throwing', async () => {
+    const expectations: Array<[Record<string, unknown>, 'skills' | 'other']> = [
+      [{ kind: 'skills', reason: 'a skills pack' }, 'skills'],
+      [{ kind: 'preset', reason: 'a preset' }, 'other'],
+      [{ kind: 'tooling', reason: 'a tool' }, 'other'],
+      [{ kind: 'other', reason: 'other stuff' }, 'other'],
     ]
-    for (const [answer, code] of expectations) {
+    for (const [answer, classification] of expectations) {
       const complete = vi.fn<LlmCompletion>(async () => JSON.stringify(answer))
       const analyzer = new InstallAnalyzer({ complete, provider: 'ds-provider', model: 'deepseek-chat' })
-      await expectAsyncMarketError(() => analyzer.analyze(snapshotOf()), code)
+      const verdict = await analyzer.analyze(snapshotOf())
+      expect(verdict.classification).toBe(classification)
+      expect(verdict.entry).toBeNull()
+      expect(verdict.reason).toBe(String(answer.reason))
     }
   })
 

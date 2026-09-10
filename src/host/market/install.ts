@@ -2,9 +2,17 @@
  * Plugin download/install pipeline: clone the GitHub checkout into the local
  * source repository, install its dependencies under the store conventions
  * (root `.npmrc` with peer auto-install off + upward shared harness links),
- * resolve and verify the plugin entry, then register the record. Everything
- * is staged in a temp sibling directory and swapped in only on success, so a
- * failed install never destroys a previously working checkout or record.
+ * resolve the plugin entry, classify the checkout and register the record.
+ * Everything is staged in a temp sibling directory and swapped in only on
+ * success, so a failed install never destroys a previously working checkout or
+ * record.
+ *
+ * Classification: a checkout whose resolved entry exists is registered as
+ * `plugin`; a checkout with no runnable entry (unreadable manifest, a manifest
+ * entry that is not built yet, or an explicit `classification: 'skills'`
+ * request) is registered with `entry: null` and classification
+ * `skills`/`other`. Filing is never blocked by an unconventional checkout — the
+ * control layer decides whether a loader row is registered at all.
  *
  * The whole pipeline is gated by the TrustGate consent flag: with
  * `confirmed: false` nothing is fetched, cloned or written (`gate/consent-required`).
@@ -26,7 +34,11 @@
 
 import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
-import type { PluginMarketKey, PluginMarketRecord } from '../../types.ts'
+import type {
+  PluginMarketClassification,
+  PluginMarketKey,
+  PluginMarketRecord,
+} from '../../types.ts'
 import { MarketError, type MarketErrorOptions } from './errors.ts'
 import { NodeFs, type FsLike } from './fs.ts'
 import { parseRepositorySlug } from './github.ts'
@@ -114,18 +126,49 @@ export interface InstallPluginInput {
    * to the key; v2 ref installs derive it from the ref tuple.
    */
   readonly localDirName?: string
-  /** Explicit entry override; otherwise resolved from the manifest. */
+  /**
+   * Explicit entry override; otherwise resolved from the manifest. Must
+   * already be a normalized checkout-relative path (forward-slash segments, no
+   * leading `./`, no escaping `..`) — unlike the third-party manifest
+   * `main`/`exports` values it is NOT normalized, and an invalid value fails
+   * fast with `record/invalid` before any side effect.
+   */
   readonly entry?: string
+  /**
+   * Classification hint used only when the checkout has NO runnable entry:
+   * the entry probe wins, so a checkout carrying a resolvable, present entry is
+   * always classified `plugin` regardless of this value. Without a runnable
+   * entry the hint narrows the outcome to `'skills'`; any other value (or
+   * omitting it) files the checkout as `'other'`. Because the resolved
+   * classification gates the dependency step, a hint that survives (i.e. the
+   * checkout really has no entry) also means `pnpm install` is skipped.
+   */
+  readonly classification?: PluginMarketClassification
   /** TrustGate consent — false refuses the install before any side effect. */
   readonly confirmed: boolean
   /** Shallow clone depth (default 1; 0 = full clone). */
   readonly depth?: number
 }
 
-/** Successful install: the registered record and its checkout directory. */
+/**
+ * Successful install: the registered record and its checkout directory.
+ *
+ * `classification` mirrors `record.classification`; `entry` is the runnable
+ * entry that was registered, or null when the checkout has none (the record
+ * then carries `entry: null` and the control layer decides whether a loader
+ * row is registered at all). `entryNote` explains a null entry and/or a
+ * skipped dependency step (the dependency command is only run for a classified
+ * plugin with a readable package.json) for logging/UI;
+ * `dependenciesInstalled` reports whether `pnpm install` actually ran.
+ */
 export interface InstalledPlugin {
   readonly record: PluginMarketRecord
   readonly checkoutDir: string
+  readonly classification: PluginMarketClassification
+  readonly entry: string | null
+  readonly entryNote: string | null
+  /** True when `pnpm install` ran in the checkout (see the class docs). */
+  readonly dependenciesInstalled: boolean
 }
 
 /** Options for {@link PluginInstaller}. */
@@ -152,7 +195,22 @@ export class PluginInstaller {
   }
 
   /**
-   * Clone, install, resolve the entry and register one plugin checkout.
+   * Clone, classify, install dependencies and register one checkout.
+   *
+   * Order matters: the checkout is inspected (entry + classification) BEFORE
+   * any dependency command runs, and the `pnpm install` step is skipped unless
+   * the checkout is a classified plugin with a readable, parseable
+   * package.json. A skills pack, documentation repository or any other
+   * unconventional checkout without a usable manifest therefore lands in the
+   * local source repository instead of failing with `install/deps-failed`;
+   * skipping the command also guarantees pnpm never runs in a directory whose
+   * manifest it cannot see (which would make pnpm walk up to an ancestor
+   * project and write `node_modules`/`pnpm-lock.yaml` outside the repository).
+   *
+   * A checkout without a runnable entry is NOT a failure either: it is filed
+   * with a null entry and the resolved classification (`skills`/`other`), so
+   * unconventional repositories stay manageable.
+   *
    * @throws {MarketError} `gate/consent-required` when not confirmed;
    * `install/*` on pipeline failures; `record/*` on invalid input.
    */
@@ -198,11 +256,27 @@ export class PluginInstaller {
         refKind,
         ref: refName,
       })
-      await this.installDependencies(tmpDir)
-      const manifest = await this.readManifest(tmpDir)
-      const entry = resolveCheckoutEntry(input.entry, manifest)
-      await this.assertEntryExists(tmpDir, entry)
-      const headSha = await this.readHeadSha(tmpDir)
+      // Inspect first: what the checkout is decides whether a dependency
+      // command may run at all.
+      const staged = await this.stageCheckout(tmpDir, input)
+      // Dependency installation is best-effort infrastructure, never a gate for
+      // filing the checkout: a manifest that is missing or unparseable skips it
+      // (pnpm would fail, or worse, install an ancestor project), and a
+      // non-plugin checkout has no loader entry to satisfy.
+      const dependencyNote = staged.manifest === null
+        ? 'Dependencies were not installed: the checkout has no readable package.json.'
+        : staged.classification === 'plugin'
+          ? null
+          : 'Dependencies were not installed: the checkout is not a plugin.'
+      let dependenciesInstalled = false
+      if (staged.manifest !== null && staged.classification === 'plugin') {
+        await this.installDependencies(tmpDir)
+        dependenciesInstalled = true
+      }
+      const entryNote = dependencyNote === null
+        ? staged.entryNote
+        : staged.entryNote === null ? dependencyNote : `${staged.entryNote} ${dependencyNote}`
+      const commit = input.commit ?? await this.readHeadSha(tmpDir)
 
       // Swap the staged checkout into place (previous one is removed first).
       // Nested v2 targets need their parent chain created before the rename.
@@ -213,22 +287,85 @@ export class PluginInstaller {
       const record = await store.register({
         key,
         source: refKind === undefined
-          ? { kind: 'github', repository: ownerRepo, version: refName ?? input.version ?? null, commit: input.commit ?? headSha ?? null }
-          : { kind: 'github', refKind, repository: ownerRepo, version: refName, commit: input.commit ?? headSha ?? null },
+          ? { kind: 'github', repository: ownerRepo, version: refName ?? input.version ?? null, commit: commit ?? null }
+          : { kind: 'github', refKind, repository: ownerRepo, version: refName, commit: commit ?? null },
         localDirName: dirName,
-        entry,
+        // exactOptionalPropertyTypes: a runnable entry is attached only when one
+        // was resolved; an entry-less checkout registers with a null entry.
+        ...(staged.entry === null ? {} : { entry: staged.entry }),
+        classification: staged.classification,
       }, { trusted: true })
       // Remove a stale checkout of the same key that used a former directory
       // name. Best effort: the record already points at the new checkout.
       if (oldDir && oldDir !== finalDir) {
         await this.fs.rmrf(oldDir).catch(() => undefined)
       }
-      return { record, checkoutDir: finalDir }
+      return {
+        record,
+        checkoutDir: finalDir,
+        classification: staged.classification,
+        entry: staged.entry,
+        entryNote,
+        dependenciesInstalled,
+      }
     } catch (error) {
       await this.fs.rmrf(tmpDir).catch(() => undefined)
       if (error instanceof MarketError) throw error
       throw new MarketError('install/io', 'The plugin install failed unexpectedly.', { path: root, cause: error })
     }
+  }
+
+  /**
+   * Resolve what the staged checkout is: the entry it carries (if any), its
+   * classification tag and its manifest state (needed by the dependency step).
+   *
+   * The entry probe wins over the caller's classification hint: a checkout with
+   * a runnable entry is always classified `plugin` (a preview-time guess of
+   * `skills`/`other` must never demote a real plugin to an entry-less record).
+   * The explicit classification only contributes when no runnable entry exists —
+   * and even then only narrows `other` to `skills`.
+   *
+   * A checkout without a runnable entry — an unreadable/absent manifest, a
+   * manifest entry that is not there yet, or an explicit non-plugin
+   * classification — is filed with a null entry instead of failing the
+   * install: nothing is deleted and the record stays manageable (the control
+   * layer withholds the loader row).
+   */
+  private async stageCheckout(stagedDir: string, input: InstallPluginInput): Promise<StagedCheckout> {
+    const manifestState = await this.readManifestState(stagedDir)
+    const resolved = resolveCheckoutEntry(input.entry, manifestState.manifest ?? {})
+    // Probe exactly two candidates: the resolved entry (explicit override →
+    // manifest main/exports → conventional index.js) and the conventional
+    // fallback, so a manifest that points at a not-yet-built file still
+    // installs through a present index.js. A resolved entry that is absent is
+    // never second-guessed by another manifest field: if neither candidate
+    // exists the checkout is filed without an entry.
+    const entry = await this.firstExistingEntry(stagedDir, [resolved, DEFAULT_CHECKOUT_ENTRY])
+    if (entry !== null) {
+      return { entry, entryNote: null, classification: 'plugin', manifest: manifestState.manifest }
+    }
+    const note = manifestState.manifest === null
+      ? `${manifestState.note ?? 'The checkout has no readable package.json.'} Neither the manifest entry nor the conventional "${DEFAULT_CHECKOUT_ENTRY}" exists inside the checkout.`
+      : `The resolved plugin entry "${resolved}" does not exist inside the checkout (the conventional "${DEFAULT_CHECKOUT_ENTRY}" was tried as well).`
+    return {
+      entry: null,
+      entryNote: note,
+      classification: input.classification === 'skills' ? 'skills' : 'other',
+      manifest: manifestState.manifest,
+    }
+  }
+
+  /** First candidate entry that exists as a file inside the checkout, or null. */
+  private async firstExistingEntry(stagedDir: string, candidates: readonly string[]): Promise<string | null> {
+    const seen = new Set<string>()
+    for (const candidate of candidates) {
+      if (seen.has(candidate)) continue
+      seen.add(candidate)
+      const target = join(stagedDir, ...candidate.split('/'))
+      const stat = await this.fs.stat(target)
+      if (stat !== null && stat.isFile()) return candidate
+    }
+    return null
   }
 
   /** A second managed plugin must never share the target directory. */
@@ -330,37 +467,80 @@ export class PluginInstaller {
     }
   }
 
-  private async readManifest(checkoutDir: string): Promise<Record<string, unknown>> {
-    try {
-      const text = await this.fs.readFile(join(checkoutDir, 'package.json'))
-      const value = JSON.parse(text) as unknown
-      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('not an object')
-      }
-      return value as Record<string, unknown>
-    } catch (error) {
-      throw new MarketError(
-        'install/package-invalid',
-        'The checkout package.json could not be read or parsed.',
-        { path: join(checkoutDir, 'package.json'), cause: error },
-      )
-    }
-  }
-
-  private async assertEntryExists(checkoutDir: string, entry: string): Promise<void> {
-    const target = join(checkoutDir, ...entry.split('/'))
-    const stat = await this.fs.stat(target)
-    if (stat === null || !stat.isFile()) {
-      throw new MarketError(
-        'install/entry-missing',
-        `The resolved plugin entry "${entry}" does not exist inside the checkout (fell back to the conventional "${DEFAULT_CHECKOUT_ENTRY}" when the manifest resolved none).`,
-        { path: target },
-      )
-    }
+  /**
+   * Read the staged checkout's package.json through the injected filesystem
+   * (tolerant: a missing/broken manifest is `manifest: null` + note).
+   */
+  private readManifestState(stagedDir: string): Promise<ManifestState> {
+    return readCheckoutManifestState(stagedDir, this.fs)
   }
 }
 
+/**
+ * Read and parse one checkout's package.json, failing loudly
+ * (`install/package-invalid`) when it is absent, unreadable, not JSON or not a
+ * JSON object. The install pipeline uses the tolerant reader below instead —
+ * this is for callers that must have a manifest.
+ */
+export function readCheckoutManifest(checkoutDir: string, fs: FsLike = NodeFs): Promise<Record<string, unknown>> {
+  return readCheckoutManifestState(checkoutDir, fs).then((state) => {
+    if (state.manifest === null) {
+      throw new MarketError(
+        'install/package-invalid',
+        `The checkout package.json could not be read or parsed${state.note === null ? '' : ` (${state.note})`}.`,
+        { path: join(checkoutDir, 'package.json') },
+      )
+    }
+    return state.manifest
+  })
+}
+
+/**
+ * Tolerantly read one checkout's package.json: a missing, unreadable or
+ * unparsable manifest yields `manifest: null` plus a human-readable note
+ * instead of an error, so callers can skip manifest-dependent steps (entry
+ * resolution, dependency installation) and still file the checkout.
+ */
+export async function readCheckoutManifestState(checkoutDir: string, fs: FsLike = NodeFs): Promise<ManifestState> {
+  const path = join(checkoutDir, 'package.json')
+  let text: string
+  try {
+    text = await fs.readFile(path)
+  } catch {
+    return { manifest: null, note: 'the file is missing or unreadable' }
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(text) as unknown
+  } catch {
+    return { manifest: null, note: 'the file is not valid JSON' }
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { manifest: null, note: 'the file is not a JSON object' }
+  }
+  return { manifest: value as Record<string, unknown>, note: null }
+}
+
 let nextTempId = 0
+
+/** Tolerant package.json read of one staged checkout (see {@link readCheckoutManifestState}). */
+export interface ManifestState {
+  /** Parsed manifest object, or null when absent/unreadable/not an object. */
+  readonly manifest: Record<string, unknown> | null
+  /** Why the manifest is null (null when it parsed). */
+  readonly note: string | null
+}
+
+/** Resolved classification/entry of one staged checkout (see {@link PluginInstaller}). */
+interface StagedCheckout {
+  /** Runnable entry to register, or null when the checkout has none. */
+  readonly entry: string | null
+  /** Why the entry is null (null when an entry was registered). */
+  readonly entryNote: string | null
+  readonly classification: PluginMarketClassification
+  /** Parsed manifest, or null when absent/unreadable (gates the dependency step). */
+  readonly manifest: Record<string, unknown> | null
+}
 
 /** Normalized install destination of one {@link PluginInstaller.install} run. */
 interface InstallTarget {

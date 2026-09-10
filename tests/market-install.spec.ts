@@ -6,6 +6,8 @@ import { MarketError } from '../src/host/market/errors.ts'
 import {
   DEFAULT_CHECKOUT_ENTRY,
   PluginInstaller,
+  readCheckoutManifest,
+  readCheckoutManifestState,
   resolveCheckoutEntry,
   resolveInstallTarget,
   type CommandOutcome,
@@ -44,6 +46,14 @@ interface InstallFixture {
   files?: string[]
   failPnpm?: boolean
   sha?: string
+  /** Write this text as package.json instead of the manifest JSON. */
+  rawManifest?: string
+  /** Do not write a package.json at all (real "no manifest" checkout). */
+  omitManifest?: boolean
+  /** Exit code of the pnpm step when {@link failPnpm} is not set (default 0). */
+  failPnpmCode?: number
+  /** stderr emitted by the failing pnpm step. */
+  failPnpmStderr?: string
 }
 
 interface RunnerCall {
@@ -61,11 +71,17 @@ function fakeRunner(fixture: InstallFixture): { run: CommandRunner; calls: Runne
       const target = all[all.length - 1] ?? ''
       await mkdir(target, { recursive: true })
       await mkdir(join(target, '.git'))
-      if (fixture.manifest === null) {
+      if (fixture.manifest === null && fixture.omitManifest !== true) {
         const outcome: CommandOutcome = { code: 128, stdout: '', stderr: 'remote: Repository not found.' }
         return outcome
       }
-      await writeFile(join(target, 'package.json'), JSON.stringify(fixture.manifest), 'utf8')
+      if (fixture.omitManifest !== true) {
+        await writeFile(
+          join(target, 'package.json'),
+          fixture.rawManifest ?? JSON.stringify(fixture.manifest),
+          'utf8',
+        )
+      }
       for (const file of fixture.files ?? ['index.js']) {
         const segments = file.split('/')
         const name = segments.pop()
@@ -79,6 +95,9 @@ function fakeRunner(fixture: InstallFixture): { run: CommandRunner; calls: Runne
     }
     if (command === 'pnpm' && all[0] === 'install') {
       if (fixture.failPnpm) return { code: 1, stdout: '', stderr: 'ERR_PNPM_FAILED install failed' }
+      if (fixture.failPnpmCode !== undefined && fixture.failPnpmCode !== 0) {
+        return { code: fixture.failPnpmCode, stdout: '', stderr: fixture.failPnpmStderr ?? 'pnpm failed' }
+      }
       return { code: 0, stdout: '', stderr: '' }
     }
     return { code: 0, stdout: '', stderr: '' }
@@ -167,25 +186,162 @@ describe('PluginInstaller.install', () => {
     expect(result.record.entry).toBe(DEFAULT_CHECKOUT_ENTRY)
   })
 
-  it('reports entry-missing and rolls back when no entry file exists', async () => {
+  it('files a checkout with no entry instead of failing (entry null, classification other)', async () => {
     const root = await freshRepo('repo-entry-missing')
     const { run } = fakeRunner({ manifest: { main: 'lib/main.js' }, files: ['lib/other.js'] })
     const installer = new PluginInstaller({ run })
-    await rejectCode(
-      installer.install({
-        repositoryRoot: root,
-        key: key('gh-missing-entry'),
-        ownerRepo: 'owner/missing',
-        localDirName: 'gh-missing-entry',
-        confirmed: true,
-      }),
-      'install/entry-missing',
-    )
+    const result = await installer.install({
+      repositoryRoot: root,
+      key: key('gh-missing-entry'),
+      ownerRepo: 'owner/missing',
+      localDirName: 'gh-missing-entry',
+      confirmed: true,
+    })
+    expect(result.classification).toBe('other')
+    expect(result.entry).toBeNull()
+    expect(result.entryNote).toContain('lib/main.js')
+    expect(result.record.entry).toBeNull()
+    expect(result.record.classification).toBe('other')
+    // The checkout is kept on disk and manageable; no staging leftovers remain.
     const dirs = await readdir(root)
-    expect(dirs.some((name) => name === 'gh-missing-entry')).toBe(false)
+    expect(dirs).toContain('gh-missing-entry')
     expect(dirs.some((name) => name.startsWith('.install-'))).toBe(false)
     const store = new PluginRecordStore(repositoryRecordsPath(root))
-    expect(await store.get(key('gh-missing-entry'))).toBeNull()
+    const record = await store.get(key('gh-missing-entry'))
+    expect(record?.classification).toBe('other')
+    expect(record?.entry).toBeNull()
+  })
+
+  it('falls back to the conventional index.js when the manifest entry is missing', async () => {
+    const root = await freshRepo('repo-entry-fallback')
+    const { run } = fakeRunner({ manifest: { main: 'lib/main.js' }, files: ['index.js'] })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-entry-fallback'),
+      ownerRepo: 'owner/fallback',
+      localDirName: 'gh-entry-fallback',
+      confirmed: true,
+    })
+    expect(result.classification).toBe('plugin')
+    expect(result.record.entry).toBe('index.js')
+  })
+
+  it('tolerates an unreadable package.json and files the checkout as other', async () => {
+    const root = await freshRepo('repo-broken-manifest')
+    const { run } = fakeRunner({ manifest: {}, rawManifest: 'not json', files: ['README.md'] })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-broken-manifest'),
+      ownerRepo: 'owner/broken',
+      localDirName: 'gh-broken-manifest',
+      confirmed: true,
+    })
+    expect(result.classification).toBe('other')
+    expect(result.entry).toBeNull()
+    expect(result.entryNote).toContain('package.json')
+    expect(result.record.entry).toBeNull()
+    expect(result.record.classification).toBe('other')
+  })
+
+  it('applies an explicit skills hint only to an entry-less checkout (never demoting a plugin)', async () => {
+    const root = await freshRepo('repo-skills')
+    // No runnable entry: the manifest points at a file that was not shipped.
+    const { run, calls } = fakeRunner({ manifest: { main: 'lib/missing.js' }, files: ['SKILL.md'] })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-skills-pack'),
+      ownerRepo: 'owner/skills',
+      localDirName: 'gh-skills-pack',
+      classification: 'skills',
+      confirmed: true,
+    })
+    expect(result.classification).toBe('skills')
+    expect(result.entry).toBeNull()
+    expect(result.record.classification).toBe('skills')
+    expect(result.record.entry).toBeNull()
+    // A non-plugin checkout has no loader entry to satisfy: pnpm is skipped.
+    expect(result.dependenciesInstalled).toBe(false)
+    expect(calls.some((call) => call.command === 'pnpm')).toBe(false)
+    expect((await new PluginRecordStore(repositoryRecordsPath(root)).get(key('gh-skills-pack')))?.classification).toBe('skills')
+  })
+
+  it('keeps a checkout plugin-classified when a skills hint meets a real entry', async () => {
+    const root = await freshRepo('repo-skills-hint-plugin')
+    const { run } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js', 'SKILL.md'] })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-hinted-plugin'),
+      ownerRepo: 'owner/hinted',
+      localDirName: 'gh-hinted-plugin',
+      classification: 'skills',
+      confirmed: true,
+    })
+    // The entry probe wins: a runnable checkout is always filed as a plugin.
+    expect(result.classification).toBe('plugin')
+    expect(result.entry).toBe('index.js')
+    expect(result.record.classification).toBe('plugin')
+    expect(result.dependenciesInstalled).toBe(true)
+  })
+
+  it('skips pnpm for a checkout without package.json instead of failing on ERR_PNPM_NO_PKG_MANIFEST', async () => {
+    const root = await freshRepo('repo-no-manifest')
+    // The runner emulates pnpm refusing to run without a manifest; more
+    // importantly it records whether pnpm is invoked at all.
+    const { run, calls } = fakeRunner({
+      manifest: null,
+      omitManifest: true,
+      files: ['README.md'],
+      failPnpmCode: 1,
+      failPnpmStderr: 'ERR_PNPM_NO_PKG_MANIFEST No package.json found',
+    })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-docs'),
+      ownerRepo: 'owner/docs',
+      localDirName: 'gh-docs',
+      confirmed: true,
+    })
+    expect(result.classification).toBe('other')
+    expect(result.entry).toBeNull()
+    expect(result.dependenciesInstalled).toBe(false)
+    expect(result.entryNote).toContain('Dependencies were not installed')
+    expect(result.record.classification).toBe('other')
+    expect(calls.some((call) => call.command === 'pnpm')).toBe(false)
+    expect(await readdir(join(root, 'gh-docs'))).toContain('README.md')
+  })
+
+  it('never touches a user project above the repository when the checkout has no manifest', async () => {
+    // A realistic misconfiguration: Config.repositoryPath points INSIDE a user
+    // JavaScript project, so the checkout directory has a package.json ancestor.
+    // pnpm run there would install the user's project instead of the checkout.
+    const project = await freshRepo('user-project')
+    await writeFile(join(project, 'package.json'), JSON.stringify({ name: 'user-app', dependencies: { left: '^1.0.0' } }), 'utf8')
+    await writeFile(join(project, 'package-lock.json'), '{"lockfileVersion":3}', 'utf8')
+    const root = join(project, 'scratch')
+    await mkdir(root)
+    const { run, calls } = fakeRunner({
+      manifest: null,
+      omitManifest: true,
+      files: ['docs/index.md'],
+      failPnpmCode: 1,
+      failPnpmStderr: 'ERR_PNPM_NO_PKG_MANIFEST No package.json found',
+    })
+    const result = await new PluginInstaller({ run }).install({
+      repositoryRoot: root,
+      key: key('gh-readme-only'),
+      ownerRepo: 'owner/readme',
+      localDirName: 'gh-readme-only',
+      confirmed: true,
+    })
+    expect(result.classification).toBe('other')
+    expect(calls.some((call) => call.command === 'pnpm')).toBe(false)
+    // The user project is untouched: no node_modules, no pnpm-lock.yaml, the
+    // lockfile byte-identical and the checkout itself landed under the market
+    // repository (never above it).
+    expect(await readdir(project)).not.toContain('node_modules')
+    expect(await readdir(project)).not.toContain('pnpm-lock.yaml')
+    expect(await readFile(join(project, 'package-lock.json'), 'utf8')).toBe('{"lockfileVersion":3}')
+    expect(await readdir(join(root, 'gh-readme-only'))).toEqual(expect.arrayContaining(['docs']))
   })
 
   it('reports deps-failed and rolls back on a pnpm failure', async () => {
@@ -546,5 +702,49 @@ describe('resolveCheckoutEntry', () => {
   it('falls back to the conventional entry otherwise', () => {
     expect(resolveCheckoutEntry(undefined, { name: 'x' })).toBe('index.js')
     expect(resolveCheckoutEntry('', { main: 12 })).toBe('index.js')
+  })
+})
+
+describe('checkout manifest readers (dependency-step gate)', () => {
+  let tmp: string
+  beforeAll(async () => { tmp = await makeSuiteTmp('install-manifest-readers') })
+  afterAll(async () => { await removeTmp(tmp) })
+
+  async function dirWith(name: string, content?: string): Promise<string> {
+    const dir = join(tmp, name)
+    await mkdir(dir, { recursive: true })
+    if (content !== undefined) await writeFile(join(dir, 'package.json'), content, 'utf8')
+    return dir
+  }
+
+  it('reads a usable manifest and reports no note', async () => {
+    const dir = await dirWith('usable', JSON.stringify({ name: 'demo', main: 'lib/index.js' }))
+    const state = await readCheckoutManifestState(dir)
+    expect(state.manifest).toEqual({ name: 'demo', main: 'lib/index.js' })
+    expect(state.note).toBeNull()
+    await expect(readCheckoutManifest(dir)).resolves.toEqual({ name: 'demo', main: 'lib/index.js' })
+  })
+
+  it('tolerates a missing / non-JSON / non-object manifest with a note', async () => {
+    const missing = await dirWith('missing')
+    const broken = await dirWith('broken', 'not json')
+    const notObject = await dirWith('not-object', '[1,2]')
+    for (const [dir, expected] of [
+      [missing, 'missing'],
+      [broken, 'not valid JSON'],
+      [notObject, 'not a JSON object'],
+    ] as const) {
+      const state = await readCheckoutManifestState(dir)
+      expect(state.manifest).toBeNull()
+      expect(state.note).toContain(expected)
+    }
+  })
+
+  it('fails loudly with install/package-invalid through the strict reader', async () => {
+    const missing = await dirWith('strict-missing')
+    const broken = await dirWith('strict-broken', '{{{')
+    for (const dir of [missing, broken]) {
+      await rejectCode(readCheckoutManifest(dir), 'install/package-invalid')
+    }
   })
 })

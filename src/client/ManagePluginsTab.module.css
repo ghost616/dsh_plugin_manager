@@ -1,9 +1,13 @@
 /* Managed-plugins tab styles: semantic dsw tokens only, no literal colors. */
 
+/* Managed roster zone of the local tab: it fills the tab body under the
+   status header and grows with the rows (the body above owns the scroll). */
 .section {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
   max-width: 760px;
   color: var(--dsw-alias-label-primary);
@@ -46,6 +50,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex: none;
 }
 
 .search input {
@@ -80,6 +85,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex: none;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -87,8 +93,9 @@
 
 .row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
   gap: 16px;
   min-width: 0;
   box-sizing: border-box;
@@ -112,6 +119,23 @@
   gap: 3px;
 }
 
+.rowMeta {
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.rowSide {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
 .rowName {
   max-width: 100%;
   overflow: hidden;
@@ -121,23 +145,10 @@
   font-weight: 600;
 }
 
-.rowMeta {
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
 .rowMeta code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--dsw-alias-label-secondary);
-}
-
-.rowSide {
-  flex: none;
-  gap: 8px;
 }
 
 .phaseDot {
@@ -226,11 +237,17 @@
 }
 /* --- settings page skeleton and its in-page tabs --- */
 
+/* The page fills whatever height its host grants (height:100% of the settings
+   shell's content box) instead of growing with its content: the tab strip stays
+   put and each panel owns the leftover space, so a long roster, result list or
+   README scrolls INSIDE the page rather than scrolling the whole page. */
 .page {
   display: flex;
   flex-direction: column;
   gap: 14px;
   width: 100%;
+  height: 100%;
+  min-height: 0;
   max-width: 860px;
 }
 
@@ -240,6 +257,7 @@
   display: flex;
   align-items: flex-end;
   gap: 22px;
+  flex: none;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   margin-top: 2px;
 }
@@ -280,18 +298,31 @@
   color: var(--dsw-alias-label-primary);
 }
 
+/* One tab panel owns all the space under the strip; it never grows the page
+   (min-height:0 lets its content shrink and scroll instead of pushing out). */
 .panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   padding-top: 2px;
 }
 
-/* Local-repository tab body: status header over the managed roster. */
+/* Local-repository tab body: status header over the managed roster. The whole
+   body is the tab's own scroll zone, so the header scrolls away with a long
+   roster instead of being pinned above a cramped list. */
 .localPanel {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   width: 100%;
   max-width: 760px;
+  padding-right: var(--dsh-scrollbar-width, 8px);
   color: var(--dsw-alias-label-primary);
 }
 
@@ -301,6 +332,8 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
   max-width: 760px;
   color: var(--dsw-alias-label-primary);
@@ -308,14 +341,14 @@
 
 /* Market result zone of the GitHub tab: the search header (above) and the
    pagination (below) stay put; only this middle zone scrolls, so a long result
-   list never pushes the pagination off the page. */
+   list never pushes the pagination off the page. Its height is the panel's
+   leftover space (no viewport-fraction cap), so the zone follows the page. */
 .marketScroll {
   display: flex;
   flex-direction: column;
   gap: 10px;
   flex: 1 1 auto;
   min-height: 0;
-  max-height: 46vh;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* Comfortable breathing room between the content and the right-edge
@@ -325,11 +358,39 @@
   padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
+/* Detail view inside that zone. The scroll bar belongs to .marketScroll (and to
+   an oversized .readmeSection); these two only carry the same flexible,
+   shrink-allowed sizing the component pins inline on them. */
+.detailScroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.detailBody {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* README block: the last row of the detail body and the one flexible row in
+   it, so an oversized document scrolls here instead of stretching the tab. */
+.readmeSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* Detail-view header row: the back control sits before the detail title. */
 .detailToolbar {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: none;
   min-width: 0;
 }
 
@@ -397,6 +458,7 @@
 .searchForm {
   display: flex;
   gap: 8px;
+  flex: none;
   width: 100%;
   max-width: 560px;
 }
@@ -468,6 +530,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+  flex: none;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -619,32 +682,47 @@
   color: var(--dsw-alias-state-business-primary);
 }
 
-/* Smart-install analysis refusal panel: replaces the confirmation flow when
-   the review analysis judged the candidate not installable. */
-.analysisBlock {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 6%, transparent);
-  color: var(--dsw-alias-label-primary);
+/* Record classification tag of one row / one download review. Informational
+   only: a skills or other checkout still downloads, it just never registers a
+   loader entry. */
+.classificationTag {
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);
+  color: var(--dsw-alias-label-secondary);
 }
 
-.analysisTitle {
+.classificationTag[data-kind='plugin'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* Row note of a checkout the loader can never register (its enable switch is
+   disabled): the same sentence the switch carries as its tooltip. */
+.rowNote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Download review: the classification the confirmed download will file the
+   checkout under, plus the optional analyzer explanation. */
+.classificationNotice {
   margin: 0;
   font-size: 13px;
   line-height: 20px;
-  font-weight: 600;
-  color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary);
 }
 
-.analysisReason {
+.classificationNote {
   margin: 0;
   font-size: 13px;
   line-height: 20px;
   overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* Model-config guidance under an analysis preview failure (llm-unconfigured). */
@@ -707,19 +785,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex: none;
 }
 
 .pageToolbar .heading {
   margin: 0;
-}
-
-.installedBadge {
-  border-radius: 5px;
-  padding: 2px 8px;
-  font-size: 12px;
-  line-height: 18px;
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
-  color: var(--dsw-alias-state-success-primary);
 }
 
 .resultActions {
@@ -740,6 +810,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex: none;
   border-top: 0.5px solid var(--dsw-alias-border-l3);
   padding-top: 10px;
 }
@@ -778,14 +849,6 @@
 }
 
 /* --- repository detail view (metadata + branch/tag download + README) --- */
-
-/* Detail content column inside the GitHub tab's scrolling zone. */
-.detailBody {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
 
 .detailHeader {
   display: flex;
@@ -863,13 +926,6 @@
 
 /* README block: sanitized markdown scoped under .marketReadme so every rule
    stays inside the card and only semantic dsw tokens feed the look. */
-.readmeSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
 .marketReadme {
   overflow-wrap: break-word;
   font-size: 13px;

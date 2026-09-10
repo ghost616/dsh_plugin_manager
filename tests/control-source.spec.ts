@@ -2,12 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { MarketError } from '../src/host/market/errors.ts'
 import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
-import { ENTRY_MISSING_BUILD_HINT } from '../src/host/control/source.ts'
-import { fakeAnalysisEngine, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
+import { ANALYSIS_UNAVAILABLE_NOTE } from '../src/host/control/source.ts'
+import { fakeAnalysisEngine, fakeDistribution, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
 
 /** Repository slug → derived key convention under test. */
 const SLUG = 'octocat/demo-plugin'
 const GH_KEY = 'gh-octocat-demo-plugin'
+
+/** Preview outcome of an unconventional checkout (no readable manifest). */
+const NO_MANIFEST_PREVIEW = {
+  status: 'degraded' as const,
+  summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+  reason: 'no package.json on the probed branches',
+  code: 'github/not-found' as const,
+}
 
 type Bed = ReturnType<typeof testbed>
 
@@ -172,128 +180,259 @@ describe('MarketSourceOperations previewInstall', () => {
     const review = await source.previewInstall(SLUG)
     expect(review.preview.status).toBe('degraded')
     if (review.preview.status === 'degraded') expect(review.preview.code).toBe('github/network')
+    // A transport hiccup is not a classification signal: the review keeps the
+    // standard-plugin prediction and never consults the analyzer.
+    expect(review.classification).toBe('plugin')
+    expect(review.entryNote).toBeUndefined()
     expect(review.analysis).toBeUndefined()
   })
 
-  it('refuses an unconventional (no manifest) candidate with market/llm-unconfigured when no analysis engine is wired', async () => {
+  it('falls back to the other classification (no engine) and still downloads the checkout', async () => {
     const bed = testbed()
-    bed.engines.previewResult = {
-      status: 'degraded',
-      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'no package.json on the probed branches',
-      code: 'github/not-found',
-    }
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    bed.engines.installedEntry = null
     const source = ops(bed)
-    await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-unconfigured' })
-    expect(bed.engines.previewCalls).toEqual([SLUG])
+    const review = await source.previewInstall(SLUG)
+    // No engine → conservative classification with a config hint, no refusal.
+    expect(review.classification).toBe('other')
+    expect(review.note).toEqual(ANALYSIS_UNAVAILABLE_NOTE)
+    // The Host never ships user-facing prose: the client localizes note.kind.
+    expect(review.entryNote).toBeUndefined()
+    expect(review.buildRequired).toBeUndefined()
+    expect(review.analysis).toBeUndefined()
+    expect(review.confirmToken).toBeTruthy()
+
+    // The two-step protocol still runs: the checkout is downloaded and filed
+    // with the reviewed classification and no entry.
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(bed.engines.installCalls[0]).toMatchObject({ key: GH_KEY, classification: 'other' })
+    expect(outcome.record.classification).toBe('other')
+    expect(outcome.record.entry).toBeNull()
+    expect(outcome).toMatchObject({ classification: 'other', entry: null, dependenciesInstalled: false })
+    expect(bed.engines.synced).toHaveLength(1)
   })
 
-  it('runs analysis on an unconventional candidate and carries a refusal on the review', async () => {
+  it('files a skills checkout with the skills tag instead of refusing the install', async () => {
     const bed = testbed()
-    bed.engines.previewResult = {
-      status: 'degraded',
-      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'no package.json on the probed branches',
-      code: 'github/not-found',
-    }
-    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'skills', reason: 'A Claude skills collection' } })
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    bed.engines.installedEntry = null
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'skills', reason: 'A Claude skills collection' }),
+    })
     const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
     const review = await source.previewInstall(SLUG)
-    expect(analysis.calls).toEqual([SLUG])
+    expect(analysis.calls.map(call => call.repository)).toEqual([SLUG])
+    expect(review.classification).toBe('skills')
+    expect(review.note).toEqual({ kind: 'classified', text: 'A Claude skills collection' })
+    expect(review.entryNote).toBe('A Claude skills collection')
     expect(review.analysis).toEqual({ installable: false, kind: 'skills', reason: 'A Claude skills collection' })
-    // install() of the refused review rejects up front (no installer/record).
-    await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
-      code: 'market/unsupported-skills',
-      message: 'A Claude skills collection',
-    })
-    expect(bed.engines.installCalls).toHaveLength(0)
-    expect(bed.engines.synced).toHaveLength(0)
+
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(bed.engines.installCalls[0]).toMatchObject({ key: GH_KEY, classification: 'skills' })
+    expect(outcome.record).toMatchObject({ classification: 'skills', entry: null })
+    expect(outcome).toMatchObject({ classification: 'skills', entry: null })
+    expect(bed.engines.synced).toHaveLength(1)
   })
 
-  it('lets an analysis verdict of a runnable plugin through without a refusal', async () => {
+  it('lets the checkout entry probe win over the reviewed skills prediction', async () => {
     const bed = testbed()
-    bed.engines.previewResult = {
-      status: 'degraded',
-      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'no package.json on the probed branches',
-      code: 'github/not-found',
-    }
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    // The review predicted a skills pack, but the downloaded checkout really
+    // carries a runnable entry: the host probe wins and the record stays
+    // loadable — a prediction must never demote a real plugin.
+    bed.engines.installedEntry = 'index.js'
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'skills', reason: 'the model guessed a skills pack' }),
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(review.classification).toBe('skills')
+
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'skills' })
+    expect(outcome).toMatchObject({ classification: 'plugin', entry: 'index.js' })
+    expect(outcome.record).toMatchObject({ classification: 'plugin', entry: 'index.js' })
+    expect(bed.engines.synced[0]).toMatchObject({ classification: 'plugin', entry: 'index.js' })
+  })
+
+  it('classifies preset/tooling verdicts as other and still installs them', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    bed.engines.installedEntry = null
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'other', reason: 'an include-tree preset' }),
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(review.classification).toBe('other')
+    expect(review.note).toEqual({ kind: 'classified', text: 'an include-tree preset' })
+    expect(review.entryNote).toBe('an include-tree preset')
+    expect(review.analysis).toEqual({ installable: false, kind: 'other', reason: 'an include-tree preset' })
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'other' })
+    expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
+  })
+
+  it('marks a plugin that still needs its build (buildRequired, entry-missing note)', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    bed.engines.installedEntry = null
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({
+        classification: 'other',
+        entry: null,
+        entryHint: 'dist/index.js',
+        reason: 'No runnable entry "dist/index.js" is present in the checkout yet; it needs a build step first.',
+        buildRequired: true,
+      }),
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(review.classification).toBe('other')
+    expect(review.buildRequired).toBe(true)
+    expect(review.note).toEqual({
+      kind: 'entry-missing',
+      text: 'No runnable entry "dist/index.js" is present in the checkout yet; it needs a build step first.',
+      entry: 'dist/index.js',
+    })
+    expect(review.entryNote).toContain('build step first')
+    // A build-first plugin keeps a legacy verdict rendered as the folded `other`
+    // kind; the fold into the persisted tag rides on the classification too.
+    expect(review.analysis).toEqual({
+      installable: false,
+      kind: 'other',
+      reason: expect.stringContaining('build step first'),
+    })
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'other' })
+    expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
+  })
+
+  it('reports buildRequired from the preview-time entry probe when one is wired', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    // The probe is what makes buildRequired reachable: without it the
+    // production preview cannot know whether the entry exists.
+    const probed: string[] = []
+    const analysis = fakeAnalysisEngine({
+      probeDistribution: {
+        classification: 'plugin',
+        entryHint: 'dist/index.js',
+        reason: 'a Cordis plugin that needs a build first',
+      },
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, {
+      analysis,
+      analysisEntryProbe: (repository, entry) => {
+        probed.push(`${repository}:${entry}`)
+        return false
+      },
+    })
+    const review = await source.previewInstall(SLUG)
+    expect(probed).toEqual([`${SLUG}:dist/index.js`])
+    expect(analysis.calls[0]).toMatchObject({ probed: true, probedEntries: ['dist/index.js'] })
+    expect(review).toMatchObject({ classification: 'other', buildRequired: true })
+    expect(review.note).toMatchObject({ kind: 'entry-missing', entry: 'dist/index.js' })
+  })
+
+  it('answers plugin from the same probe when the entry is present', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    const analysis = fakeAnalysisEngine({
+      probeDistribution: { classification: 'plugin', entryHint: 'index.js', reason: 'a Cordis plugin' },
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, {
+      analysis,
+      analysisEntryProbe: () => true,
+    })
+    const review = await source.previewInstall(SLUG)
+    expect(review).toMatchObject({ classification: 'plugin' })
+    expect(review.buildRequired).toBeUndefined()
+    expect(review.note).toBeUndefined()
+  })
+
+  it('lets an analysis verdict of a runnable plugin through as a plugin review', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'plugin', entry: 'index.js', entryHint: 'index.js', reason: 'a Cordis plugin' }),
+    })
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
+    const review = await source.previewInstall(SLUG)
+    expect(analysis.calls.map(call => call.repository)).toEqual([SLUG])
+    expect(review.classification).toBe('plugin')
+    expect(review.entryNote).toBeUndefined()
+    expect(review.note).toBeUndefined()
+    expect(review.analysis).toBeUndefined()
+    const outcome = await source.install(SLUG, review.confirmToken)
+    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'plugin' })
+    expect(outcome.record.classification).toBe('plugin')
+    expect(outcome.key).toBe(key(GH_KEY))
+  })
+
+  it('treats a null analyzer answer as a standard plugin review', async () => {
+    const bed = testbed()
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
     const analysis = fakeAnalysisEngine({ result: null })
     const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
     const review = await source.previewInstall(SLUG)
-    expect(analysis.calls).toEqual([SLUG])
-    expect(review.analysis).toBeUndefined()
+    expect(analysis.calls.map(call => call.repository)).toEqual([SLUG])
+    expect(review.classification).toBe('plugin')
+    expect(review.entryNote).toBeUndefined()
     const outcome = await source.install(SLUG, review.confirmToken)
     expect(outcome.key).toBe(key(GH_KEY))
   })
 
   it('bypasses analysis entirely for standard npm plugins (ready preview)', async () => {
     const bed = testbed()
-    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'should not run' } })
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'other', reason: 'should not run' }),
+    })
     const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
     const review = await source.previewInstall(SLUG)
     expect(review.preview.status).toBe('ready')
+    expect(review.classification).toBe('plugin')
     expect(review.analysis).toBeUndefined()
     expect(analysis.calls).toHaveLength(0)
   })
 
-  it('propagates analysis engine failures with their stable llm codes', async () => {
+  it('falls back to other (never blocking) when the analysis engine fails', async () => {
     const bed = testbed()
-    bed.engines.previewResult = {
-      status: 'degraded',
-      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'no package.json on the probed branches',
-      code: 'github/not-found',
-    }
-    const analysis = fakeAnalysisEngine({ error: new MarketError('market/llm-failed', 'model exploded') })
-    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
-    await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-failed' })
-  })
-
-  it('normalizes every non-config analysis failure into the stable retryable market/llm-failed and mints no token', async () => {
-    const bed = testbed()
-    bed.engines.previewResult = {
-      status: 'degraded',
-      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'no package.json on the probed branches',
-      code: 'github/not-found',
-    }
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
+    bed.engines.installedEntry = null
     // LLM jitter takes many shapes: unparsable output, transport errors and
-    // plain engine bugs must all surface as ONE stable retryable code the UI
-    // can branch on, never as a surprise 500.
+    // plain engine bugs all degrade to the conservative classification — the
+    // review always mints its token, so the checkout can still be downloaded.
     const failures: unknown[] = [
       new MarketError('market/llm-bad-output', 'the model returned prose, not JSON'),
+      new MarketError('market/llm-failed', 'model exploded'),
       new MarketError('github/network', 'offline', { path: 'https://api.github.com' }),
       new Error('boom: analysis engine crashed'),
     ]
     for (const failure of failures) {
       const analysis = fakeAnalysisEngine({ error: failure })
       const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
-      await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-failed' })
+      const review = await source.previewInstall(SLUG)
+      expect(review.classification).toBe('other')
+      expect(review.note).toEqual(ANALYSIS_UNAVAILABLE_NOTE)
+      expect(review.entryNote).toBeUndefined()
+      expect(review.analysis).toBeUndefined()
+      await expect(source.install(SLUG, review.confirmToken)).resolves.toMatchObject({ key: key(GH_KEY) })
     }
-    // A failed analysis never mints a confirmation: the candidate is
-    // unclassified, so a subsequent install has no pending review to consume.
-    const analysis = fakeAnalysisEngine({ error: new MarketError('market/llm-bad-output', 'prose, not JSON') })
-    const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
-    await source.previewInstall(SLUG).catch(() => {})
-    await expect(source.install(SLUG, 'tok')).rejects.toMatchObject({ code: 'market/confirm-required' })
-    expect(bed.engines.installCalls).toHaveLength(0)
-    expect(bed.engines.synced).toHaveLength(0)
+    expect(bed.engines.installCalls).toHaveLength(failures.length)
+    expect(bed.engines.installCalls.every(call => call.classification === 'other')).toBe(true)
   })
 
-  it('keeps an engine market/llm-unconfigured distinct instead of normalizing it', async () => {
+  it('degrades an engine market/llm-unconfigured to the other classification as well', async () => {
     const bed = testbed()
-    bed.engines.previewResult = {
-      status: 'degraded',
-      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
-      reason: 'no package.json on the probed branches',
-      code: 'github/not-found',
-    }
+    bed.engines.previewResult = NO_MANIFEST_PREVIEW
     const analysis = fakeAnalysisEngine({
       error: new MarketError('market/llm-unconfigured', 'no provider configured'),
     })
     const source = makeSourceOps(bed.repository, bed.records, bed.engines, { analysis })
-    await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/llm-unconfigured' })
+    const review = await source.previewInstall(SLUG)
+    expect(review.classification).toBe('other')
+    expect(review.note).toEqual(ANALYSIS_UNAVAILABLE_NOTE)
     expect(bed.engines.previewCalls).toEqual([SLUG])
   })
 
@@ -322,6 +461,7 @@ describe('MarketSourceOperations install (double confirmation)', () => {
       key: GH_KEY,
       repository: SLUG,
       version: null,
+      classification: 'plugin',
     }])
     expect(bed.engines.synced).toHaveLength(1)
 
@@ -360,7 +500,7 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     expect(outcome.overwritten).toBe(true)
   })
 
-  it('propagates pipeline failures with their stable install/* codes', async () => {
+  it('passes pipeline failures through with their stable install/* codes', async () => {
     const bed = testbed()
     bed.engines.installError = new MarketError('install/git-failed', 'clone failed', { path: '/repo' })
     const source = ops(bed)
@@ -369,8 +509,7 @@ describe('MarketSourceOperations install (double confirmation)', () => {
       code: 'install/git-failed',
     })
   })
-
-  it('appends a build-first hint to install/entry-missing failures', async () => {
+  it('leaves an install/entry-missing failure untouched (no message rewriting)', async () => {
     const bed = testbed()
     const source = ops(bed)
     const review = await source.previewInstall(SLUG)
@@ -382,9 +521,9 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     expect(error).toMatchObject({ code: 'install/entry-missing' })
     if (error instanceof Error) {
       expect(error.message).toContain('dist/index.js')
-      // The stable code is kept; the message now tells the user the repository
-      // may need its documented build step first.
-      expect(error.message).toContain(ENTRY_MISSING_BUILD_HINT)
+      // No message rewrite: the build-first guidance is delivered by the
+      // review's classification/entryNote contract, not by patched errors.
+      expect(error.message).not.toContain('documented build step')
     }
   })
 })

@@ -9,7 +9,7 @@ import type { Plugin } from '@deepseek-ai/cordis'
 import type {
   GitHubSearchPage,
   ManagedPluginPhase,
-  PluginInstallReviewAnalysis,
+  PluginMarketClassification,
   PluginMarketGithubSource,
   PluginMarketKey,
   PluginMarketRecord,
@@ -17,6 +17,7 @@ import type {
 } from '../../src/types.ts'
 import { parsePluginKey } from '../../src/host/market/keys.ts'
 import type { GitHubRepoMeta } from '../../src/host/market/github.ts'
+import type { PluginAnalysisDistribution } from '../../src/host/market/analyze.ts'
 import { refSegOf } from '../../src/host/market/paths.ts'
 import {
   MarketPluginController,
@@ -33,6 +34,7 @@ import type { MarketRepository } from '../../src/host/market/index.ts'
 import {
   MarketSourceOperations,
   type InstallAnalysisEngine,
+  type InstalledPluginFacts,
   type InstallerPort,
   type MarketSourceDeps,
   type PreviewEnginePort,
@@ -212,9 +214,30 @@ export class FakeEngines {
     summary: { name: 'demo-plugin', version: '1.0.0', dependencies: { dependencies: ['@deepseek-ai/cordis'], peerDependencies: [] } },
   }
   previewCalls: string[] = []
-  installCalls: { repositoryRoot: string; key: string; repository: string; version: string | null; refKind?: 'branch' | 'tag' }[] = []
+  installCalls: {
+    repositoryRoot: string
+    key: string
+    repository: string
+    version: string | null
+    refKind?: 'branch' | 'tag'
+    classification?: PluginMarketClassification
+  }[] = []
   /** Returned record; built on demand unless preset. */
   installedRecord: PluginMarketRecord | null = null
+  /**
+   * Runnable entry the fake checkout carries, or null for an entry-less
+   * checkout (skills pack / not-built plugin). The host rule under test is
+   * "the entry probe wins", so this — not the reviewed classification —
+   * decides the filed tag.
+   */
+  installedEntry: string | null = 'index.js'
+  /** Facts the fake installer reported back on the last install call. */
+  installedFacts: InstalledPluginFacts = {
+    classification: 'plugin',
+    entry: 'index.js',
+    entryNote: null,
+    dependenciesInstalled: true,
+  }
   installError: unknown = undefined
   synced: PluginMarketRecord[] = []
 
@@ -281,6 +304,15 @@ export class FakeEngines {
       install: async (input) => {
         this.installCalls.push(input)
         if (this.installError !== undefined) throw this.installError
+        // Mirror the host pipeline's staging rule (entry probe wins): a checkout
+        // carrying a runnable entry is ALWAYS filed `plugin`, whatever the
+        // review classified it as. The reviewed classification only decides the
+        // tag of an entry-less checkout (skills, else other).
+        const entry = this.installedEntry
+        const classification: PluginMarketClassification = entry === null
+          ? (input.classification === 'skills' ? 'skills' : 'other')
+          : 'plugin'
+        const entryNote = entry === null ? 'The checkout has no runnable plugin entry.' : null
         // v2 ref installs register the per-tuple layout `<owner>/<repo>/<kind>/<refSeg>`
         // and a source carrying refKind; legacy installs keep the key as the
         // single-segment checkout and no ref kind (old-record compatible).
@@ -290,7 +322,8 @@ export class FakeEngines {
             ? makeSource(input.repository)
             : { kind: 'github', repository: input.repository, refKind: input.refKind, version: input.version, commit: null },
           localDirName: v2DirName ?? input.key,
-          entry: 'index.js',
+          entry,
+          classification,
           trusted: 'trusted',
           trustedAt: '2026-01-01T00:00:00.000Z',
         })
@@ -300,11 +333,22 @@ export class FakeEngines {
           source: record.source,
           localDirName: record.localDirName,
           entry: record.entry,
+          classification: record.classification,
           enabled: false,
           trusted: 'trusted',
           trustedAt: record.trustedAt,
         })
-        return { record, checkoutDir: `${input.repositoryRoot}/${v2DirName ?? input.key}` }
+        this.installedFacts = {
+          classification: record.classification ?? 'plugin',
+          entry: record.entry,
+          entryNote,
+          dependenciesInstalled: entry !== null,
+        }
+        return {
+          record,
+          checkoutDir: `${input.repositoryRoot}/${v2DirName ?? input.key}`,
+          ...this.installedFacts,
+        }
       },
     }
   }
@@ -326,6 +370,11 @@ export function makeSourceOps(
     isSelfModule?: (moduleName: string) => boolean
     /** Optional smart-install analysis engine (default: none → llm-unconfigured). */
     analysis?: InstallAnalysisEngine
+    /**
+     * Optional preview-time entry probe (production wires none: the remote
+     * preview cannot inspect the checkout).
+     */
+    analysisEntryProbe?: (repository: string, relativeEntry: string) => boolean | Promise<boolean>
   } = {},
 ): MarketSourceOperations {
   const deps: MarketSourceDeps = {
@@ -340,6 +389,7 @@ export function makeSourceOps(
     },
     syncRecord: engines.syncRecord,
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
+    ...(options.analysisEntryProbe === undefined ? {} : { analysisEntryProbe: options.analysisEntryProbe }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.confirmTtlMs === undefined ? {} : { confirmTtlMs: options.confirmTtlMs }),
     logger: { warn: () => {}, error: () => {} },
@@ -370,25 +420,89 @@ export function makeSource(repository = 'octocat/demo-plugin'): PluginMarketGith
   return { kind: 'github', repository, version: 'v1.0.0', commit: 'abc123' }
 }
 
-/** Scriptable smart-install analysis engine with a call recorder. */
+/** One analysis call recorded by {@link fakeAnalysisEngine}. */
+export interface FakeAnalysisCall {
+  readonly repository: string
+  /** Whether the caller supplied the preview-time entry probe. */
+  readonly probed: boolean
+  /** Entry names the probe was asked about. */
+  readonly probedEntries: string[]
+}
+
+/**
+ * Scriptable smart-install analysis engine with a call recorder. A scripted
+ * `result` is returned as-is; a scripted `probeDistribution` is answered after
+ * consulting the request's `hasFile` probe, mirroring what the real host
+ * analyzer does with it (a plugin answer whose entry is absent folds into
+ * `other` + `buildRequired`).
+ */
 export function fakeAnalysisEngine(script: {
-  /** Verdict per call (null = installable plugin); overridable per call index. */
-  result?: PluginInstallReviewAnalysis | null
+  /**
+   * Distribution the engine answers with; `null` (the default) means the model
+   * judged the checkout a standard installable plugin.
+   */
+  result?: PluginAnalysisDistribution | null
+  /** Answer derived from the request's entry probe (see the factory docs). */
+  probeDistribution?: {
+    readonly classification: PluginMarketClassification
+    readonly entryHint: string
+    readonly reason: string
+  }
   /** Throw this error on the next call instead of returning. */
   error?: unknown
-} = {}): InstallAnalysisEngine & { readonly calls: string[] } {
-  const calls: string[] = []
+} = {}): InstallAnalysisEngine & { readonly calls: FakeAnalysisCall[] } {
+  const calls: FakeAnalysisCall[] = []
   return {
     calls,
     async analyze(request) {
-      calls.push(request.repository)
+      const probedEntries: string[] = []
+      const hasFile = request.hasFile
+      const probedScript = script.probeDistribution
+      let probed: boolean | undefined
+      if (hasFile !== undefined && probedScript !== undefined) {
+        probedEntries.push(probedScript.entryHint)
+        probed = await hasFile(probedScript.entryHint)
+      }
+      calls.push({ repository: request.repository, probed: hasFile !== undefined, probedEntries })
       if (script.error !== undefined) {
         const error = script.error
         script.error = undefined
         throw error
       }
+      if (probedScript !== undefined) {
+        return probed === false
+          ? fakeDistribution({
+            classification: 'other',
+            entry: null,
+            entryHint: probedScript.entryHint,
+            reason: probedScript.reason,
+            buildRequired: true,
+          })
+          : fakeDistribution({
+            classification: probedScript.classification,
+            entry: probedScript.entryHint,
+            entryHint: probedScript.entryHint,
+            reason: probedScript.reason,
+          })
+      }
       return script.result ?? null
     },
+  }
+}
+
+/**
+ * One classification distribution shaped like the host analyzer's answer (see
+ * plugin-market-host analyze.ts `resolveAnalysisDistribution`).
+ */
+export function fakeDistribution(
+  partial: Partial<PluginAnalysisDistribution> & Pick<PluginAnalysisDistribution, 'classification'>,
+): PluginAnalysisDistribution {
+  return {
+    classification: partial.classification,
+    entry: partial.entry === undefined ? (partial.classification === 'plugin' ? 'index.js' : null) : partial.entry,
+    entryHint: partial.entryHint ?? null,
+    reason: partial.reason ?? 'the model classified this checkout',
+    buildRequired: partial.buildRequired ?? false,
   }
 }
 
@@ -417,6 +531,7 @@ export function makeRecord(keyRaw: string, partial: Partial<PluginMarketRecord> 
     source,
     localDirName: partial.localDirName ?? 'checkout',
     entry: partial.entry === undefined ? null : partial.entry,
+    ...(partial.classification === undefined ? {} : { classification: partial.classification }),
     installedAt: partial.installedAt ?? '2026-01-01T00:00:00.000Z',
     enabled: partial.enabled ?? false,
     trusted: partial.trusted ?? 'untrusted',

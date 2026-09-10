@@ -1,7 +1,12 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { PluginMarketGithubSource, PluginMarketKey, PluginMarketSource } from '../src/types.ts'
+import type {
+  PluginMarketClassification,
+  PluginMarketGithubSource,
+  PluginMarketKey,
+  PluginMarketSource,
+} from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { NodeFs, type FsLike, type FsStat } from '../src/host/market/fs.ts'
 import { parsePluginKey } from '../src/host/market/keys.ts'
@@ -468,8 +473,183 @@ describe('v2 ref-layout records (owner/repo/kind/refSeg)', () => {
   })
 })
 
-describe('legacy single-level records stay readable (no auto-migration)', () => {
+describe('record classification tags (plugin|skills|other)', () => {
   let tmp: string
+  let filePath: string
+  beforeAll(async () => {
+    tmp = await makeSuiteTmp('records-classification')
+    filePath = join(tmp, 'plugins.json')
+  })
+  afterAll(async () => { await removeTmp(tmp) })
+
+  it('writes a cross-consistent tag for every new record (entry → plugin, entry-less → other)', async () => {
+    const store = new PluginRecordStore(filePath)
+    const withEntry = await store.add({
+      key: key('gh-owner-repo'),
+      source: githubSource,
+      localDirName: 'gh-owner-repo',
+      entry: 'index.js',
+    })
+    expect(withEntry.classification).toBe('plugin')
+    // An entry-less record defaults to `other`: a `plugin` tag without an entry
+    // is a contradiction the store refuses to write.
+    const entryLess = await store.add({
+      key: key('gh-entry-less'),
+      source: githubSource,
+      localDirName: 'gh-entry-less',
+    })
+    expect(entryLess.classification).toBe('other')
+    expect(entryLess.entry).toBeNull()
+
+    const raw = JSON.parse(await readFile(filePath, 'utf8')) as { records: Record<string, { classification?: string }> }
+    expect(raw.records['gh-owner-repo']?.classification).toBe('plugin')
+    expect(raw.records['gh-entry-less']?.classification).toBe('other')
+    expect((await new PluginRecordStore(filePath).get(key('gh-owner-repo')))?.classification).toBe('plugin')
+  })
+
+  it('rejects an entry-less record explicitly classified plugin (record/invalid, nothing persisted)', async () => {
+    const file = join(tmp, 'plugin-without-entry.json')
+    const store = new PluginRecordStore(file)
+    await rejectCode(
+      store.add({
+        key: key('gh-contradiction'),
+        source: githubSource,
+        localDirName: 'gh-contradiction',
+        classification: 'plugin',
+      }),
+      'record/invalid',
+    )
+    expect(await store.list()).toEqual([])
+    const raw = JSON.parse(await readFile(file, 'utf8')) as { records: Record<string, unknown> }
+    expect(raw.records).toEqual({})
+  })
+
+  it('round-trips skills/other tags (with a null entry) and survives setEnabled updates', async () => {
+    const store = new PluginRecordStore(filePath)
+    const skills = await store.add({
+      key: key('gh-skills-pack'),
+      source: githubSource,
+      localDirName: 'gh-skills-pack',
+      classification: 'skills',
+    })
+    const other = await store.add({
+      key: key('gh-doc-repo'),
+      source: githubSource,
+      localDirName: 'gh-doc-repo',
+      classification: 'other',
+    })
+    expect(skills.entry).toBeNull()
+    expect(skills.classification).toBe('skills')
+    expect(other.classification).toBe('other')
+
+    const reopened = new PluginRecordStore(filePath)
+    expect((await reopened.get(key('gh-skills-pack')))?.classification).toBe('skills')
+    expect((await reopened.get(key('gh-doc-repo')))?.classification).toBe('other')
+
+    // A later enable/disable flip keeps the classification of the checkout.
+    const enabled = await reopened.setEnabled(key('gh-skills-pack'), true)
+    expect(enabled.classification).toBe('skills')
+    expect(enabled.entry).toBeNull()
+  })
+
+  it('keeps legacy records without a tag readable and reads them as plugin', async () => {
+    const legacyFile = join(tmp, 'legacy-classification.json')
+    await writeFile(legacyFile, JSON.stringify({
+      schemaVersion: 1,
+      records: {
+        'gh-legacy': {
+          key: 'gh-legacy',
+          source: { kind: 'github', repository: 'owner/legacy', version: null, commit: null },
+          localDirName: 'gh-legacy',
+          entry: 'index.js',
+          installedAt: '2024-01-01T00:00:00.000Z',
+          enabled: false,
+          trusted: 'untrusted',
+          trustedAt: null,
+        },
+      },
+    }), 'utf8')
+    const record = await new PluginRecordStore(legacyFile).get(key('gh-legacy'))
+    expect(record?.classification).toBe('plugin')
+
+    // An explicit JSON null (absent field) is the same backward-compatible case.
+    const nullFile = join(tmp, 'null-classification.json')
+    await writeFile(nullFile, JSON.stringify({
+      schemaVersion: 1,
+      records: {
+        'gh-null': {
+          key: 'gh-null',
+          source: { kind: 'github', repository: 'owner/null', version: null, commit: null },
+          localDirName: 'gh-null',
+          entry: null,
+          classification: null,
+          installedAt: '2024-01-01T00:00:00.000Z',
+          enabled: false,
+          trusted: 'untrusted',
+          trustedAt: null,
+        },
+      },
+    }), 'utf8')
+    expect((await new PluginRecordStore(nullFile).get(key('gh-null')))?.classification).toBe('plugin')
+  })
+
+  it('rejects an unknown tag in the file as corruption (never a silent fallback)', async () => {
+    const file = join(tmp, 'bad-classification.json')
+    await writeFile(file, JSON.stringify({
+      schemaVersion: 1,
+      records: {
+        'gh-bad': {
+          key: 'gh-bad',
+          source: { kind: 'github', repository: 'owner/bad', version: null, commit: null },
+          localDirName: 'gh-bad',
+          entry: null,
+          classification: 'preset',
+          installedAt: '2024-01-01T00:00:00.000Z',
+          enabled: false,
+          trusted: 'untrusted',
+          trustedAt: null,
+        },
+      },
+    }), 'utf8')
+    await rejectCode(new PluginRecordStore(file).load(), 'record/corrupt')
+  })
+
+  it('rejects an unknown tag on input as record/invalid and persists nothing', async () => {
+    const inputFile = join(tmp, 'input-classification.json')
+    const store = new PluginRecordStore(inputFile)
+    for (const bad of ['preset', 'PLUGIN', '']) {
+      await rejectCode(
+        store.add({
+          key: key('gh-bad-input'),
+          source: githubSource,
+          localDirName: 'gh-bad-input',
+          classification: bad as PluginMarketClassification,
+        }),
+        'record/invalid',
+      )
+    }
+    expect(await store.list()).toEqual([])
+    const raw = JSON.parse(await readFile(inputFile, 'utf8')) as { records: Record<string, unknown> }
+    expect(raw.records).toEqual({})
+  })
+
+  it('replaces the classification of a superseded checkout on register', async () => {
+    const store = new PluginRecordStore(join(tmp, 'register-classification.json'))
+    await store.register({ key: key('gh-own'), source: githubSource, localDirName: 'gh-own', classification: 'other' })
+    const replaced = await store.register({
+      key: key('gh-own'),
+      source: githubSource,
+      localDirName: 'gh-own',
+      entry: 'index.js',
+      classification: 'plugin',
+    })
+    expect(replaced.classification).toBe('plugin')
+    expect(replaced.entry).toBe('index.js')
+    expect((await store.list())).toHaveLength(1)
+  })
+})
+
+describe('legacy single-level records stay readable (no auto-migration)', () => {  let tmp: string
   let legacyFile: string
   beforeAll(async () => {
     tmp = await makeSuiteTmp('records-legacy')

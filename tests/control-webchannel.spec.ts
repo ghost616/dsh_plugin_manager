@@ -13,7 +13,7 @@ import { MarketError } from '../src/host/market/errors.ts'
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 // @ts-expect-error -- compiled artifact
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
-import { FakeEngines, fakeAnalysisEngine, makeSourceOps, testbed } from './support/control-testbed.ts'
+import { FakeEngines, fakeAnalysisEngine, fakeDistribution, makeSourceOps, testbed } from './support/control-testbed.ts'
 
 const contexts: Context[] = []
 const servers: Server[] = []
@@ -160,7 +160,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
   })
 
   it('serves search and preview/install with the double-confirmed token protocol', async () => {
-    const { router, bed, engines, dispose } = routeFor()
+    const { router, engines, dispose } = routeFor()
     await listen(router.server)
     engines.searchResult = {
       totalCount: 1,
@@ -373,7 +373,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
-  it('serves the smart-install refusal over HTTP and refuses the confirmed install', async () => {
+  it('serves the smart-install classification over HTTP and still installs the checkout', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -381,29 +381,80 @@ describe('market control web channel (M1 source ops round trip)', () => {
       code: 'github/not-found',
     }
     const analysis = fakeAnalysisEngine({
-      result: { installable: false, kind: 'skills', reason: 'an agent skills pack' },
+      result: fakeDistribution({ classification: 'skills', reason: 'an agent skills pack' }),
     })
-    const { router, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
+    const { router, engines, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
+    engines.installedEntry = null
     await listen(router.server)
 
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
-    const reviewValue = (review as { ok: true; value: { analysis: unknown; confirmToken: string } }).value
+    const reviewValue = (review as {
+      ok: true
+      value: {
+        classification: string
+        entryNote?: string
+        note?: { kind: string; text?: string }
+        analysis?: unknown
+        confirmToken: string
+      }
+    }).value
+    expect(reviewValue.classification).toBe('skills')
+    expect(reviewValue.entryNote).toBe('an agent skills pack')
+    expect(reviewValue.note).toEqual({ kind: 'classified', text: 'an agent skills pack' })
     expect(reviewValue.analysis).toEqual({ installable: false, kind: 'skills', reason: 'an agent skills pack' })
 
-    const refusal = await call(router, 'install', {
+    const installed = await call(router, 'install', {
       repository: 'octocat/demo-plugin',
       confirmToken: reviewValue.confirmToken,
     })
-    expect(refusal.ok).toBe(false)
-    if (!refusal.ok) {
-      expect(refusal.error.code).toBe('market/unsupported-skills')
-      expect(refusal.error.message).toBe('an agent skills pack')
-    }
+    expect(installed.ok).toBe(true)
+    const outcome = (installed as {
+      ok: true
+      value: { classification?: string; entry?: string | null; record: { classification?: string; entry: string | null } }
+    }).value
+    expect(outcome.record).toMatchObject({ classification: 'skills', entry: null })
+    // The install-time facts are surfaced back on the outcome as well.
+    expect(outcome).toMatchObject({ classification: 'skills', entry: null })
+    expect(engines.installCalls[0]).toMatchObject({ classification: 'skills' })
     dispose()
   })
 
-  it('answers llm-unconfigured over HTTP when an unconventional preview has no analysis engine', async () => {
+  it('files a predicted skills checkout as plugin when its entry really exists (probe wins)', async () => {
+    const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
+      status: 'degraded',
+      summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
+      reason: 'no package.json on the probed branches',
+      code: 'github/not-found',
+    }
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'skills', reason: 'the model guessed a skills pack' }),
+    })
+    const { router, engines, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
+    engines.installedEntry = 'index.js'
+    await listen(router.server)
+
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const token = (review as { ok: true; value: { confirmToken: string; classification: string } }).value
+    expect(token.classification).toBe('skills')
+
+    const installed = await call(router, 'install', {
+      repository: 'octocat/demo-plugin',
+      confirmToken: token.confirmToken,
+    })
+    expect(installed.ok).toBe(true)
+    const outcome = (installed as {
+      ok: true
+      value: { classification?: string; entry?: string | null; record: { classification?: string; entry: string | null } }
+    }).value
+    // The checkout carries a runnable entry, so it is loadable regardless of
+    // the preview prediction.
+    expect(outcome.record).toMatchObject({ classification: 'plugin', entry: 'index.js' })
+    expect(outcome).toMatchObject({ classification: 'plugin', entry: 'index.js' })
+    dispose()
+  })
+
+  it('classifies an unconventional preview without an analysis engine as other over HTTP', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -413,12 +464,18 @@ describe('market control web channel (M1 source ops round trip)', () => {
     const { router, dispose } = routeFor({ previewResult: degradedNoManifest })
     await listen(router.server)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
-    expect(review.ok).toBe(false)
-    if (!review.ok) expect(review.error.code).toBe('market/llm-unconfigured')
+    expect(review.ok).toBe(true)
+    const value = (review as {
+      ok: true
+      value: { classification: string; entryNote?: string; note?: { kind: string } }
+    }).value
+    expect(value.classification).toBe('other')
+    expect(value.note).toEqual({ kind: 'analysis-unavailable' })
+    expect(value.entryNote).toBeUndefined()
     dispose()
   })
 
-  it('normalizes an analysis failure into the stable retryable market/llm-failed envelope over HTTP', async () => {
+  it('degrades an analysis failure to the other classification over HTTP', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -431,16 +488,45 @@ describe('market control web channel (M1 source ops round trip)', () => {
     const { router, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
     await listen(router.server)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
-    expect(review.ok).toBe(false)
-    if (!review.ok) {
-      // One stable retryable code for every analysis failure shape.
-      expect(review.error.code).toBe('market/llm-failed')
-      expect(review.error.message).toMatch(/retry/i)
-    }
+    expect(review.ok).toBe(true)
+    const value = (review as {
+      ok: true
+      value: { classification: string; entryNote?: string; note?: { kind: string } }
+    }).value
+    expect(value.classification).toBe('other')
+    expect(value.note).toEqual({ kind: 'analysis-unavailable' })
     dispose()
   })
 
-  it('surfaces install/entry-missing with a build-first hint over HTTP', async () => {
+  it('answers market/not-loadable over HTTP when enabling a skills record', async () => {
+    const { router, bed, dispose } = routeFor()
+    await listen(router.server)
+    const record = bed.records.seed('gh-skills-pack', {
+      enabled: false,
+      localDirName: 'skills-pack',
+      entry: null,
+      classification: 'skills',
+    })
+    const listed = await call(router, 'listManaged', {})
+    expect(listed.ok).toBe(true)
+    const view = (listed as { ok: true; value: { entries: { key: string; loadable: boolean }[] } }).value.entries[0]
+    expect(view).toMatchObject({ key: 'gh-skills-pack', loadable: false })
+
+    const refused = await call(router, 'setEnabled', { key: 'gh-skills-pack', enabled: true })
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) {
+      expect(refused.error.code).toBe('market/not-loadable')
+      expect(refused.error.details).toMatchObject({ key: 'gh-skills-pack', reason: 'classification' })
+    }
+    // The record stayed disabled and unloaded; removing it stays allowed.
+    expect((await bed.records.get(record.key))?.enabled).toBe(false)
+    expect(bed.loader.view(record.key)).toBeUndefined()
+    const request = await call(router, 'requestRemove', { key: 'gh-skills-pack' })
+    expect(request.ok).toBe(true)
+    dispose()
+  })
+
+  it('passes an install/entry-missing failure through over HTTP', async () => {
     const { router, engines, dispose } = routeFor()
     await listen(router.server)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
@@ -457,20 +543,21 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(failed.ok).toBe(false)
     if (!failed.ok) {
       expect(failed.error.code).toBe('install/entry-missing')
-      // The stable code is preserved; the message now points the user at the
-      // repository's documented build step.
-      expect(failed.error.message).toContain('documented build step')
+      expect(failed.error.message).toContain('dist/index.js')
     }
     dispose()
   })
 
   it('serves standard (ready) previews without analysis over HTTP', async () => {
-    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'never' } })
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'other', reason: 'never' }),
+    })
     const { router, dispose } = routeFor({ analysis })
     await listen(router.server)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
-    const value = (review as { ok: true; value: { analysis?: unknown } }).value
+    const value = (review as { ok: true; value: { classification: string; analysis?: unknown } }).value
+    expect(value.classification).toBe('plugin')
     expect(value.analysis).toBeUndefined()
     expect(analysis.calls).toHaveLength(0)
     dispose()

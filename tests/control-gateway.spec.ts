@@ -19,6 +19,7 @@ import { MarketControlError } from '../lib/types/host/control/controller.js'
 import { MarketError } from '../src/host/market/errors.ts'
 import {
   fakeAnalysisEngine,
+  fakeDistribution,
   key,
   makeSourceOps,
   testbed,
@@ -199,7 +200,7 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(remoteErrorOf(caught)).toMatchObject({ code: 'record/not-found' })
   })
 
-  it('surfaces the smart-install refusal on an unconventional preview and rejects its install', async () => {
+  it('surfaces the smart-install classification on an unconventional preview and still installs it', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -207,20 +208,23 @@ describe('MarketControllerGateway host Remote surface', () => {
       code: 'github/not-found',
     }
     const analysis = fakeAnalysisEngine({
-      result: { installable: false, kind: 'preset', reason: 'an include-tree preset' },
+      result: fakeDistribution({ classification: 'other', reason: 'an include-tree preset' }),
     })
-    const { gateway } = gatewayWith({ analysis, previewResult: degradedNoManifest })
+    const { gateway, engines } = gatewayWith({ analysis, previewResult: degradedNoManifest })
+    engines.installedEntry = null
     const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
-    expect(review.analysis).toEqual({ installable: false, kind: 'preset', reason: 'an include-tree preset' })
-    const refusal = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
-      .catch((error: unknown) => error)
-    expect(remoteErrorOf(refusal)).toMatchObject({
-      code: 'market/unsupported-preset',
-      message: 'an include-tree preset',
-    })
+    expect(review.classification).toBe('other')
+    expect(review.note).toEqual({ kind: 'classified', text: 'an include-tree preset' })
+    expect(review.entryNote).toBe('an include-tree preset')
+    expect(review.analysis).toEqual({ installable: false, kind: 'other', reason: 'an include-tree preset' })
+
+    const outcome = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
+    expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
+    expect(outcome).toMatchObject({ classification: 'other', entry: null })
+    expect(engines.installCalls[0]).toMatchObject({ classification: 'other' })
   })
 
-  it('answers llm-unconfigured over the gateway when an unconventional preview has no analysis engine', async () => {
+  it('classifies an unconventional preview without an analysis engine as other (no refusal)', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -228,11 +232,15 @@ describe('MarketControllerGateway host Remote surface', () => {
       code: 'github/not-found',
     }
     const { gateway } = gatewayWith({ previewResult: degradedNoManifest })
-    const caught = await gateway.previewInstall('octocat/demo-plugin', null, null).catch((error: unknown) => error)
-    expect(remoteErrorOf(caught)).toMatchObject({ code: 'market/llm-unconfigured' })
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    expect(review.classification).toBe('other')
+    // Localizable note instead of Host-authored prose: the client renders its
+    // own copy for this kind.
+    expect(review.note).toEqual({ kind: 'analysis-unavailable' })
+    expect(review.entryNote).toBeUndefined()
   })
 
-  it('normalizes an unparsable analysis answer to the stable retryable market/llm-failed on the gateway', async () => {
+  it('degrades an unparsable analysis answer to the other classification on the gateway', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -243,16 +251,30 @@ describe('MarketControllerGateway host Remote surface', () => {
       error: new MarketError('market/llm-bad-output', 'the model returned prose, not JSON'),
     })
     const { gateway } = gatewayWith({ analysis, previewResult: degradedNoManifest })
-    const caught = await gateway.previewInstall('octocat/demo-plugin', null, null).catch((error: unknown) => error)
-    // LLM jitter surfaces as one stable code the UI can retry, not as the
-    // internal llm-bad-output or a transport error.
-    expect(remoteErrorOf(caught)).toMatchObject({
-      code: 'market/llm-failed',
-      message: expect.stringMatching(/retry/i),
-    })
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    expect(review.classification).toBe('other')
+    expect(review.note).toEqual({ kind: 'analysis-unavailable' })
+    await expect(gateway.install('octocat/demo-plugin', review.confirmToken, null, null))
+      .resolves.toMatchObject({ key: key('gh-octocat-demo-plugin') })
   })
 
-  it('surfaces install/entry-missing with a build-first hint over the gateway', async () => {
+  it('maps a refused enable of a non-loadable record to the market/not-loadable wire code', async () => {
+    const { gateway, records } = gatewayWith()
+    const record = records.seed('gh-skills-pack', {
+      enabled: false,
+      localDirName: 'skills-pack',
+      entry: null,
+      classification: 'skills',
+    })
+    const caught = await gateway.setEnabled(String(record.key), true).catch((error: unknown) => error)
+    expect(remoteErrorOf(caught)).toMatchObject({
+      code: 'market/not-loadable',
+      details: { key: 'gh-skills-pack', reason: 'classification' },
+    })
+    expect((await gateway.listManaged()).entries[0]).toMatchObject({ key: 'gh-skills-pack', loadable: false })
+  })
+
+  it('passes an install/entry-missing failure through over the gateway', async () => {
     const { gateway, engines } = gatewayWith()
     const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
     engines.installError = new MarketError(
@@ -261,16 +283,16 @@ describe('MarketControllerGateway host Remote surface', () => {
     )
     const caught = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
       .catch((error: unknown) => error)
-    expect(remoteErrorOf(caught)).toMatchObject({
-      code: 'install/entry-missing',
-      message: expect.stringContaining('documented build step'),
-    })
+    expect(remoteErrorOf(caught)).toMatchObject({ code: 'install/entry-missing' })
   })
 
   it('bypasses analysis for standard plugins (ready preview never consults the engine)', async () => {
-    const analysis = fakeAnalysisEngine({ result: { installable: false, kind: 'other', reason: 'never' } })
+    const analysis = fakeAnalysisEngine({
+      result: fakeDistribution({ classification: 'other', reason: 'never' }),
+    })
     const { gateway, engines } = gatewayWith({ analysis })
     const review = await gateway.previewInstall('octocat/demo-plugin', 'branch', 'main')
+    expect(review.classification).toBe('plugin')
     expect(review.analysis).toBeUndefined()
     expect(analysis.calls).toHaveLength(0)
     expect(engines.previewCalls).toEqual(['octocat/demo-plugin'])

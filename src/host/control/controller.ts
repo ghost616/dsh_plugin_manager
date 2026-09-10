@@ -6,7 +6,10 @@
  * - `rebuild()` reconciles loader entries against the record file after the
  *   loader tree has settled (startup / restart rebuild, key order);
  * - `setEnabled()` persists the user intent to the record first and then
- *   applies it to the loader entry (disable stops the fiber; enable imports);
+ *   applies it to the loader entry (disable stops the fiber; enable imports) —
+ *   enabling is refused with `market/not-loadable` for a record that has no
+ *   runnable entry to load (a `skills`/`other` classification, or a plugin
+ *   filed without its entry);
  * - removal is a two-step protocol (`requestRemove` → `confirmRemove`) with a
  *   short-lived single-use token, so one accidental call can never delete.
  *
@@ -31,12 +34,20 @@ import type {
   RemoveOutcome,
   RemoveRequest,
 } from '../../types.ts'
+import { recordNotLoadableReason } from '../../types.ts'
 import type { LoaderAdapter, LoaderEntryMap } from './loader-adapter.ts'
 import { indexEntries } from './loader-adapter.ts'
 import type { ProtectionPolicy } from './protect.ts'
 
 /** Validity window of one removal confirmation request. */
 export const REMOVE_CONFIRM_TTL_MS = 30_000
+
+/**
+ * Session error message recorded for a record that is flagged `enabled` in the
+ * file but has no runnable entry to load (see `ensureRow`).
+ */
+const NOT_LOADABLE_ROW_WARNING =
+  'This record is marked enabled but cannot be loaded: its checkout has no runnable plugin entry (re-download it to resolve the entry, or leave it disabled).'
 
 /** Typed failure of the control core; the gateway maps it onto the wire. */
 export class MarketControlError extends Error {
@@ -147,6 +158,27 @@ export class MarketPluginController {
   }
 
   /**
+   * Refuse to enable a record that cannot become a live loader entry: a
+   * checkout classified `skills`/`other` (no runnable entry by definition) or
+   * a `plugin` record filed without an entry. The refusal is the stable
+   * `market/not-loadable` code — the UI disables the enable switch for the
+   * same records (see the `loadable` flag of {@link list}). Disabling or
+   * removing such a record stays allowed: filing never blocks management.
+   */
+  private assertLoadable(key: PluginMarketKey, record: PluginMarketRecord): void {
+    const reason = recordNotLoadableReason(record)
+    if (reason === null) return
+    const why = reason === 'classification'
+      ? `it is classified "${record.classification ?? 'plugin'}", not a runnable plugin`
+      : 'its record carries no plugin entry to load'
+    throw new MarketControlError(
+      'market/not-loadable',
+      `"${key}" cannot be enabled: ${why}. The checkout stays downloaded and manageable; it just has no loader entry.`,
+      { key, reason },
+    )
+  }
+
+  /**
    * Reconcile every loader row against the records, in stable key order, then
    * drop rows whose record vanished. One load failure never aborts the rest:
    * it is captured as this session's `lastError` and surfaced by {@link list}.
@@ -173,11 +205,17 @@ export class MarketPluginController {
     }
   }
 
-  /** Persist the intent, then apply it to the loader entry. */
+  /**
+   * Persist the intent, then apply it to the loader entry. Enabling is gated:
+   * only a `plugin`-classified record with a resolved entry may be loaded
+   * (`market/not-loadable` otherwise, before anything is persisted). Disabling
+   * always works — it is also how a previously loaded record is stopped.
+   */
   async setEnabled(key: PluginMarketKey, enabled: boolean): Promise<PluginMarketRecord> {
     const record = await this.requireRecord(key)
     this.assertManageable(key, record)
     if (enabled) {
+      this.assertLoadable(key, record)
       const updated = await this.deps.records.setEnabled(key, true)
       try {
         await this.enableEntry(key, this.deps.entryModuleOf(updated))
@@ -207,6 +245,9 @@ export class MarketPluginController {
           key: record.key,
           record,
           runtime: this.runtimeView(record, entry),
+          // Derived from the record alone (never from the live row), so the
+          // flag agrees with the setEnabled gate of the host layer.
+          loadable: recordNotLoadableReason(record) === null,
         }
       }),
     }
@@ -312,12 +353,33 @@ export class MarketPluginController {
     await this.ensureRow(record, indexEntries(this.deps.loader.entries()))
   }
 
-  /** Create or align one loader row with the record's desired state. */
+  /**
+   * Create or align one loader row with the record's desired state.
+   *
+   * Every recorded plugin gets a row — including a non-loadable (`skills`/
+   * `other`, entry-less) record, whose row is FORCED disabled: the row is what
+   * the managed view projects, and a disabled entry never imports anything.
+   * The gate lives in {@link setEnabled} (`market/not-loadable`), and this row
+   * builder enforces the same rule for the states the user cannot reach through
+   * the service: a record whose `enabled` flag was flipped behind the
+   * controller's back (a hand-edited records file) is never given an enabled
+   * row; the flag is written back to `false` and the reason is recorded as this
+   * session's row warning, so the managed view cannot claim a plugin is on when
+   * nothing can be imported.
+   */
   private async ensureRow(
     record: PluginMarketRecord,
     live: LoaderEntryMap,
   ): Promise<void> {
     const key = record.key
+    const notLoadable = recordNotLoadableReason(record)
+    const forcedDisabled = notLoadable !== null && record.enabled
+    if (forcedDisabled) {
+      this.failures.set(key, NOT_LOADABLE_ROW_WARNING)
+      this.deps.logger?.warn(
+        `market rebuild: "${key}" is recorded enabled but is not loadable (${notLoadable}); its loader row stays disabled.`,
+      )
+    }
     const expected = this.deps.entryModuleOf(record)
     let entry = live.get(key)
     if (entry !== undefined && entry.moduleName !== expected) {
@@ -325,7 +387,7 @@ export class MarketPluginController {
       await this.removeRow(key)
       entry = undefined
     }
-    const wantDisabled = !record.enabled
+    const wantDisabled = forcedDisabled || !record.enabled
     try {
       if (entry === undefined) {
         await this.deps.loader.create({
@@ -337,11 +399,28 @@ export class MarketPluginController {
         await this.deps.loader.update(key, { disabled: wantDisabled })
       }
       this.owned.add(key)
-      this.failures.delete(key)
+      if (!forcedDisabled) this.failures.delete(key)
+      if (forcedDisabled) await this.clearEnabledFlag(key)
     } catch (error) {
       this.failures.set(key, describeError(error))
       this.deps.logger?.warn(
         `market rebuild: "${key}" could not be ${wantDisabled ? 'disabled' : 'started'}: ${describeError(error)}`,
+      )
+    }
+  }
+
+  /**
+   * Write an unreachable `enabled: true` of a non-loadable record back to
+   * `false`, so the record agrees with the row the loader actually holds. A
+   * failure here is logged only: the row is already disabled, and the next
+   * rebuild retries the write-back.
+   */
+  private async clearEnabledFlag(key: PluginMarketKey): Promise<void> {
+    try {
+      await this.deps.records.setEnabled(key, false)
+    } catch (error) {
+      this.deps.logger?.warn(
+        `market rebuild: could not clear the enabled flag of the non-loadable "${key}": ${describeError(error)}`,
       )
     }
   }

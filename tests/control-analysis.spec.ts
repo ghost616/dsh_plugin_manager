@@ -8,14 +8,12 @@ import { describe, expect, it } from 'vitest'
 import {
   ANALYSIS_DEADLINE_MS,
   createLlmCompletion,
-  refusalWireCode,
   runCheckoutAnalysis,
   snapshotFromPreview,
-  type CheckoutAnalysisDecision,
   type LlmChunk,
   type LlmStreamService,
 } from '../src/host/control/analysis.ts'
-import type { CheckoutSnapshot } from '../src/host/market/analyze.ts'
+import type { CheckoutSnapshot, PluginAnalysisDistribution } from '../src/host/market/analyze.ts'
 
 /** One user-visible snapshot fed to the verdict tests. */
 function snapshotOf(overrides: Partial<CheckoutSnapshot> = {}): CheckoutSnapshot {
@@ -171,39 +169,52 @@ describe('createLlmCompletion (structural ctx.llm stream)', () => {
   })
 })
 
-describe('runCheckoutAnalysis verdict mapping', () => {
-  it('maps a plugin verdict to installable', async () => {
-    const decision = await runCheckoutAnalysis(snapshotOf(), {
+describe('runCheckoutAnalysis classification distributions', () => {
+  it('returns the plugin classification with its entry', async () => {
+    const distribution: PluginAnalysisDistribution = await runCheckoutAnalysis(snapshotOf(), {
       complete: async () => JSON.stringify({ kind: 'plugin', reason: 'a plugin', entryHint: 'index.js' }),
       provider: 'p',
       model: 'm',
     })
-    expect(decision).toEqual({ installable: true })
+    expect(distribution).toEqual({
+      classification: 'plugin',
+      entry: 'index.js',
+      entryHint: 'index.js',
+      reason: 'a plugin',
+      buildRequired: false,
+    })
   })
 
-  it('maps a skills rejection to a skills refusal with the model reason', async () => {
-    const decision = await runCheckoutAnalysis(snapshotOf(), {
+  it('classifies a skills rejection as skills with the model reason (never a refusal)', async () => {
+    const distribution = await runCheckoutAnalysis(snapshotOf(), {
       complete: async () => JSON.stringify({ kind: 'skills', reason: 'A Claude skills collection' }),
       provider: 'p',
       model: 'm',
     })
-    expect(decision).toEqual({ installable: false, kind: 'skills', reason: 'A Claude skills collection' })
+    expect(distribution).toEqual({
+      classification: 'skills',
+      entry: null,
+      entryHint: null,
+      reason: 'A Claude skills collection',
+      buildRequired: false,
+    })
   })
 
-  it('maps preset/tooling/other kinds to preset/other refusals', async () => {
-    const cases: { kind: string; expected: 'preset' | 'other' }[] = [
-      { kind: 'preset', expected: 'preset' },
+  it('folds preset/tooling/other kinds into the other classification label', async () => {
+    const cases: { kind: string; expected: 'other' }[] = [
+      { kind: 'preset', expected: 'other' },
       { kind: 'tooling', expected: 'other' },
       { kind: 'other', expected: 'other' },
     ]
     for (const item of cases) {
-      const decision = await runCheckoutAnalysis(snapshotOf(), {
+      const distribution = await runCheckoutAnalysis(snapshotOf(), {
         complete: async () => JSON.stringify({ kind: item.kind, reason: `it is ${item.kind}` }),
         provider: 'p',
         model: 'm',
       })
-      expect(decision.installable).toBe(false)
-      if (!decision.installable) expect(decision.kind).toBe(item.expected)
+      expect(distribution.classification).toBe(item.expected)
+      expect(distribution.reason).toBe(`it is ${item.kind}`)
+      expect(distribution.entry).toBeNull()
     }
   })
 
@@ -216,18 +227,30 @@ describe('runCheckoutAnalysis verdict mapping', () => {
     await expect(promise).rejects.toMatchObject({ code: 'market/llm-bad-output' })
   })
 
-  it('maps a hasFile probe of a missing plugin entry to a build refusal', async () => {
-    const decision: CheckoutAnalysisDecision = await runCheckoutAnalysis(snapshotOf(), {
+  it('folds a plugin whose entry is missing into other + buildRequired + null entry', async () => {
+    const distribution = await runCheckoutAnalysis(snapshotOf(), {
       complete: async () => JSON.stringify({ kind: 'plugin', reason: 'needs build', entryHint: 'dist/index.js' }),
       provider: 'p',
       model: 'm',
       hasFile: async () => false,
     })
-    expect(decision.installable).toBe(false)
-    if (!decision.installable) {
-      expect(decision.kind).toBe('plugin')
-      expect(decision.reason).toContain('dist/index.js')
-    }
+    expect(distribution).toMatchObject({
+      classification: 'other',
+      entry: null,
+      entryHint: 'dist/index.js',
+      buildRequired: true,
+    })
+    expect(distribution.reason).toContain('dist/index.js')
+  })
+
+  it('keeps a plugin whose entry is present loadable', async () => {
+    const distribution = await runCheckoutAnalysis(snapshotOf(), {
+      complete: async () => JSON.stringify({ kind: 'plugin', reason: 'a plugin', entryHint: 'index.js' }),
+      provider: 'p',
+      model: 'm',
+      hasFile: async () => true,
+    })
+    expect(distribution).toMatchObject({ classification: 'plugin', entry: 'index.js', buildRequired: false })
   })
 
   it('propagates a configured llm rejection when provider/model are absent', async () => {
@@ -236,7 +259,7 @@ describe('runCheckoutAnalysis verdict mapping', () => {
   })
 })
 
-describe('snapshotFromPreview + refusalWireCode', () => {
+describe('snapshotFromPreview', () => {
   it('builds a manifest-less snapshot for a degraded (unconventional) preview', () => {
     const snapshot = snapshotFromPreview('# readme', {
       status: 'degraded',
@@ -247,13 +270,5 @@ describe('snapshotFromPreview + refusalWireCode', () => {
     expect(snapshot.readme).toBe('# readme')
     expect(snapshot.manifest).toBeNull()
     expect(snapshot.entries).toEqual([])
-  })
-
-  it('maps refusal kinds to their unsupported wire codes', () => {
-    expect(refusalWireCode('skills')).toBe('market/unsupported-skills')
-    expect(refusalWireCode('preset')).toBe('market/unsupported-preset')
-    expect(refusalWireCode('plugin')).toBe('market/unsupported-build')
-    expect(refusalWireCode('tooling')).toBe('market/unsupported-other')
-    expect(refusalWireCode('other')).toBe('market/unsupported-other')
   })
 })

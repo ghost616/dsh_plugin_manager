@@ -7,6 +7,15 @@
  * (GitHubMarket / PluginPreviewer / PluginInstaller), keeping this layer free
  * of fetch and subprocess code and fully unit-testable.
  *
+ * Classification (never a gate): every review carries the classification the
+ * install is predicted to file (`plugin` for a standard npm checkout whose
+ * remote manifest was readable; the analyzer's `skills`/`other` tag for an
+ * unconventional checkout; `other` when no usable analysis was available) plus
+ * a user-facing note when no runnable entry is expected. An unconventional
+ * checkout is still downloaded and filed — with its classification and a null
+ * entry — instead of being refused; only the loader registration is withheld
+ * by the control layer (`market/not-loadable` on enable).
+ *
  * Confirmation model (mirrors the requestRemove/confirmRemove pattern):
  * - `previewInstall` reviews the remote manifest, reports the already-managed
  *   / overwrite state and mints a short-lived single-use confirmation token
@@ -16,8 +25,9 @@
  * - `install` refuses without that token (`market/confirm-required`), rejects
  *   wrong/expired tokens, re-checks the protection list, then runs the host
  *   install pipeline with `confirmed: true` (the host TrustGate stays as the
- *   backend safeguard) and syncs the newly registered (default-disabled)
- *   record into a loader row so listManaged reflects it immediately.
+ *   backend safeguard), persists the reviewed classification and syncs the
+ *   newly registered (default-disabled) record into a loader row so
+ *   listManaged reflects it immediately.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -26,18 +36,20 @@ import type {
   PluginInstallOutcome,
   PluginInstallReview,
   PluginInstallReviewAnalysis,
+  MarketInstallNote,
+  PluginMarketClassification,
   PluginMarketKey,
   PluginMarketRecord,
   PluginPreviewOutcome,
   RepositoryDetail,
 } from '../../types.ts'
+import type { PluginAnalysisDistribution } from '../market/analyze.ts'
 import type { MarketRepository } from '../market/index.ts'
 import { parseRepositorySlug, type GitHubRepoMeta } from '../market/github.ts'
 import { parsePluginKey, pluginKeyForGithubRef } from '../market/keys.ts'
 import { entryModuleName } from './entry-name.ts'
 import { REMOVE_CONFIRM_TTL_MS, MarketControlError, type ControlLogger } from './controller.ts'
 import type { ProtectionPolicy } from './protect.ts'
-import { refusalWireCode } from './analysis.ts'
 
 /** Search engine surface of the host GitHub client. */
 export interface SearchEnginePort {
@@ -86,11 +98,37 @@ export interface SourceInstallInput {
   readonly refKind?: 'branch' | 'tag'
   /** Optional tag/branch pin; the ref name of a v2 install when refKind is set. */
   readonly version: string | null
+  /**
+   * Classification hint reviewed by `previewInstall`. It never overrides the
+   * checkout: the host installer probes the real entry first and files a
+   * checkout carrying a runnable entry as `plugin` regardless of this value;
+   * the hint only narrows the tag of an entry-less checkout (`skills`, else
+   * `other`).
+   */
+  readonly classification?: PluginMarketClassification
 }
 
 /** Install engine surface of the host installer. */
 export interface InstallerPort {
-  install(input: SourceInstallInput): Promise<{ readonly record: PluginMarketRecord; readonly checkoutDir: string }>
+  install(input: SourceInstallInput): Promise<InstalledPluginFacts>
+}
+
+/**
+ * What the host installer reports after it inspected and filed the checkout.
+ * These are install-time facts (the entry probe wins over the review
+ * prediction), so they are what the caller surfaces back to the consumer.
+ */
+export interface InstalledPluginFacts {
+  readonly record: PluginMarketRecord
+  readonly checkoutDir: string
+  /** Classification the checkout was actually filed under. */
+  readonly classification: PluginMarketClassification
+  /** Runnable entry that was registered, or null when the checkout has none. */
+  readonly entry: string | null
+  /** Host note explaining a null entry (unreadable manifest / missing entry). */
+  readonly entryNote: string | null
+  /** Whether the dependency step (`pnpm install`) actually ran. */
+  readonly dependenciesInstalled: boolean
 }
 
 /** Everything the source operations need from its environment. */
@@ -113,40 +151,57 @@ export interface MarketSourceDeps {
    * Optional smart-install analysis engine. Present only when the market
    * Config configured `llm.provider`/`llm.model`; previewInstall then runs the
    * analysis for unconventional checkouts (previews whose manifest is
-   * unreadable/absent — no standard npm plugin entry evidence) and surfaces
-   * the refusal on the review, while install refuses those candidates up
-   * front. Without it the unconventional path rejects with
-   * `market/llm-unconfigured` and a model-config hint.
+   * unreadable/absent — no standard npm plugin entry evidence) and carries the
+   * resulting classification and rationale on the review. The candidate stays
+   * installable either way: without an engine, or when the analysis fails, the
+   * review falls back to the conservative `other` classification.
    */
   readonly analysis?: InstallAnalysisEngine
+  /**
+   * Optional entry probe the preview-side analysis runs over a reviewed
+   * checkout. The production preview only reads the remote manifest, so no
+   * probe exists there and `PluginInstallReview.buildRequired` stays absent;
+   * an assembly that can inspect the candidate (a checkout already on disk, or
+   * one read through the repository API) injects the probe here so a plugin
+   * whose entry has to be built first is reported as `buildRequired`.
+   */
+  readonly analysisEntryProbe?: (repository: string, relativeEntry: string) => boolean | Promise<boolean>
   /** Optional structured logger. */
   readonly logger?: ControlLogger
 }
 
 /**
  * One smart-install analysis of an unconventional candidate. The engine
- * classifies the checkout (skills/preset/tooling/other — or a plugin that is
- * only installable after a build) and reports a refusal verdict; a `plugin`
- * with a runnable entry yields `null` (no refusal, install proceeds).
+ * classifies the checkout into the persisted tag vocabulary
+ * (`plugin` | `skills` | `other`) and reports the entry it found (if any);
+ * `null` means the model judged the checkout an installable plugin without a
+ * classification of its own. Neither answer blocks the install.
  */
 export interface InstallAnalysisEngine {
   /**
    * Classify one candidate whose remote preview showed no readable manifest.
-   * @param request - the candidate slug plus the preview outcome that marked
-   *   it unconventional.
-   * @returns the refusal (installable: false) when the model judged the
-   *   checkout not directly installable, or null when it is an installable
-   *   plugin.
+   * @param request - the candidate slug, the preview outcome that marked it
+   *   unconventional, and the optional entry probe the engine should consult
+   *   (see `MarketSourceDeps.analysisEntryProbe`; without one the engine
+   *   reports no `buildRequired`).
+   * @returns the classification distribution of the checkout, or null when
+   *   the model judged it a standard installable plugin.
    * @throws MarketError `market/llm-unconfigured` when the analysis engine
    *   exists but no llm provider/model is configured; `market/llm-failed` /
-   *   `market/llm-bad-output` on model failures. The source layer keeps
-   *   `market/llm-unconfigured` as-is and normalizes every other failure to
-   *   the stable retryable `market/llm-failed` before it reaches the wire.
+   *   `market/llm-bad-output` on model failures. The source layer treats every
+   *   failure as "no classification available" and reviews the candidate with
+   *   the conservative `other` tag (never a blocked install).
    */
   analyze(request: {
     readonly repository: string
     readonly preview: PluginPreviewOutcome
-  }): Promise<PluginInstallReviewAnalysis | null>
+    /**
+     * Answers whether the named checkout-relative entry exists. The engine
+     * forwards it to the analyzer, so a plugin whose entry is not present yet
+     * resolves to `other` + `buildRequired` instead of a loadable `plugin`.
+     */
+    readonly hasFile?: (relativeEntry: string) => boolean | Promise<boolean>
+  }): Promise<PluginAnalysisDistribution | null>
 }
 
 /** One pending install confirmation, keyed by the derived install key. */
@@ -154,8 +209,78 @@ interface PendingInstall {
   readonly token: string
   readonly expiresAt: number
   readonly version: string | null
-  /** Smart-install refusal recorded for this candidate, when it was refused. */
+  /**
+   * Classification the review predicted for this checkout. It is handed to the
+   * installer as a hint only: the host entry probe decides the tag actually
+   * filed.
+   */
+  readonly classification: PluginMarketClassification
+  /** Review note rendered on the review (absence = a runnable entry is expected). */
+  readonly note: MarketInstallNote | null
+  /** Legacy analyzer verdict rendered on the review (non-plugin only). */
   readonly analysis?: PluginInstallReviewAnalysis
+}
+
+/**
+ * The classification fields one review carries: the predicted tag, the
+ * localizable note explaining a missing runnable entry, and the build-required
+ * marker of a plugin whose entry is not built yet.
+ */
+interface ReviewClassification {
+  readonly classification: PluginMarketClassification
+  readonly note: MarketInstallNote | null
+  readonly buildRequired: boolean
+}
+
+/**
+ * Outcome of one smart-install analysis attempt: the distribution the model
+ * answered with (`null` = the model judged the checkout a standard installable
+ * plugin), or `null` when no usable analysis was available at all — no engine
+ * is configured, or the analysis failed. The two null cases are deliberately
+ * distinct: a model answer of "an ordinary plugin" is a `plugin` prediction,
+ * while an unavailable analysis degrades to the conservative `other` one.
+ */
+type CandidateAnalysis =
+  | { readonly available: true; readonly distribution: PluginAnalysisDistribution | null }
+  | { readonly available: false }
+
+/**
+ * Note of a review whose checkout could not be classified by the analyzer. It
+ * is intentionally free of Host-authored prose: the consumer renders the copy
+ * for `kind` from its own locale dictionary (see {@link MarketInstallNote}).
+ */
+export const ANALYSIS_UNAVAILABLE_NOTE: MarketInstallNote = { kind: 'analysis-unavailable' }
+
+/**
+ * Legacy `entryNote` of one review note: the engine-supplied detail only. A
+ * note without detail (the "analysis unavailable" case, whose copy the consumer
+ * localizes from `note.kind`) yields `undefined`, so the Host never ships
+ * user-facing prose through this field.
+ */
+function legacyEntryNoteOf(note: MarketInstallNote | null): string | undefined {
+  if (note === null) return undefined
+  const text = note.text?.trim()
+  return text === undefined || text.length === 0 ? undefined : text
+}
+
+/**
+ * Render the analyzer distribution as the review's legacy `analysis` field
+ * (the richer analyzer vocabulary consumers already render). Only a real
+ * non-plugin verdict carries it: a plugin that merely needs its build step is
+ * part of the classification/note contract instead, and an unavailable
+ * analysis has no verdict at all.
+ */
+function reviewAnalysisOf(analysis: CandidateAnalysis): PluginInstallReviewAnalysis | undefined {
+  if (!analysis.available || analysis.distribution === null) return undefined
+  const distribution = analysis.distribution
+  if (distribution.classification === 'plugin' && !distribution.buildRequired) return undefined
+  return {
+    installable: false,
+    // Preset/tooling fold into the persisted `other` tag; the review keeps the
+    // folded label so the UI never renders a kind the tag vocabulary lacks.
+    kind: distribution.classification,
+    reason: distribution.reason,
+  }
 }
 
 /** Branch/tag discriminator of one v2 install tuple. */
@@ -232,23 +357,6 @@ function errorCodeOf(error: unknown): string | undefined {
 }
 
 /**
- * Friendly build-first guidance appended to `install/entry-missing` failures:
- * the resolved entry is absent because the repository may ship as source and
- * need its documented build step before the plugin entry becomes loadable.
- */
-export const ENTRY_MISSING_BUILD_HINT =
-  ' If the repository ships as source, run its documented build step to generate the plugin entry, then retry the install.'
-
-/** Rethrow an `install/entry-missing` failure with the build-first hint. */
-function enrichEntryMissingError(error: unknown): never {
-  if (errorCodeOf(error) === 'install/entry-missing') {
-    const message = error instanceof Error ? error.message : String(error)
-    throw new MarketControlError('install/entry-missing', `${message}${ENTRY_MISSING_BUILD_HINT}`)
-  }
-  throw error
-}
-
-/**
  * The market's source operations. Never throws for a healthy idle market with
  * a message a caller can show; all failures carry stable wire codes.
  */
@@ -319,24 +427,19 @@ export class MarketSourceOperations {
    * the `(owner, repo, ref-kind, ref)` tuple — a branch and a tag of the same
    * name review as two independent plugins.
    *
-   * Smart-install analysis: when the remote preview shows an unconventional
-   * candidate (no readable package.json on the probed branches — no standard
-   * npm plugin entry evidence) the review runs the configured analysis engine
-   * first and carries the refusal verdict (`analysis`) when the model judged
-   * the checkout not installable (skills/preset/tooling/other, or a plugin
-   * that needs a build first). Standard npm plugins (readable manifest) and
-   * degraded previews caused by transport failures never run the model. When
-   * the market Config configured no llm endpoint, an unconventional candidate
-   * is refused outright with `market/llm-unconfigured` and a model-config
-   * hint, so the two-step protocol never mints a token for a checkout the
-   * market cannot even classify.
-   *
-   * Analysis failure is never silently allowed: if the analysis of an
-   * unconventional candidate itself fails (LLM transport/timeout jitter,
-   * unparsable output, engine bugs) the preview rejects with the stable
-   * retryable `market/llm-failed` and NO confirmation token is minted — the
-   * candidate stays unclassified and cannot be installed, so the UI can simply
-   * retry the review.
+   * Classification (never a refusal): the review carries the tag the install is
+   * PREDICTED to file — `plugin` for a standard npm checkout whose remote
+   * manifest was readable, the analyzer's `skills`/`other` verdict for an
+   * unconventional candidate (no readable package.json on the probed
+   * branches), and the conservative `other` when no analysis engine is wired or
+   * the analysis failed. The prediction is a hint: the download inspects the
+   * real checkout and files a checkout with a runnable entry as `plugin`
+   * whatever the review said, and the authoritative tags come back on the
+   * install outcome. `note` is the structured, localizable explanation of a
+   * missing runnable entry (its legacy `entryNote` carries only engine-supplied
+   * detail) and `buildRequired` marks the plugin that needs its build step
+   * first; both let the UI warn while still offering the download. The review
+   * mints its confirmation token in every case.
    */
   async previewInstall(
     repositoryRaw: string,
@@ -352,9 +455,11 @@ export class MarketSourceOperations {
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
     const preview = await this.deps.previewEngine.preview(slug)
-    const analysis = MarketSourceOperations.isUnconventionalPreview(preview)
+    const analysis: CandidateAnalysis = MarketSourceOperations.isUnconventionalPreview(preview)
       ? await this.analyzeCandidate(slug, preview)
-      : undefined
+      : { available: true, distribution: null }
+    const review = MarketSourceOperations.reviewClassificationFrom(preview, analysis)
+    const analysisVerdict = reviewAnalysisOf(analysis)
     const token = randomBytes(16).toString('hex')
     const now = (this.deps.now ?? (() => new Date()))()
     const ttl = this.deps.confirmTtlMs ?? REMOVE_CONFIRM_TTL_MS
@@ -362,8 +467,11 @@ export class MarketSourceOperations {
       token,
       expiresAt: now.getTime() + ttl,
       version: ref,
-      ...(analysis === undefined ? {} : { analysis }),
+      classification: review.classification,
+      note: review.note,
+      ...(analysisVerdict === undefined ? {} : { analysis: analysisVerdict }),
     })
+    const entryNote = legacyEntryNoteOf(review.note)
     return {
       repository: slug,
       key,
@@ -373,8 +481,12 @@ export class MarketSourceOperations {
       existing,
       confirmToken: token,
       expiresAt: new Date(now.getTime() + ttl).toISOString(),
+      classification: review.classification,
+      ...(review.buildRequired ? { buildRequired: true } : {}),
+      ...(entryNote === undefined ? {} : { entryNote }),
+      ...(review.note === null ? {} : { note: review.note }),
       ...(kind === undefined ? {} : { refKind: kind }),
-      ...(analysis === undefined ? {} : { analysis }),
+      ...(analysisVerdict === undefined ? {} : { analysis: analysisVerdict }),
     }
   }
 
@@ -383,6 +495,12 @@ export class MarketSourceOperations {
    * refKind/version pair must match the reviewed tuple: tokens are bound to
    * the derived key, so a branch and a tag of the same name each need (and
    * consume) their own confirmation.
+   *
+   * The classification reviewed by {@link previewInstall} rides into the host
+   * installer, so a checkout the review predicted as a non-plugin is filed
+   * with that tag and a null entry instead of being refused — the download
+   * always runs, and the control layer withholds only the loader registration
+   * (`market/not-loadable` on enable).
    */
   async install(
     repositoryRaw: string,
@@ -421,44 +539,30 @@ export class MarketSourceOperations {
     }
     this.pending.delete(key)
 
-    // A smart-install refusal recorded at review time makes the install
-    // non-runnable: reject with the unsupported code and the model's reason
-    // before the host pipeline runs (no record/checkout is produced).
-    if (pending.analysis !== undefined) {
-      throw new MarketControlError(
-        refusalWireCode(pending.analysis.kind),
-        pending.analysis.reason,
-        { key },
-      )
-    }
-
     const existing = await repository.records.get(key)
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
     const installer = this.deps.installer(repository)
-    let outcome: { readonly record: PluginMarketRecord; readonly checkoutDir: string }
-    try {
-      outcome = await installer.install({
-        repositoryRoot: repository.root,
-        key,
-        repository: slug,
-        ...(kind === undefined ? {} : { refKind: kind }),
-        version: ref ?? pending.version ?? null,
-      })
-    } catch (error) {
-      // The host reports a missing runnable entry as install/entry-missing
-      // (e.g. an unconventional checkout the model judged a plugin, or a
-      // manifest that resolved no main and no conventional index.js exists).
-      // Surface the same stable code with a build-first hint so the user knows
-      // the repository may ship as source and needs its documented build.
-      throw enrichEntryMissingError(error)
-    }
+    const outcome = await installer.install({
+      repositoryRoot: repository.root,
+      key,
+      repository: slug,
+      ...(kind === undefined ? {} : { refKind: kind }),
+      version: ref ?? pending.version ?? null,
+      classification: pending.classification,
+    })
     await this.deps.syncRecord(outcome.record)
+    // The install-time facts (the entry probe wins over the review prediction)
+    // are surfaced back verbatim, so a consumer sees what was really filed.
     return {
       key,
       overwritten: existing !== null,
       record: outcome.record,
       checkoutDir: outcome.checkoutDir,
+      classification: outcome.classification,
+      entry: outcome.entry,
+      entryNote: outcome.entryNote,
+      dependenciesInstalled: outcome.dependenciesInstalled,
     }
   }
 
@@ -477,10 +581,10 @@ export class MarketSourceOperations {
    * Whether a preview outcome marks its candidate as unconventional — the
    * checkout has no readable package.json on the probed branches (missing or
    * invalid), so no standard npm plugin entry can be resolved remotely and the
-   * checkout needs model classification. Transport failures (network /
-   * rate-limit / auth) are not unconventional: the manifest may simply be
-   * temporarily unreadable and the review keeps the degraded-but-installable
-   * semantics.
+   * checkout is classified by the analyzer instead (or filed as `other` when no
+   * analysis is available). Transport failures (network / rate-limit / auth)
+   * are not unconventional: the manifest may simply be temporarily unreadable
+   * and the review keeps the degraded-but-installable semantics.
    */
   private static isUnconventionalPreview(preview: PluginPreviewOutcome): boolean {
     return preview.status === 'degraded'
@@ -488,47 +592,88 @@ export class MarketSourceOperations {
   }
 
   /**
-   * Run the smart-install analysis of an unconventional candidate and map its
-   * verdict onto the review analysis field. A missing analysis engine means
-   * the market Config configured no llm endpoint — the candidate is refused
-   * with `market/llm-unconfigured` and a model-config hint (see
-   * {@link InstallAnalysisEngine}).
+   * Map the preview (plus the analyzer outcome, when one ran) onto the
+   * review's classification fields. A preview that read the remote manifest
+   * normally (`ready`) predicts a loadable `plugin`; an unconventional preview
+   * (see {@link isUnconventionalPreview}) is predicted from the analyzer — an
+   * available answer decides, a model answer of "an ordinary plugin" predicts
+   * `plugin` — and falls back to the conservative `other` tag with
+   * {@link ANALYSIS_UNAVAILABLE_NOTE} when no analysis was available at all.
+   * Nothing here refuses: everything is surfaced as classification + note, and
+   * the entry probe of the real download stays authoritative.
+   */
+  private static reviewClassificationFrom(
+    preview: PluginPreviewOutcome,
+    analysis: CandidateAnalysis,
+  ): ReviewClassification {
+    if (!MarketSourceOperations.isUnconventionalPreview(preview)) {
+      return { classification: 'plugin', note: null, buildRequired: false }
+    }
+    const distribution = analysis.available ? analysis.distribution : null
+    if (distribution === null) {
+      if (analysis.available) {
+        // The model answered "a standard plugin": no classification of its own.
+        return { classification: 'plugin', note: null, buildRequired: false }
+      }
+      return { classification: 'other', note: ANALYSIS_UNAVAILABLE_NOTE, buildRequired: false }
+    }
+    if (distribution.classification === 'plugin' && distribution.entry !== null) {
+      return { classification: 'plugin', note: null, buildRequired: false }
+    }
+    // A `plugin` judgement without a runnable entry (a checkout that needs its
+    // build step first) folds into `other`, exactly as the record store does.
+    return {
+      classification: distribution.buildRequired ? 'other' : distribution.classification,
+      note: {
+        kind: distribution.buildRequired ? 'entry-missing' : 'classified',
+        text: distribution.reason,
+        ...(distribution.entryHint === null ? {} : { entry: distribution.entryHint }),
+      },
+      buildRequired: distribution.buildRequired,
+    }
+  }
+
+  /**
+   * Run the smart-install analysis of an unconventional candidate and report
+   * whether one was available plus its distribution (see
+   * {@link CandidateAnalysis}).
    *
-   * Failure semantics: an analysis that cannot run NEVER silently allows the
-   * install. `market/llm-unconfigured` propagates as-is (a retry cannot fix a
-   * missing model endpoint); every other failure — LLM transport/timeout
-   * jitter, unparsable output, engine bugs — is normalized to the stable
-   * retryable `market/llm-failed`, and because this throws before the review
-   * token is minted, the candidate cannot be installed until a review
-   * succeeds.
+   * Failure semantics (nothing blocks the review): a missing analysis engine
+   * (the market Config configured no llm endpoint) and every analyzer failure
+   * — unconfigured endpoint, LLM transport/timeout jitter, unparsable output,
+   * an I/O failure while probing the entry, engine bugs — answer
+   * `{ available: false }`, so the review falls back to the conservative
+   * `other` classification with {@link ANALYSIS_UNAVAILABLE_NOTE}. The failure
+   * is logged for operators and the candidate stays installable (filed as a
+   * non-plugin checkout without a loader row).
    */
   private async analyzeCandidate(
     slug: string,
     preview: PluginPreviewOutcome,
-  ): Promise<PluginInstallReviewAnalysis | undefined> {
+  ): Promise<CandidateAnalysis> {
     const engine = this.deps.analysis
     if (engine === undefined) {
-      throw new MarketControlError(
-        'market/llm-unconfigured',
-        `"${slug}" does not look like a standard npm plugin, and the smart-install analyzer is not configured. Set Config.llm.provider and Config.llm.model on plugin-market-host to classify and install non-standard checkouts.`,
+      this.deps.logger?.warn(
+        `Smart-install analysis unavailable for "${slug}": no analyzer is configured (set Config.llm.provider and Config.llm.model on plugin-market-host). The checkout will be filed as a non-plugin.`,
       )
+      return { available: false }
     }
-    let refusal: PluginInstallReviewAnalysis | null
+    const probe = this.deps.analysisEntryProbe
     try {
-      refusal = await engine.analyze({ repository: slug, preview })
+      return {
+        available: true,
+        distribution: await engine.analyze({
+          repository: slug,
+          preview,
+          ...(probe === undefined ? {} : { hasFile: (entry: string) => probe(slug, entry) }),
+        }),
+      }
     } catch (error) {
-      // See the failure-semantics note above: only the configuration case
-      // keeps its own code; everything else is one stable, retryable failure.
-      if (errorCodeOf(error) === 'market/llm-unconfigured') throw error
-      throw new MarketControlError(
-        'market/llm-failed',
-        `The smart-install analysis of "${slug}" failed; the checkout was not classified and cannot be installed. Retry the review, or check the configured LLM provider/model.`,
-        {},
-        { cause: error },
+      this.deps.logger?.warn(
+        `Smart-install analysis of "${slug}" failed (${errorCodeOf(error) ?? 'unexpected'}): ${error instanceof Error ? error.message : String(error)}. The checkout will be filed as a non-plugin.`,
       )
+      return { available: false }
     }
-    // null → the model judged the checkout an installable plugin: no refusal.
-    return refusal === null ? undefined : refusal
   }
 
   /** Overwriting or deleting a protected/self entry is never allowed. */

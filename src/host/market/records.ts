@@ -1,9 +1,12 @@
-import type {
-  PluginMarketKey,
-  PluginMarketRecord,
-  PluginMarketRecordsFileV1,
-  PluginMarketSource,
-  PluginMarketTrustState,
+import {
+  DEFAULT_PLUGIN_MARKET_CLASSIFICATION,
+  isPluginMarketClassification,
+  type PluginMarketClassification,
+  type PluginMarketKey,
+  type PluginMarketRecord,
+  type PluginMarketRecordsFileV1,
+  type PluginMarketSource,
+  type PluginMarketTrustState,
 } from '../../types.ts'
 import { MarketError } from './errors.ts'
 import { errorCode, NodeFs, type FsLike } from './fs.ts'
@@ -31,10 +34,20 @@ export interface NewPluginRecord {
   readonly localDirName: string
   /**
    * Plugin entry file relative to `localDirName` (optional). Records created
-   * without it default to null: the control service then falls back to the
-   * conventional `index.js` entry.
+   * without it default to null: either the control service falls back to the
+   * conventional `index.js` entry (classification `plugin`) or the checkout is
+   * deliberately filed without a runnable entry (classification `skills`/
+   * `other`).
    */
   readonly entry?: string
+  /**
+   * Classification tag of the checkout. Omitting it applies a cross-consistent
+   * default: `'plugin'` when an `entry` is supplied (the historical meaning of
+   * "a record we installed for its entry"), otherwise `'other'` — an entry-less
+   * record is never written as `plugin`. Passing `'plugin'` together with no
+   * entry is rejected (`record/invalid`).
+   */
+  readonly classification?: PluginMarketClassification
 }
 
 /** Options for {@link PluginRecordStore}. */
@@ -85,10 +98,13 @@ export class PluginRecordStore {
   /**
    * Add a plugin record. Activation defaults are enforced here: `enabled` is
    * always false and `trusted` always `'untrusted'` — downloading never
-   * activates or trusts a plugin. Input fields are validated synchronously
-   * before anything touches the file (`record/key-invalid` for the key,
-   * `record/invalid` for `localDirName`/`entry`), so a bad value can never be
-   * persisted and later misreport the whole file as `record/corrupt`.
+   * activates or trusts a plugin. The classification tag is always written
+   * (defaulting to `'plugin'` with an entry, `'other'` without one, see
+   * {@link NewPluginRecord.classification}). Input fields are validated
+   * synchronously before anything touches the file (`record/key-invalid` for
+   * the key, `record/invalid` for `localDirName`/`entry`/`classification` and
+   * for an entry-less `plugin`), so a bad value can never be persisted and
+   * later misreport the whole file as `record/corrupt`.
    */
   async add(input: NewPluginRecord): Promise<PluginMarketRecord> {
     return this.exclusive(async () => {
@@ -106,9 +122,11 @@ export class PluginRecordStore {
   /**
    * Add-or-replace one plugin record (used by the install pipeline for
    * same-key overwrite updates). Like {@link PluginRecordStore.add} the record
-   * is created with `enabled: false`; `trusted` stays `'untrusted'` unless a
-   * TrustGate-confirmed install passes `{ trusted: true }`, which stamps
-   * `trusted` and `trustedAt` in the same atomic write.
+   * is created with `enabled: false` and an explicit classification tag;
+   * `trusted` stays `'untrusted'` unless a TrustGate-confirmed install passes
+   * `{ trusted: true }`, which stamps `trusted` and `trustedAt` in the same
+   * atomic write. The whole record is replaced, so the classification of the
+   * new checkout wins over the superseded one.
    */
   async register(input: NewPluginRecord, trust?: { readonly trusted: true }): Promise<PluginMarketRecord> {
     return this.exclusive(async () => {
@@ -267,13 +285,14 @@ function validateRecord(value: unknown, filePath: string): PluginMarketRecord {
   const entry = value.entry === undefined || value.entry === null
     ? null
     : expectEntry(value.entry, filePath, key)
+  const classification = expectClassification(value.classification, filePath, key)
   const installedAt = expectIsoDate(value.installedAt, filePath, `record "${key}" "installedAt"`)
   const enabled = expectBoolean(value.enabled, filePath, `record "${key}" "enabled"`)
   const trusted = expectTrustState(value.trusted, filePath, key)
   const trustedAt = value.trustedAt === null
     ? null
     : expectIsoDate(value.trustedAt, filePath, `record "${key}" "trustedAt"`)
-  return { key, source, localDirName, entry, installedAt, enabled, trusted, trustedAt }
+  return { key, source, localDirName, entry, classification, installedAt, enabled, trusted, trustedAt }
 }
 
 function expectValidKey(value: unknown, filePath: string, what: string): PluginMarketKey {
@@ -328,6 +347,29 @@ function expectEntry(value: unknown, filePath: string, key: PluginMarketKey): st
   return value
 }
 
+/**
+ * Classification tag of one persisted record. A missing tag (legacy pre-tag
+ * files, and the null JSON representation of an absent field) reads as the
+ * backward-compatible default `'plugin'`; anything present must be exactly one
+ * of the three persisted labels — an unknown value is corruption, never a
+ * silent fallback (the tag decides whether the checkout is loader-registrable).
+ *
+ * Cross-consistency with `entry` is intentionally NOT enforced here: records
+ * written before the tag existed carry `classification` absent/`plugin` even
+ * with a null entry (the store only started resolving entries with the tag),
+ * so enforcing it would report healthy historical files as corrupt. The
+ * contradiction is rejected at the write boundary instead (assertValidInput).
+ */
+function expectClassification(
+  value: unknown,
+  filePath: string,
+  key: PluginMarketKey,
+): PluginMarketClassification {
+  if (value === undefined || value === null) return DEFAULT_PLUGIN_MARKET_CLASSIFICATION
+  if (isPluginMarketClassification(value)) return value
+  corrupt(filePath, `record "${key}" has an invalid "classification" ${JSON.stringify(value)} (expected "plugin", "skills" or "other")`)
+}
+
 function expectIsoDate(value: unknown, filePath: string, what: string): string {
   if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
     corrupt(filePath, `${what} is not an ISO date string`)
@@ -371,6 +413,27 @@ function assertValidInput(input: NewPluginRecord, filePath: string): void {
       { path: filePath },
     )
   }
+  if (input.classification !== undefined && !isPluginMarketClassification(input.classification)) {
+    throw new MarketError(
+      'record/invalid',
+      `classification ${JSON.stringify(input.classification)} is not a valid classification tag ("plugin", "skills" or "other").`,
+      { path: filePath },
+    )
+  }
+  // Write-boundary cross-consistency: a checkout classified `plugin` is by
+  // definition one whose runnable entry was resolved, so an entry-less
+  // `plugin` record is a contradiction. Loading deliberately does NOT enforce
+  // this (see expectClassification): checkouts installed before the tag
+  // existed were always written as `plugin`, entry or not, and those records
+  // must keep loading. New contradictions are rejected before anything is
+  // written.
+  if (input.classification === 'plugin' && input.entry === undefined) {
+    throw new MarketError(
+      'record/invalid',
+      'a record classified "plugin" must carry its runnable "entry" — register an entry-less checkout as "skills" or "other".',
+      { path: filePath },
+    )
+  }
 }
 
 /**
@@ -410,6 +473,13 @@ function buildRecord(input: NewPluginRecord, trust?: { readonly trusted: true })
     source: input.source,
     localDirName: input.localDirName,
     entry: input.entry === undefined ? null : input.entry,
+    // Always written: a record without a tag would be ambiguous for consumers.
+    // The default keeps the historical meaning ("a record we installed for its
+    // entry") and stays cross-consistent with the entry: an entry-less record
+    // cannot be `plugin`. Explicit tags are already validated by
+    // assertValidInput, so `input.classification` here is consistent by then.
+    classification: input.classification
+      ?? (input.entry === undefined ? 'other' : DEFAULT_PLUGIN_MARKET_CLASSIFICATION),
     installedAt: now,
     enabled: false,
     trusted: confirmed ? 'trusted' : 'untrusted',

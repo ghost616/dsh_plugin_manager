@@ -10,9 +10,11 @@
  *   for exactly one JSON object (no fences, no preamble);
  * - {@link parseAnalysisOutput} strips fences, parses and validates every
  *   field (bad output → `market/llm-bad-output`);
- * - {@link resolveAnalysisVerdict} maps the model kind onto the install
- *   verdict (`plugin` with a ready entry, or a `market/unsupported-*`
- *   rejection carrying a user-facing reason);
+ * - {@link resolveAnalysisVerdict} folds the model kind into the persisted
+ *   classification tag (`plugin` / `skills` / `other`) instead of refusing:
+ *   filing is never blocked by an unconventional verdict, the model rationale
+ *   is kept on the result, and a plugin whose entry is not built yet becomes
+ *   `other` with a null entry;
  * - {@link InstallAnalyzer} wires those pieces to an injectable completion
  *   backend whose real implementation lives in the control/assembly layer
  *   (ctx.llm stream + block assembler; finish errors → `market/llm-failed`).
@@ -27,6 +29,7 @@ import { NodeFs, type FsLike } from './fs.ts'
 import { DEFAULT_CHECKOUT_ENTRY } from './install.ts'
 import { normalizeCheckoutEntry } from './paths.ts'
 import { requireMarketLlm } from './config.ts'
+import { type PluginMarketClassification } from '../../types.ts'
 
 /** Kinds a candidate checkout can be classified into by the analysis model. */
 export type CheckoutKind = 'plugin' | 'skills' | 'preset' | 'tooling' | 'other'
@@ -375,18 +378,37 @@ function tryJson(text: string): unknown | undefined {
 }
 
 /* ------------------------------------------------------------------------ */
-/* Verdict mapping                                                          */
+/* Classification mapping                                                   */
 /* ------------------------------------------------------------------------ */
 
-/** A checkout classified as an installable dsh plugin. */
-export interface PluginAnalysisVerdict {
-  readonly verdict: 'plugin'
-  /** Entry file the plugin host should load, relative to the checkout root. */
-  readonly entry: string
-  /** The model-named entry hint (same as {@link entry} when one was given). */
+/**
+ * Distribution of one validated model answer: the persisted classification tag
+ * plus the rationale and the entry the caller should use.
+ *
+ * This is the *analysis* result, not an installability verdict — nothing here
+ * refuses a checkout. Callers file the checkout with the returned
+ * {@link PluginAnalysisDistribution.classification} (`plugin` = a runnable
+ * entry is available, otherwise `skills`/`other`) and keep the checkout on disk
+ * either way.
+ */
+export interface PluginAnalysisDistribution {
+  /** Classification tag to record for this checkout. */
+  readonly classification: PluginMarketClassification
+  /**
+   * Entry file the plugin host should load, relative to the checkout root, or
+   * null when the checkout has no runnable entry (classification `other`).
+   */
+  readonly entry: string | null
+  /** The model-named entry hint (equal to {@link entry} when one was used). */
   readonly entryHint: string | null
-  /** Model rationale carried to the caller/UI. */
+  /** Model rationale carried to the caller/UI and the record/review. */
   readonly reason: string
+  /**
+   * True when the model judged the checkout a dsh plugin but no runnable entry
+   * is available yet (it needs a build step first) — the checkout is filed as
+   * `other`, and this flag lets callers explain why.
+   */
+  readonly buildRequired: boolean
 }
 
 /** Options for {@link resolveAnalysisVerdict}. */
@@ -394,46 +416,89 @@ export interface ResolveAnalysisOptions {
   /**
    * Whether the resolved entry file is present in the checkout. Omit it (or
    * pass true) when existence cannot be verified — the authoritative
-   * post-install entry check still applies later. `false` turns a plugin
-   * verdict into `market/unsupported-build`.
+   * post-install entry check still applies later in the install pipeline.
+   * `false` turns a plugin answer into the `other` classification with a null
+   * entry (never a refusal).
    */
   readonly entryPresent?: boolean
 }
 
 /**
- * Map a validated model answer onto the install verdict.
+ * Fold a validated model answer into the persisted classification tag.
  *
- * @throws {MarketError} `market/unsupported-skills` / `market/unsupported-preset`
- * / `market/unsupported-other` for non-plugin kinds (message carries the
- * model's user-facing reason), and `market/unsupported-build` when a plugin's
- * entry file is not present (message explains the build-first requirement).
+ * - a `plugin` answer whose entry is (or may be) present → `plugin` + entry;
+ * - a `plugin` answer whose entry is absent (needs a build first) → `other`,
+ *   `entry: null`, `buildRequired: true`;
+ * - `skills` → `skills` (`entry: null`);
+ * - `preset` / `tooling` / `other` → `other` (`entry: null`).
+ *
+ * The model rationale is always preserved on the result. This function never
+ * throws — classifying a checkout is not a gate.
  */
-export function resolveAnalysisVerdict(
+export function resolveAnalysisDistribution(
   raw: RawCheckoutAnalysis,
   options: ResolveAnalysisOptions = {},
-): PluginAnalysisVerdict {
-  if (raw.kind === 'skills') throw rejection('market/unsupported-skills', raw.reason)
-  if (raw.kind === 'preset') throw rejection('market/unsupported-preset', raw.reason)
+): PluginAnalysisDistribution {
   if (raw.kind === 'plugin') {
     const entry = raw.entryHint ?? DEFAULT_CHECKOUT_ENTRY
     if (options.entryPresent === false) {
-      const note = raw.reason.length > 0 ? ` Analysis: ${raw.reason}` : ''
-      throw new MarketError(
-        'market/unsupported-build',
-        `This checkout looks like a dsh plugin, but its entry "${entry}" is not present — build it first (e.g. run the package "build" script), then retry.${note}`,
-      )
+      return {
+        classification: 'other',
+        entry: null,
+        entryHint: raw.entryHint,
+        reason: buildRequiredReason(raw.reason, entry),
+        buildRequired: true,
+      }
     }
-    return { verdict: 'plugin', entry, entryHint: raw.entryHint, reason: raw.reason }
+    return { classification: 'plugin', entry, entryHint: raw.entryHint, reason: raw.reason, buildRequired: false }
   }
-  // tooling and other share one rejection: neither yields a runnable plugin.
-  throw rejection('market/unsupported-other', raw.reason)
+  return {
+    classification: raw.kind === 'skills' ? 'skills' : 'other',
+    entry: null,
+    entryHint: raw.entryHint,
+    reason: raw.reason,
+    buildRequired: false,
+  }
 }
 
-function rejection(
-  code: 'market/unsupported-skills' | 'market/unsupported-preset' | 'market/unsupported-other',
-  reason: string,
-): MarketError {
-  return reason.length > 0 ? new MarketError(code, reason) : marketError(code)
+/**
+ * Historical name of {@link resolveAnalysisDistribution}, kept as an alias so
+ * existing imports keep working while the vocabulary moves from "verdict" to
+ * "classification".
+ */
+export const resolveAnalysisVerdict = resolveAnalysisDistribution
+
+/**
+ * Replace a model rationale with the build-first explanation while keeping the
+ * model's own wording attached (it is often the only hint about which entry
+ * the checkout is expected to produce).
+ */
+function buildRequiredReason(reason: string, entry: string): string {
+  const note = reason.length > 0 ? ` Analysis: ${reason}` : ''
+  return `No runnable entry "${entry}" is present in the checkout yet; it needs a build step first.${note}`
+}
+
+/**
+ * Run the optional checkout file probe for one planned entry: `undefined` when
+ * no probe is injected (existence unknown), otherwise the probe's answer.
+ * Native probe failures are normalized to `market/io` with the entry as the
+ * error path, so no raw filesystem error crosses the wire.
+ */
+export async function probeCheckoutEntry(
+  hasFile: ((relativeEntryPath: string) => boolean | Promise<boolean>) | undefined,
+  entry: string,
+): Promise<boolean | undefined> {
+  if (hasFile === undefined) return undefined
+  try {
+    return await hasFile(entry)
+  } catch (error) {
+    if (error instanceof MarketError) throw error
+    throw new MarketError(
+      'market/io',
+      'Could not probe the plugin entry inside the checkout.',
+      { path: entry, cause: error },
+    )
+  }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -464,31 +529,38 @@ export interface InstallAnalyzerOptions {
   /** LLM model id forwarded to the completion (from `Config.llm`). */
   readonly model?: string
   /**
-   * Optional checkout file probe used to refuse plugin checkouts whose entry
-   * is not yet present (assembly passes a filesystem-backed probe over the
-   * analyzed checkout). Native failures thrown by the probe are normalized to
-   * `market/io` (the entry path becomes the error path).
+   * Optional checkout file probe used to tell a runnable plugin (entry present
+   * → classification `plugin`) from a plugin that still needs a build (entry
+   * absent → classification `other` with a null entry). The assembly passes a
+   * filesystem-backed probe over the analyzed checkout. Native failures thrown
+   * by the probe are normalized to `market/io` (the entry path becomes the
+   * error path).
    */
   readonly hasFile?: (relativeEntryPath: string) => boolean | Promise<boolean>
 }
 
 /**
  * The smart-install analyzer: builds the prompt from a checkout snapshot,
- * calls the injected completion, validates the answer and maps it to a plugin
- * verdict or a `market/unsupported-*` rejection.
+ * calls the injected completion, validates the answer and folds it into the
+ * persisted classification tag (see {@link resolveAnalysisVerdict}).
+ *
+ * The analyzer never refuses a checkout: an analysis that cannot run throws
+ * (see below) and the *caller* falls back to `other`, so an unavailable model
+ * or a broken answer can never block filing a checkout.
  */
 export class InstallAnalyzer {
   constructor(private readonly options: InstallAnalyzerOptions) {}
 
   /**
    * Analyze one checkout snapshot.
+   * @returns the classification distribution (never a refusal; a checkout the
+   * model judged a plugin without a present entry resolves to `other`).
    * @throws {MarketError} `market/llm-unconfigured` when no provider/model is
    * configured; `market/llm-failed` on completion failure;
-   * `market/llm-bad-output` on unparsable/invalid output;
-   * `market/io` when the entry probe fails at the filesystem level;
-   * `market/unsupported-*` for non-installable checkouts.
+   * `market/llm-bad-output` on unparsable/invalid output; `market/io` when the
+   * entry probe fails at the filesystem level.
    */
-  async analyze(snapshot: CheckoutSnapshot): Promise<PluginAnalysisVerdict> {
+  async analyze(snapshot: CheckoutSnapshot): Promise<PluginAnalysisDistribution> {
     const endpoint = requireMarketLlm(this.options.provider, this.options.model)
     const prompt = buildAnalyzePrompt(snapshot)
     let text: string
@@ -508,23 +580,10 @@ export class InstallAnalyzer {
       )
     }
     const raw = parseAnalysisOutput(text)
-    if (raw.kind === 'plugin') {
-      const entry = raw.entryHint ?? DEFAULT_CHECKOUT_ENTRY
-      let entryPresent: boolean | undefined
-      if (this.options.hasFile !== undefined) {
-        try {
-          entryPresent = await this.options.hasFile(entry)
-        } catch (error) {
-          if (error instanceof MarketError) throw error
-          throw new MarketError(
-            'market/io',
-            'Could not probe the plugin entry inside the checkout.',
-            { path: entry, cause: error },
-          )
-        }
-      }
-      return resolveAnalysisVerdict(raw, entryPresent === undefined ? {} : { entryPresent })
-    }
-    return resolveAnalysisVerdict(raw)
+    const entry = raw.entryHint ?? DEFAULT_CHECKOUT_ENTRY
+    const entryPresent = raw.kind === 'plugin'
+      ? await probeCheckoutEntry(this.options.hasFile, entry)
+      : undefined
+    return resolveAnalysisDistribution(raw, entryPresent === undefined ? {} : { entryPresent })
   }
 }

@@ -2,9 +2,14 @@
  * Cross-face shared type home for the plugin market.
  *
  * Compiled under BOTH the Host and the Client leaf so each face's cordis
- * Context declaration merges stay inside its own Program. Cross-boundary
- * consumers must use `import type` only: this module carries zero runtime
- * bytes across the Host/Client edge.
+ * Context declaration merges stay inside its own Program. The file carries
+ * runtime values as well as types — the classification vocabulary and its
+ * guard/default are imported *by value* from both faces (the client needs the
+ * default tag to label records) — so `import type` is required only for
+ * type-only cross-boundary consumers; the values exported here are
+ * dependency-free (no `node:*`, no harness imports) and therefore safe for the
+ * browser bundle. Adding any non-trivial runtime import here would leak into
+ * the client bundle, so keep them free of side effects.
  *
  * The repository/record types below are owned by plugin-market-host. Keep
  * this file free of `node:*` imports so the browser half stays client-safe.
@@ -35,6 +40,83 @@ export type PluginMarketTrustState = 'untrusted' | 'trusted' | 'revoked'
 export type GithubRefKind = 'branch' | 'tag'
 
 /**
+ * Classification tag of one installed plugin record — what the checkout turned
+ * out to be once it was filed into the local source repository.
+ *
+ * - `plugin`: the checkout carries a runnable entry the loader can register
+ *   (`record.entry` non-null).
+ * - `skills`: an agent skills/instruction/capability pack (analyzer verdict).
+ * - `other`: anything else — a configuration preset, tooling, documentation, an
+ *   unclassified checkout, or a checkout whose runnable entry could not be
+ *   resolved. Filing is never blocked by it: the record is kept, the checkout
+ *   stays on disk, and only the loader registration is withheld (entry null).
+ *
+ * Only these three labels are persisted; the richer analyzer vocabulary
+ * (preset/tooling/…) is folded into `other` by the host analyzer.
+ */
+export type PluginMarketClassification = 'plugin' | 'skills' | 'other'
+
+/**
+ * Default classification of a record that carries none (legacy pre-tag files).
+ * Kept as the single source of the backward-compatible default: old records
+ * were only ever created for standard, entry-resolving plugins.
+ */
+export const DEFAULT_PLUGIN_MARKET_CLASSIFICATION: PluginMarketClassification = 'plugin'
+
+/**
+ * Narrow whether an untrusted value is a persisted classification tag (used by
+ * the host record store; the shared default above is never a validation hole).
+ */
+export function isPluginMarketClassification(value: unknown): value is PluginMarketClassification {
+  return value === 'plugin' || value === 'skills' || value === 'other'
+}
+
+/**
+ * Why one managed record cannot be registered as a live loader entry.
+ * `null` means it can (see {@link isPluginRecordLoadable}).
+ */
+export type PluginRecordNotLoadableReason = 'classification' | 'entry'
+
+/**
+ * Reason one record is NOT loadable, or null when it is. The check is the
+ * single source of the control layer's load gate (host `setEnabled` refusal and
+ * the rebuild/sync row guard) and of the `loadable` flag the presentation
+ * layers render:
+ *
+ * - a persisted classification other than `plugin` (skills pack / other
+ *   checkout) has no runnable entry by definition — `'classification'`;
+ * - a record whose classification is `plugin` (or absent, read as the
+ *   backward-compatible {@link DEFAULT_PLUGIN_MARKET_CLASSIFICATION} default)
+ *   but whose `entry` is null has nothing to import — `'entry'`.
+ *
+ * The `'entry'` case deliberately covers legacy records written before the
+ * entry metadata existed: an entry-less record can only be loaded through the
+ * historical conventional `index.js` fallback, which the gate no longer
+ * silently trusts. Such a record is enabled again by re-downloading it (the
+ * install then resolves and stores the real entry) instead of by enabling a row
+ * that would import a file nobody verified.
+ */
+export function recordNotLoadableReason(
+  record: Pick<PluginMarketRecord, 'classification' | 'entry'>,
+): PluginRecordNotLoadableReason | null {
+  const classification = record.classification ?? DEFAULT_PLUGIN_MARKET_CLASSIFICATION
+  if (classification !== 'plugin') return 'classification'
+  return record.entry === null ? 'entry' : null
+}
+
+/**
+ * Whether one managed record can be registered as a live loader entry: only a
+ * `plugin`-classified record with a resolved runnable entry is loadable.
+ * Enablement of anything else is refused by the control layer with the stable
+ * `market/not-loadable` code instead of creating a row that could never load.
+ */
+export function isPluginRecordLoadable(
+  record: Pick<PluginMarketRecord, 'classification' | 'entry'>,
+): boolean {
+  return recordNotLoadableReason(record) === null
+}
+
+/**
  * Stable failure vocabulary shared by Host errors and future wire codes,
  * shaped `domain/reason`. Host failures throw `MarketError` with one of
  * these codes; never string-match ad hoc.
@@ -62,7 +144,20 @@ export type PluginMarketErrorCode =
   | 'github/bad-request'
   | 'install/dir-exists'
   | 'install/dir-in-use'
+  /**
+   * Reserved for wire compatibility: the install pipeline no longer refuses a
+   * checkout without a runnable entry (it files it with a null entry and a
+   * `skills`/`other` classification), so nothing in this package throws this
+   * code today. Kept because it is part of the published code union that
+   * consumers and older records/wire payloads may still reference.
+   */
   | 'install/entry-missing'
+  /**
+   * Produced by `readCheckoutManifest` (host/market/install.ts) when a caller
+   * that requires a usable package.json finds it missing, unreadable, not JSON
+   * or not a JSON object. The install pipeline itself never throws it — it uses
+   * the tolerant `readCheckoutManifestState` and files the checkout instead.
+   */
   | 'install/package-invalid'
   | 'install/git-failed'
   | 'install/deps-failed'
@@ -83,16 +178,20 @@ export type PluginMarketErrorCode =
    * entry through the filesystem adapter (native errors never cross the wire).
    */
   | 'market/io'
-  /** The analyzed checkout is a skills pack, not an installable dsh plugin. */
-  | 'market/unsupported-skills'
-  /** The analyzed checkout is a configuration preset, not an installable dsh plugin. */
-  | 'market/unsupported-preset'
   /**
-   * The analyzed checkout looks like a dsh plugin but has no ready-to-load
-   * entry (it needs a build step first); the reason explains how to build it.
+   * Wire-compatibility markers of the retired smart-install refusal vocabulary.
+   * No longer produced by anything in this package: the analyzer folds kinds
+   * into the persisted classification labels (`skills`/`other`) instead of
+   * refusing, and the install pipeline files such checkouts rather than
+   * rejecting them. Kept because they remain part of the published code union
+   * and the wire `RemoteErrorDetailsMap` consumers may still switch on.
+   * Mapping (historical → current): `unsupported-skills` → `skills`;
+   * `unsupported-preset`/`unsupported-other` → `other`; `unsupported-build`
+   * (a plugin whose entry was not built yet) → `other` with a null entry.
    */
+  | 'market/unsupported-skills'
+  | 'market/unsupported-preset'
   | 'market/unsupported-build'
-  /** The analyzed checkout is tooling/other, not an installable dsh plugin. */
   | 'market/unsupported-other'
 
 /**
@@ -151,11 +250,23 @@ export interface PluginMarketRecord {
    * Cordis plugin entry file of the checkout, relative to `localDirName`
    * (forward-slash segments, no escaping `..`). The loader entry of the
    * plugin is the absolute file URL of `<root>/<localDirName>/<entry>`.
-   * Null means the record predates entry metadata; the control service then
-   * falls back to the conventional `index.js` entry and surfaces a load
-   * failure if the file does not exist.
+   * Null means there is no runnable entry to register: either the record
+   * predates entry metadata (the control service then falls back to the
+   * conventional `index.js` entry and surfaces a load failure if the file does
+   * not exist) or the checkout was deliberately filed without one (a skills
+   * pack, or a plugin whose entry is not built yet) — the record then carries
+   * `classification: 'other'`/`'skills'` and the control layer decides whether
+   * to register a loader row at all.
    */
   readonly entry: string | null
+  /**
+   * Classification tag of the checkout (see
+   * {@link PluginMarketClassification}). Absent on records written before the
+   * tag existed: consumers must read such records as
+   * {@link DEFAULT_PLUGIN_MARKET_CLASSIFICATION} (`'plugin'`) instead of
+   * inferring anything from the absence.
+   */
+  readonly classification?: PluginMarketClassification
   /** ISO-8601 timestamp of the install. */
   readonly installedAt: string
   /** User opt-in to run the plugin (defaults to false on install). */
@@ -259,6 +370,15 @@ export interface ManagedPluginView {
   readonly key: PluginMarketKey
   readonly record: PluginMarketRecord
   readonly runtime: ManagedPluginRuntime
+  /**
+   * Whether this record may be enabled at all: only a `plugin`-classified
+   * record with a resolved entry is loadable (see
+   * {@link isPluginRecordLoadable}). Consumers use it to disable the enable
+   * switch; the host refuses an enable attempt of a non-loadable record with
+   * the stable `market/not-loadable` code, so the flag and the refusal can
+   * never disagree.
+   */
+  readonly loadable: boolean
 }
 
 /** Result of the record-driven list. Entries sorted by stable key. */
@@ -294,6 +414,40 @@ export interface PluginInstallReviewAnalysis {
   readonly reason: string
 }
 
+/**
+ * Stable kind of one install-review note: why the reviewed checkout is not
+ * expected to become a loadable plugin. The consumer renders the copy for the
+ * kind through its own locale dictionary — the Host never ships UI prose; the
+ * optional detail fields carry the untrusted, engine-supplied specifics.
+ */
+export type MarketInstallNoteKind =
+  /** The checkout is not a plugin at all (skills pack / preset / tooling / …). */
+  | 'classified'
+  /** No runnable entry was found inside the checkout. */
+  | 'entry-missing'
+  /** The smart-install analyzer could not classify the checkout (unconfigured or failed). */
+  | 'analysis-unavailable'
+
+/**
+ * Structured, localizable note of one install review. Unlike the legacy
+ * `entryNote` string this never carries Host-authored user-facing prose: a
+ * consumer maps `kind` onto its own dictionary and only renders the optional
+ * `text` (an analyzer rationale or a resolved entry path) as a secondary
+ * detail.
+ */
+export interface MarketInstallNote {
+  readonly kind: MarketInstallNoteKind
+  /**
+   * Engine-supplied detail: the analyzer's rationale for a classified
+   * checkout, or the entry path that could not be found. Untrusted
+   * model/third-party text, shown as a secondary detail — never as the primary
+   * UI copy.
+   */
+  readonly text?: string
+  /** Entry path the checkout was expected to carry, when one is known. */
+  readonly entry?: string
+}
+
 /** One pre-download review of a candidate GitHub plugin repository. */
 export interface PluginInstallReview {
   /** Validated `owner/repo` slug of the reviewed repository. */
@@ -322,15 +476,69 @@ export interface PluginInstallReview {
   /** ISO-8601 expiry of the confirmation token. */
   readonly expiresAt: string
   /**
+   * Classification the install of this review is PREDICTED to file the
+   * checkout under (see {@link PluginMarketClassification}). The prediction is
+   * only a hint: the download inspects the real checkout and the entry probe
+   * always wins, so a checkout carrying a runnable entry is filed as `plugin`
+   * whatever this field predicted, and the authoritative tags come back on
+   * {@link PluginInstallOutcome}.
+   *
+   * - `plugin` — the remote preview showed a standard npm plugin checkout, so a
+   *   runnable entry is expected;
+   * - `skills` / `other` — the analysis classified the checkout (skills pack /
+   *   preset / tooling / documentation), or no usable analysis was available at
+   *   all. Installing it is NOT blocked: the checkout is downloaded and filed
+   *   with the resolved tag (and a null entry when it really has none), and only
+   *   the loader registration is withheld.
+   */
+  readonly classification: PluginMarketClassification
+  /**
+   * Whether the install of this review is expected to produce a checkout
+   * needing a build step before it becomes loadable (the analysis judged it a
+   * dsh plugin whose entry is not present yet). Present only when true.
+   *
+   * Reachability: this needs an entry probe at review time. The production
+   * preview reads only the remote manifest, so it can never probe the entry and
+   * the flag stays absent there; it is populated when previewInstall runs an
+   * analysis over a probed snapshot (see
+   * `MarketSourceDeps.analysisEntryProbe`). The authoritative signal for "this
+   * checkout has no runnable entry" is the classification/entry of the install
+   * outcome and of the managed record (`recordNotLoadableReason`), which the UI
+   * already renders as the not-loadable state.
+   */
+  readonly buildRequired?: boolean
+  /**
+   * Legacy plain-text note of a review that is not expected to become a
+   * loadable plugin. Non-empty only for engine-supplied detail (the analyzer's
+   * own rationale); the Host never authors UI prose here — see
+   * {@link note} for the localizable form, which is preferred by new
+   * consumers.
+   */
+  readonly entryNote?: string
+  /**
+   * Structured, localizable form of {@link entryNote} (stable kind + untrusted
+   * detail). Present whenever the checkout is not expected to become a loadable
+   * plugin, including the "no usable analysis" case whose legacy `entryNote`
+   * was Host-authored prose and is therefore omitted.
+   */
+  readonly note?: MarketInstallNote
+  /**
    * Smart-install analysis verdict, present only when the review classified
    * the candidate as not installable (skills/preset/tooling/other, or a plugin
-   * needing a build first). Absent on standard npm plugins (no analysis ran)
-   * and on candidates the analysis considered installable.
+   * needing a build first). Kept for consumers that render the richer analyzer
+   * vocabulary; {@link classification} is the persisted tag the install files.
+   * Absent on standard npm plugins (no analysis ran) and on candidates the
+   * analysis considered installable.
    */
   readonly analysis?: PluginInstallReviewAnalysis
 }
 
-/** Outcome of a confirmed install. */
+/**
+ * Outcome of a confirmed install. The classification/entry fields mirror what
+ * the host pipeline actually filed (the checkout inspection, not the review
+ * prediction), so a consumer can show the real result without re-reading the
+ * record.
+ */
 export interface PluginInstallOutcome {
   readonly key: PluginMarketKey
   /** True when the install replaced an already-managed checkout. */
@@ -338,6 +546,14 @@ export interface PluginInstallOutcome {
   readonly record: PluginMarketRecord
   /** Absolute checkout directory of the installed plugin. */
   readonly checkoutDir: string
+  /** Classification the checkout was actually filed under. */
+  readonly classification?: PluginMarketClassification
+  /** Runnable entry that was registered, or null when the checkout has none. */
+  readonly entry?: string | null
+  /** Host note explaining a null entry (unreadable manifest / missing entry). */
+  readonly entryNote?: string | null
+  /** Whether the dependency step (`pnpm install`) actually ran. */
+  readonly dependenciesInstalled?: boolean
 }
 
 /**
@@ -395,6 +611,12 @@ export interface RemoveOutcome {
 export interface MarketRemoteErrorDetails {
   readonly key?: string
   readonly path?: string
+  /**
+   * Machine-readable sub-reason of a failure, when the code alone is not
+   * specific enough (`market/not-loadable` carries `'classification'` or
+   * `'entry'`; smart-install failures carry the analyzer rationale).
+   */
+  readonly reason?: string
 }
 
 /**
@@ -419,6 +641,7 @@ export type MarketWireErrorCode =
   | 'market/idle'
   | 'market/not-found'
   | 'market/protected'
+  | 'market/not-loadable'
   | 'market/confirm-required'
   | 'market/confirm-invalid'
   | 'market/confirm-expired'
@@ -458,6 +681,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'market/idle': {}
     'market/not-found': { readonly key: string }
     'market/protected': { readonly key?: string }
+    'market/not-loadable': { readonly key: string; readonly reason?: string }
     'market/confirm-required': { readonly key: string }
     'market/confirm-invalid': { readonly key: string }
     'market/confirm-expired': { readonly key: string }

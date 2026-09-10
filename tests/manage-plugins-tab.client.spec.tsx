@@ -221,6 +221,80 @@ describe('ManagePluginsTab managed roster', () => {
     expect(host.querySelectorAll('[data-plugin-row]')).toHaveLength(0)
   })
 
+  it('tags every row with its classification and disables the switch of a non-plugin one', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-plugin', repository: 'acme/plugin', enabled: true },
+      { key: 'gh-skills', repository: 'acme/skills-pack', classification: 'skills' },
+      { key: 'gh-other', repository: 'acme/preset', classification: 'other' },
+    ]))
+    const setEnabled = vi.fn(async () => { throw new Error('enable must never be called for a non-plugin row') })
+    const { props } = managePageHarness({ list, setEnabled })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    expect(rows(host)).toHaveLength(3)
+
+    const tags = Array.from(host.querySelectorAll<HTMLElement>('[data-classification-tag]'))
+    expect(tags.map(tag => tag.textContent)).toEqual([
+      zh.classificationPlugin,
+      zh.classificationSkills,
+      zh.classificationOther,
+    ])
+    expect(tags.map(tag => tag.getAttribute('data-kind'))).toEqual(['plugin', 'skills', 'other'])
+    expect(rows(host)[1]!.getAttribute('data-classification')).toBe('skills')
+    expect(rows(host)[1]!.getAttribute('data-loadable')).toBe('false')
+    expect(rows(host)[0]!.getAttribute('data-loadable')).toBe('true')
+
+    // Only the plugin checkout may be enabled; the skills/other rows say so on
+    // the switch itself (label + tooltip) and repeat it as a row note.
+    const [pluginSwitch, skillsSwitch, otherSwitch] = Array.from(toggles(host))
+    expect(pluginSwitch!.disabled).toBe(false)
+    expect(pluginSwitch!.getAttribute('aria-label')).toBe(zh.switchDisable.replace('{name}', 'acme/plugin'))
+    const blocked: Array<[HTMLButtonElement, string]> = [
+      [skillsSwitch!, 'acme/skills-pack'],
+      [otherSwitch!, 'acme/preset'],
+    ]
+    for (const [toggle, name] of blocked) {
+      expect(toggle.disabled).toBe(true)
+      expect(toggle.getAttribute('data-not-loadable')).toBe('classification')
+      expect(toggle.getAttribute('title')).toBe(zh.switchNotLoadable.replace('{name}', name))
+    }
+    expect(skillsSwitch!.getAttribute('aria-label'))
+      .toBe(zh.switchNotLoadable.replace('{name}', 'acme/skills-pack'))
+    expect(otherSwitch!.getAttribute('aria-label'))
+      .toBe(zh.switchNotLoadable.replace('{name}', 'acme/preset'))
+    const notes = Array.from(host.querySelectorAll('[data-toggle-disabled-note]'))
+    expect(notes.map(note => note.textContent)).toEqual([
+      zh.switchNotLoadable.replace('{name}', 'acme/skills-pack'),
+      zh.switchNotLoadable.replace('{name}', 'acme/preset'),
+    ])
+    expect(host.querySelectorAll('[data-toggle-disabled-note]')).toHaveLength(2)
+
+    // Clicking a disabled switch is inert: the control layer is never asked.
+    await click(skillsSwitch)
+    await flush()
+    expect(setEnabled).not.toHaveBeenCalled()
+    expect(rows(host)[1]!.getAttribute('data-plugin-state')).toBe('disabled')
+  })
+
+  it('disables the switch of a plugin-classified row that has no runnable entry', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-unbuilt', repository: 'acme/unbuilt', classification: 'plugin', entry: null },
+    ]))
+    const setEnabled = vi.fn(async () => { throw new Error('enable must never be called without an entry') })
+    const { props } = managePageHarness({ list, setEnabled })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    expect(host.querySelector('[data-classification-tag]')?.textContent).toBe(zh.classificationPlugin)
+    const toggle = toggles(host)[0]!
+    expect(toggle.disabled).toBe(true)
+    expect(toggle.getAttribute('data-not-loadable')).toBe('entry')
+    expect(toggle.getAttribute('aria-label')).toBe(zh.switchNotLoadable.replace('{name}', 'acme/unbuilt'))
+    await click(toggle)
+    await flush()
+    expect(setEnabled).not.toHaveBeenCalled()
+  })
+
   it('filters managed rows and shows the empty-search state', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-a', repository: 'octocat/demo-plugin', enabled: false },

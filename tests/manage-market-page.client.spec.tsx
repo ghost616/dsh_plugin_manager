@@ -239,7 +239,7 @@ describe('ManagePluginsTab GitHub tab', () => {
   })
 })
 describe('ManagePluginsTab GitHub tab interactions', () => {
-  it('marks downloaded rows with a badge and keeps a details entry for every row', async () => {
+  it('offers a details entry on every row and never marks a downloaded one', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-octocat-demo-plugin', repository: 'octocat/demo-plugin', enabled: false },
     ]))
@@ -254,23 +254,27 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     await searchIn(dialog, 'plugins')
 
     const cards = dialog.querySelectorAll('[data-market-card]')
-    const installed = cards[0]!
-    expect(installed.getAttribute('data-repository')).toBe('octocat/demo-plugin')
-    expect(installed.querySelector('[data-installed]')?.textContent).toContain(zh.installedBadge)
-    expect(zh.installedBadge).toBe('已下载')
+    expect(cards).toHaveLength(2)
+    // Rows carry no download state at all: a repository whose record already
+    // exists is offered exactly like an untouched one (the review reports the
+    // existing record instead of the list pre-judging it).
+    for (const card of Array.from(cards)) {
+      expect(card.querySelector('[data-installed]')).toBeNull()
+      expect(card.querySelector('[data-installed-badge]')).toBeNull()
+      const details = card.querySelector('[data-row-details]') as HTMLButtonElement
+      expect(details.disabled).toBe(false)
+    }
+
+    const managed = cards[0]!
+    expect(managed.getAttribute('data-repository')).toBe('octocat/demo-plugin')
+    expect(managed.querySelector('[data-row-details]')?.getAttribute('data-detail-repository'))
+      .toBe('octocat/demo-plugin')
     // List rows never carry a direct download action: they open the detail
     // view, where the exact branch/tag is chosen.
-    expect(installed.querySelector('[data-install-trigger]')).toBeNull()
-    const details = installed.querySelector('[data-row-details]') as HTMLButtonElement
-    expect(details.disabled).toBe(false)
-    expect(details.getAttribute('data-detail-repository')).toBe('octocat/demo-plugin')
-
-    const fresh = cards[1]!
-    expect(fresh.querySelector('[data-installed]')).toBeNull()
-    expect((fresh.querySelector('[data-row-details]') as HTMLButtonElement).disabled).toBe(false)
+    expect(managed.querySelector('[data-install-trigger]')).toBeNull()
   })
 
-  it('downloads a branch from the detail view through the versioned preview flow and re-marks it', async () => {
+  it('downloads a branch from the detail view through the versioned preview flow', async () => {
     let snapshot = makeList([])
     const list = vi.fn(async () => snapshot)
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
@@ -310,6 +314,9 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     expect(select).not.toBeNull()
     expect(select?.querySelector('option[data-ref-name="dev"]')?.getAttribute('value')).toBe('branch:dev')
     expect(installAction.disabled).toBe(true)
+    expect(installAction.textContent).toContain(zh.downloadButton)
+    // The dropdown knows nothing about previous downloads.
+    expect(select?.querySelector('[data-ref-installed]')).toBeNull()
 
     await selectIn(select, 'branch:dev')
     await flush()
@@ -333,19 +340,16 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     await flush()
     expect(host.querySelector('[data-dialog="install"]')).toBeNull()
 
-    // The roster reloaded; the downloaded dev ref is annotated inside the
-    // dropdown, and the still-selected action turns into a downloaded state.
-    // Switching to the untouched main branch re-enables a fresh download.
+    // The roster reloaded, yet the downloaded ref is NOT marked and the same
+    // ref stays downloadable: pre-existing records never gate the download.
+    expect(list).toHaveBeenCalledTimes(2)
     const devOption = select?.querySelector('option[data-ref-name="dev"]')
-    expect(devOption?.getAttribute('data-ref-installed')).toBe('true')
-    expect(devOption?.textContent).toContain(zh.installedBadge)
-    expect(installAction.disabled).toBe(true)
-    expect(installAction.textContent).toContain(zh.installedBadge)
+    expect(devOption?.getAttribute('data-ref-installed')).toBeNull()
+    expect(installAction.disabled).toBe(false)
     await selectIn(select, 'branch:main')
     await flush()
     expect(installAction.disabled).toBe(false)
     expect(installAction.textContent).toContain(zh.downloadButton)
-    expect(list).toHaveBeenCalledTimes(2)
   })
 
   it('shows overwrite and degraded notices when the detail preview reports them', async () => {
@@ -573,6 +577,104 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     expect(form).not.toBeNull()
     expect(scrollZone?.contains(form)).toBe(false)
   })
+
+  it('lets the page, the panels and every inner scroll zone follow the host height', async () => {
+    const seed = Array.from({ length: 10 }, (_, index) => ({
+      repository: `acme/plugin-${String(index + 1)}`,
+      name: `plugin-${String(index + 1)}`,
+    }))
+    const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, seed, 25))
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    // The page root is the full-height flex column of the settings host: it
+    // never grows past the space it is given.
+    const page = host.querySelector<HTMLElement>('[data-market-page]')!
+    expect(page.style.height).toBe('100%')
+    expect(page.style.minHeight).toBe('0px')
+
+    // No panel grows the page: each one owns the leftover height and may
+    // shrink below its content (min-height 0).
+    const panels = Array.from(host.querySelectorAll<HTMLElement>('[data-market-panel]'))
+    expect(panels).toHaveLength(2)
+    for (const panel of panels) {
+      expect(panel.style.flexGrow).toBe('1')
+      expect(panel.style.flexShrink).toBe('1')
+      expect(panel.style.minHeight).toBe('0px')
+    }
+
+    // The local repository body is the tab's own scroll zone.
+    const localBody = host.querySelector<HTMLElement>('[data-manage-tab]')!
+    expect(localBody.style.flexGrow).toBe('1')
+    expect(localBody.style.minHeight).toBe('0px')
+
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'agents')
+    const githubPanel = dialog.closest<HTMLElement>('[data-market-panel]')!
+    expect(githubPanel.style.flexGrow).toBe('1')
+    expect(githubPanel.style.minHeight).toBe('0px')
+    expect(dialog.style.flexGrow).toBe('1')
+    expect(dialog.style.minHeight).toBe('0px')
+
+    // The result zone is bounded by the panel's leftover height only: no
+    // viewport-fraction cap that would clip the list in an embedded page.
+    const scrollZone = dialog.querySelector<HTMLElement>('[data-market-scroll]')!
+    expect(scrollZone.style.flexGrow).toBe('1')
+    expect(scrollZone.style.minHeight).toBe('0px')
+    expect(scrollZone.style.maxHeight).toBe('')
+    expect(scrollZone.style.height).toBe('')
+
+    // Same contract for the detail view inside that zone.
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+    const detailScroll = dialog.querySelector<HTMLElement>('[data-detail-scroll]')!
+    expect(detailScroll.style.flexGrow).toBe('1')
+    expect(detailScroll.style.minHeight).toBe('0px')
+    const detailView = dialog.querySelector<HTMLElement>('[data-detail-view]')!
+    expect(detailView.style.flexGrow).toBe('1')
+    expect(detailView.style.minHeight).toBe('0px')
+
+    // The scroll zones stay the only scrolling containers: the fixed header
+    // (search form / detail toolbar) and the pagination footer never scroll.
+    const detailHeader = dialog.querySelector<HTMLElement>('[data-github-detail-header]')!
+    expect(detailHeader.style.maxHeight).toBe('')
+    expect(detailHeader.style.flexGrow).toBe('')
+  })
+
+  it('keeps the local roster inside the same height-adaptive tab body', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-a', repository: 'acme/a', enabled: true },
+      { key: 'gh-b', repository: 'acme/b', enabled: false },
+      { key: 'gh-c', repository: 'acme/c', classification: 'skills' },
+      { key: 'gh-d', repository: 'acme/d', classification: 'other' },
+    ]))
+    const { props } = managePageHarness({ list })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    // The landing tab is the local repository: its body owns the leftover
+    // height and the roster grows inside it instead of scrolling the page.
+    const panel = host.querySelector<HTMLElement>('[data-market-panel="local"]')!
+    const body = panel.querySelector<HTMLElement>('[data-manage-tab]')!
+    expect(body.style.flexGrow).toBe('1')
+    expect(body.style.minHeight).toBe('0px')
+    expect(body.style.maxHeight).toBe('')
+
+    const roster = panel.querySelector<HTMLElement>('[data-managed-section]')
+    expect(roster).not.toBeNull()
+    expect(panel.querySelectorAll('[data-plugin-row]')).toHaveLength(4)
+    // Rows are ordinary flow content of that body: no per-row viewport cap.
+    for (const row of Array.from(panel.querySelectorAll<HTMLElement>('[data-plugin-row]'))) {
+      expect(row.style.maxHeight).toBe('')
+      expect(row.style.height).toBe('')
+    }
+  })
 })
 
 describe('ManagePluginsTab GitHub tab page jump', () => {
@@ -771,20 +873,25 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     expect(firstCard?.getAttribute('data-repository')).toBe('acme/p11')
   })
 
-  it('marks exactly the installed branch/tag refs and leaves legacy null-version records unmarked', async () => {
+  it('offers every ref of an already-downloaded repository, with no installed marker', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-acme-helper', repository: 'acme/helper', version: 'v1.0.0', enabled: false },
       { key: 'gh-acme-legacy', repository: 'acme/legacy', version: null, enabled: false },
+      { key: 'gh-acme-both', repository: 'acme/both', version: 'v1', refKind: 'tag', enabled: false },
     ]))
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
       { repository: 'acme/legacy', name: 'legacy' },
+      { repository: 'acme/both', name: 'both' },
     ]))
     const repositoryDetail = vi.fn(async (repository: string) => {
-      if (repository === 'acme/helper') {
-        return makeRepositoryDetail({ repository, branches: ['main'], tags: ['v1.0.0', 'v2.0.0'] })
+      if (repository === 'acme/both') {
+        return makeRepositoryDetail({ repository, branches: ['main', 'v1'], tags: ['v1'] })
       }
-      return makeRepositoryDetail({ repository, branches: ['main'], tags: ['v0.9.0'] })
+      if (repository === 'acme/legacy') {
+        return makeRepositoryDetail({ repository, branches: ['main'], tags: ['v0.9.0'] })
+      }
+      return makeRepositoryDetail({ repository, branches: ['main'], tags: ['v1.0.0', 'v2.0.0'] })
     })
     const { props } = managePageHarness({ list, search, repositoryDetail })
     const host = await renderInto(<ManagePluginsTab {...props} />)
@@ -792,31 +899,47 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     const dialog = await openMarket(host)
     await searchIn(dialog, 'plugins')
 
-    // helper: v1.0.0 matches its record; v2.0.0 and the default branch do not.
+    // A managed record (git tag, legacy default-branch or a kinded ref) never
+    // reaches the dropdown: no option is marked, no option is disabled.
     await click(dialog.querySelector(
       '[data-market-card][data-repository="acme/helper"] [data-row-details]',
     ))
     await flush()
-    const select = dialog.querySelector('[data-ref-select]')
-    const installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
-    const installedTag = select?.querySelector('option[data-ref-name="v1.0.0"]')
-    expect(installedTag?.getAttribute('data-ref-installed')).toBe('true')
-    expect(installedTag?.textContent).toContain(zh.installedBadge)
-    expect(select?.querySelector('option[data-ref-name="v2.0.0"]')?.getAttribute('data-ref-installed')).toBeNull()
-    expect(select?.querySelector('option[data-ref-name="main"]')?.getAttribute('data-ref-installed')).toBeNull()
+    let select = dialog.querySelector('[data-ref-select]')
+    let installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
+    expect(select?.querySelectorAll('[data-ref-installed]')).toHaveLength(0)
+    expect(select?.querySelector('option[data-ref-name="v1.0.0"]')?.getAttribute('data-ref-installed')).toBeNull()
+    expect(select?.querySelector('option[data-ref-name="v1.0.0"]')?.textContent).toBe('v1.0.0')
 
-    // Choosing an installed ref disables the action in its installed state:
-    // the detail view offers no overwrite/reinstall path from here.
+    // The ref that was downloaded before is downloadable again: selecting it
+    // enables the action, which keeps its plain download label.
     await selectIn(select, 'tag:v1.0.0')
     await flush()
-    expect(installAction.disabled).toBe(true)
-    expect(installAction.textContent).toContain(zh.installedBadge)
+    expect(installAction.disabled).toBe(false)
+    expect(installAction.textContent).toContain(zh.downloadButton)
     await selectIn(select, 'tag:v2.0.0')
+    await flush()
+    expect(installAction.disabled).toBe(false)
+
+    // Same-name branch and tag of a kinded record: neither is pre-marked.
+    await click(dialog.querySelector('[data-detail-back]'))
+    await flush()
+    await click(dialog.querySelector(
+      '[data-market-card][data-repository="acme/both"] [data-row-details]',
+    ))
+    await flush()
+    select = dialog.querySelector('[data-ref-select]')
+    expect(select?.querySelector('option[data-ref-name="v1"][data-ref-kind="tag"]')
+      ?.getAttribute('data-ref-installed')).toBeNull()
+    expect(select?.querySelector('option[data-ref-name="v1"][data-ref-kind="branch"]')
+      ?.getAttribute('data-ref-installed')).toBeNull()
+    installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
+    await selectIn(select, 'tag:v1')
     await flush()
     expect(installAction.disabled).toBe(false)
     expect(installAction.textContent).toContain(zh.downloadButton)
 
-    // legacy (version null): the repository is managed but no ref can match.
+    // A legacy record (version null) behaves exactly the same.
     await click(dialog.querySelector('[data-detail-back]'))
     await flush()
     await click(dialog.querySelector(
@@ -827,76 +950,6 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     await selectIn(dialog.querySelector('[data-ref-select]'), 'tag:v0.9.0')
     await flush()
     expect((dialog.querySelector('[data-ref-install]') as HTMLButtonElement).disabled).toBe(false)
-  })
-
-  it('marks a tag and a branch of the same name independently when the record carries refKind', async () => {
-    const list = vi.fn(async () => makeList([
-      { key: 'gh-acme-both-tag', repository: 'acme/both', version: 'v1', refKind: 'tag', enabled: false },
-    ]))
-    const search = vi.fn(async () => makeSearchPage([
-      { repository: 'acme/both', name: 'both' },
-    ]))
-    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
-      repository,
-      branches: ['main', 'v1'],
-      tags: ['v1'],
-    }))
-    const { props } = managePageHarness({ list, search, repositoryDetail })
-    const host = await renderInto(<ManagePluginsTab {...props} />)
-    await flush()
-    const dialog = await openMarket(host)
-    await searchIn(dialog, 'both')
-    await click(dialog.querySelector('[data-row-details]'))
-    await flush()
-
-    // The kinded tag record marks the tag option only: the same-named branch
-    // stays a fresh install target instead of being mis-marked installed.
-    const select = dialog.querySelector('[data-ref-select]')
-    const tagOption = select?.querySelector('option[data-ref-name="v1"][data-ref-kind="tag"]')
-    const branchOption = select?.querySelector('option[data-ref-name="v1"][data-ref-kind="branch"]')
-    expect(tagOption?.getAttribute('data-ref-installed')).toBe('true')
-    expect(tagOption?.textContent).toContain(zh.installedBadge)
-    expect(branchOption?.getAttribute('data-ref-installed')).toBeNull()
-
-    const installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
-    await selectIn(select, 'branch:v1')
-    await flush()
-    expect(installAction.disabled).toBe(false)
-    expect(installAction.textContent).toContain(zh.downloadButton)
-    await selectIn(select, 'tag:v1')
-    await flush()
-    expect(installAction.disabled).toBe(true)
-    expect(installAction.textContent).toContain(zh.installedBadge)
-  })
-
-  it('falls back to a name-only match for legacy records without ref metadata', async () => {
-    const list = vi.fn(async () => makeList([
-      { key: 'gh-acme-legacy2', repository: 'acme/legacy2', version: 'v1', enabled: false },
-    ]))
-    const search = vi.fn(async () => makeSearchPage([
-      { repository: 'acme/legacy2', name: 'legacy2' },
-    ]))
-    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
-      repository,
-      branches: ['main', 'v1'],
-      tags: ['v1'],
-    }))
-    const { props } = managePageHarness({ list, search, repositoryDetail })
-    const host = await renderInto(<ManagePluginsTab {...props} />)
-    await flush()
-    const dialog = await openMarket(host)
-    await searchIn(dialog, 'legacy2')
-    await click(dialog.querySelector('[data-row-details]'))
-    await flush()
-
-    // Without ref metadata the exact ref is unknowable: the legacy record
-    // marks every same-named option, branch and tag alike.
-    const select = dialog.querySelector('[data-ref-select]')
-    expect(select?.querySelector('option[data-ref-name="v1"][data-ref-kind="tag"]')
-      ?.getAttribute('data-ref-installed')).toBe('true')
-    expect(select?.querySelector('option[data-ref-name="v1"][data-ref-kind="branch"]')
-      ?.getAttribute('data-ref-installed')).toBe('true')
-    expect(select?.querySelector('option[data-ref-name="main"]')?.getAttribute('data-ref-installed')).toBeNull()
   })
 
   it('renders the README as sanitized HTML with resolved relative links and images', async () => {
@@ -1082,7 +1135,7 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
   })
 })
 
-describe('ManagePluginsTab smart-install analysis states', () => {
+describe('ManagePluginsTab download classification', () => {
   /** Search one repository, open its detail view and start the ref install. */
   async function openInstallDialog(host: HTMLElement): Promise<HTMLElement> {
     const market = await openMarket(host)
@@ -1099,8 +1152,10 @@ describe('ManagePluginsTab smart-install analysis states', () => {
     return installDialog as HTMLElement
   }
 
-  /** One-repository harness whose preview result is fully under test control. */
-  function analysisHarness(previewInstall: ReturnType<typeof vi.fn>) {
+  /** One-repository harness whose review result is fully under test control.
+   *  The download itself resolves, so every state below can be driven to its
+   *  confirmation and past it: nothing about a classification blocks it. */
+  function classificationHarness(previewInstall: ReturnType<typeof vi.fn>) {
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository,
       branches: ['main'],
@@ -1109,71 +1164,135 @@ describe('ManagePluginsTab smart-install analysis states', () => {
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const install = vi.fn(async () => {
-      throw new Error('install must never run for an analysis state')
-    })
+    const install = vi.fn(async (repository: string, _token: string, version: string | null) =>
+      makeInstallOutcome({ repository, version: version ?? undefined }))
     const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
     return { props, previewInstall, install }
   }
 
-  it('shows the analysis refusal with the reason and never offers a confirmation', async () => {
+  it.each([
+    ['plugin', zh.classificationPlugin],
+    ['skills', zh.classificationSkills],
+    ['other', zh.classificationOther],
+  ] as const)('names the %s classification in the download confirmation', async (classification, expected) => {
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({ repository, version: version ?? undefined, classification }))
+    const { props, previewInstall: preview, install } = classificationHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+    expect(preview).toHaveBeenCalledWith('acme/helper', 'main', 'branch')
+
+    // The classification is announced, never used as a gate: the confirm
+    // button stays available for every tag.
+    const notice = installDialog.querySelector('[data-download-classification]')
+    expect(notice?.textContent).toBe(zh.classificationNotice.replace('{classification}', expected))
+    expect(installDialog.querySelector('[data-analysis-blocked]')).toBeNull()
+    const confirm = installDialog.querySelector('[data-install-confirm]') as HTMLButtonElement
+    expect(confirm).not.toBeNull()
+    expect(confirm.disabled).toBe(false)
+
+    await click(confirm)
+    await flush()
+    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'main', 'branch')
+    expect(installDialog.querySelector('[data-install-done]')).not.toBeNull()
+  })
+
+  it('keeps a non-plugin analysis note informational and still downloads', async () => {
     const reason = 'This checkout ships agent skill packs instead of a plugin entry.'
     const previewInstall = vi.fn(async (repository: string, version: string | null) =>
       makeInstallReview({
         repository,
         version: version ?? undefined,
         analysis: { kind: 'skills', reason },
+        entryNote: reason,
       }))
-    const { props, previewInstall: preview, install } = analysisHarness(previewInstall)
+    const { props, install } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
-    expect(preview).toHaveBeenCalledWith('acme/helper', 'main', 'branch')
 
-    // The confirmation flow is replaced by the refusal panel: localized kind
-    // heading plus the model's original rationale, no confirm, no deps.
-    const blocked = installDialog.querySelector('[data-analysis-blocked]')
-    expect(blocked).not.toBeNull()
-    expect(blocked?.getAttribute('data-analysis-kind')).toBe('skills')
-    expect(blocked?.querySelector('[data-analysis-title]')?.textContent).toContain(zh.analysisKindSkills)
-    expect(blocked?.querySelector('[data-analysis-reason]')?.textContent).toBe(reason)
-    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
-    expect(installDialog.querySelector('[data-deps]')).toBeNull()
-    expect(installDialog.querySelector('[data-analysis-close]')).not.toBeNull()
-    expect(install).not.toHaveBeenCalled()
+    // The analyzer note survives as plain copy; the old refusal panel (which
+    // replaced the whole confirmation flow) is gone.
+    expect(installDialog.querySelector('[data-download-classification]')?.textContent)
+      .toBe(zh.classificationNotice.replace('{classification}', zh.classificationSkills))
+    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(reason)
+    expect(installDialog.querySelector('[data-analysis-blocked]')).toBeNull()
+    expect(installDialog.querySelector('[data-analysis-title]')).toBeNull()
+    expect(installDialog.querySelector('[data-analysis-close]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
 
-    // Only a close affordance dismisses the refusal dialog.
-    await click(installDialog.querySelector('[data-analysis-close]'))
-    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+    await click(installDialog.querySelector('[data-install-confirm]'))
+    await flush()
+    expect(install).toHaveBeenCalledTimes(1)
   })
 
-  it.each([
-    ['preset', zh.analysisKindPreset],
-    ['plugin', zh.analysisKindBuild],
-    ['tooling', zh.analysisKindTooling],
-    ['other', zh.analysisKindOther],
-  ] as const)('localizes the refusal heading for the %s analysis kind', async (kind, expected) => {
+  it('flags a checkout that needs a build before it can load', async () => {
     const previewInstall = vi.fn(async (repository: string, version: string | null) =>
       makeInstallReview({
         repository,
         version: version ?? undefined,
-        analysis: { kind, reason: 'the model reason' },
+        classification: 'other',
+        buildRequired: true,
       }))
-    const { props } = analysisHarness(previewInstall)
+    const { props } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
 
-    const blocked = installDialog.querySelector('[data-analysis-blocked]')
-    expect(blocked?.getAttribute('data-analysis-kind')).toBe(kind)
-    expect(blocked?.querySelector('[data-analysis-title]')?.textContent).toContain(expected)
-    expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
+    expect(installDialog.querySelector('[data-build-required]')?.textContent).toContain(zh.buildRequiredNotice)
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
   })
 
-  it('shows analysis-aware loading copy while the review preview is pending', async () => {
+  it('renders the localized config guidance for an analysis-unavailable note', async () => {
+    // The Host ships a structured note (kind only, no prose): the tab must
+    // render its own copy for it, reusing the model-configuration guidance the
+    // preview failure path shows.
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({
+        repository,
+        version: version ?? undefined,
+        classification: 'other',
+        note: { kind: 'analysis-unavailable' },
+      }))
+    const { props, install } = classificationHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    const guide = installDialog.querySelector('[data-download-analysis-guide]')
+    expect(guide?.textContent).toBe(zh.analysisConfigGuide)
+    expect(installDialog.querySelector('[data-classification-note]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+
+    await click(installDialog.querySelector('[data-install-confirm]'))
+    await flush()
+    expect(install).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders no extra guidance for a classified note (the tag line carries it)', async () => {
+    const reason = 'This checkout ships agent skill packs.'
+    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+      makeInstallReview({
+        repository,
+        version: version ?? undefined,
+        classification: 'skills',
+        note: { kind: 'classified', text: reason },
+        entryNote: reason,
+      }))
+    const { props } = classificationHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    expect(installDialog.querySelector('[data-download-analysis-guide]')).toBeNull()
+    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(reason)
+  })
+
+  it('shows the loading copy while the review preview is pending', async () => {
     let settle: (review: unknown) => void = () => {}
     const previewInstall = vi.fn(() => new Promise(resolve => { settle = resolve }))
-    const { props } = analysisHarness(previewInstall)
+    const { props } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1186,13 +1305,15 @@ describe('ManagePluginsTab smart-install analysis states', () => {
     await flush()
     expect(installDialog.querySelector('[data-preview-loading]')).toBeNull()
     expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+    expect(installDialog.querySelector('[data-download-classification]')?.textContent)
+      .toBe(zh.classificationNotice.replace('{classification}', zh.classificationPlugin))
   })
 
   it('guides to configure the analysis model when the preview rejects llm-unconfigured', async () => {
     const previewInstall = vi.fn(async () => {
       throw new MarketCallFailure({ code: 'market/llm-unconfigured', message: 'no llm endpoint', details: {} })
     })
-    const { props, install } = analysisHarness(previewInstall)
+    const { props, install } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1218,7 +1339,7 @@ describe('ManagePluginsTab smart-install analysis states', () => {
     const previewInstall = vi.fn()
       .mockRejectedValueOnce(new MarketCallFailure({ code, message: 'model trouble', details: {} }))
       .mockResolvedValueOnce(makeInstallReview({ repository: 'acme/helper', version: 'main' }))
-    const { props, previewInstall: preview, install } = analysisHarness(previewInstall)
+    const { props, previewInstall: preview, install } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)

@@ -43,6 +43,14 @@ export const zh = {
   stateDisabled: '已停用',
   /** Failure tag shown while an enabled row failed to load. */
   stateFailed: '启动失败',
+  /** Classification tag of a runnable dsh plugin checkout. */
+  classificationPlugin: '插件',
+  /** Classification tag of a skills/instruction/capability pack. */
+  classificationSkills: 'SKILLS',
+  /** Classification tag of any other checkout (preset/tooling/docs/unknown). */
+  classificationOther: '其他',
+  /** Why a non-plugin checkout can never be enabled (switch tooltip/note). */
+  switchNotLoadable: '「{name}」不是可加载的插件，无法启用。',
   /** Phase dot label when no live loader fiber exists. */
   unobserved: '未运行',
   /** Phase dot label while the entry waits for dependencies. */
@@ -117,8 +125,6 @@ export const zh = {
   readmeHeading: 'README',
   /** Placeholder when the repository has no README. */
   noReadme: '该仓库没有 README。',
-  /** Badge of an already-downloaded search result row (its record exists). */
-  installedBadge: '已下载',
   /** Previous search page. */
   prevPage: '上一页',
   /** Next search page. */
@@ -167,16 +173,10 @@ export const zh = {
   downloadFailed: '下载失败。',
   /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: '正在检查该仓库并分析可否安装…',
-  /** Analysis refusal of a plugin-shaped checkout that needs a build first. */
-  analysisKindBuild: '该仓库看似 dsh 插件，但缺少可直接加载的入口，需先构建再安装。',
-  /** Analysis refusal: the checkout is a skills/instruction pack. */
-  analysisKindSkills: '该仓库是技能/指令包（skills pack），不是可安装的 dsh 插件。',
-  /** Analysis refusal: the checkout is a configuration preset. */
-  analysisKindPreset: '该仓库是配置预设（preset），不是可安装的 dsh 插件。',
-  /** Analysis refusal: the checkout is a development tool or CLI. */
-  analysisKindTooling: '该仓库是开发工具或命令行程序，不是可安装的 dsh 插件。',
-  /** Analysis refusal: the checkout could not be recognized as a plugin. */
-  analysisKindOther: '该仓库未能被识别为可安装的 dsh 插件。',
+  /** Confirmation line naming the classification the download will be filed under. */
+  classificationNotice: '将标记为：{classification}',
+  /** Extra note when the download will need a build step before it can load. */
+  buildRequiredNotice: '该仓库缺少可直接加载的入口，下载后需先构建才能启用。',
   /** Preview failure when no LLM endpoint is configured for smart analysis. */
   analysisNotConfigured: '智能分析未配置。',
   /** Guidance shown with analysisNotConfigured (where to set provider/model). */
@@ -233,6 +233,10 @@ export const en: Record<MarketManageLocaleKey, string> = {
   stateEnabled: 'Enabled',
   stateDisabled: 'Disabled',
   stateFailed: 'Failed',
+  classificationPlugin: 'Plugin',
+  classificationSkills: 'SKILLS',
+  classificationOther: 'Other',
+  switchNotLoadable: '{name} is not a loadable plugin and cannot be enabled.',
   unobserved: 'Not running',
   phasePending: 'Waiting for dependencies',
   phaseLoading: 'Loading',
@@ -270,7 +274,6 @@ export const en: Record<MarketManageLocaleKey, string> = {
   tagsTitle: 'Tags',
   readmeHeading: 'README',
   noReadme: 'This repository has no README.',
-  installedBadge: 'Downloaded',
   prevPage: 'Previous page',
   nextPage: 'Next page',
   pagination: 'Page {current} of {total} · {count} results',
@@ -294,12 +297,12 @@ export const en: Record<MarketManageLocaleKey, string> = {
   downloading: 'Downloading…',
   downloadDone: 'Downloaded. The plugin is disabled by default; enable it from the managed list.',
   downloadFailed: 'Download failed.',
+  /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: 'Inspecting the repository and analyzing whether it can be installed…',
-  analysisKindBuild: 'This repository looks like a dsh plugin, but has no ready-to-load entry; build it before installing.',
-  analysisKindSkills: 'This repository is a skills/instructions pack, not an installable dsh plugin.',
-  analysisKindPreset: 'This repository is a configuration preset, not an installable dsh plugin.',
-  analysisKindTooling: 'This repository is a development tool or CLI, not an installable dsh plugin.',
-  analysisKindOther: 'This repository was not recognized as an installable dsh plugin.',
+  /** Confirmation line naming the classification the download will be filed under. */
+  classificationNotice: 'Will be tagged as: {classification}',
+  /** Extra note when the download will need a build step before it can load. */
+  buildRequiredNotice: 'This repository has no ready-to-load entry; build it after downloading before enabling.',
   analysisNotConfigured: 'Smart analysis is not configured.',
   analysisConfigGuide: 'This repository lacks standard plugin metadata, so smart analysis is required to judge whether it can be installed. Specify the LLM provider and model used for analysis in the plugin settings/config (Config.llm of plugin-market-host), then retry.',
   analysisModelFailed: 'The smart-analysis model call failed; retry, or check the configured model.',

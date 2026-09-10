@@ -17,6 +17,8 @@ import type {
   ManagedPluginList,
   ManagedPluginView,
   MarketCheckoutKind,
+  MarketInstallNote,
+  PluginMarketClassification,
   PluginMarketRecord,
 } from '../../src/types.ts'
 import { en, zh, type MarketManageLocaleKey } from '../../src/client/locales.ts'
@@ -356,12 +358,21 @@ export interface ManagedViewSeed {
   version?: string | null
   /** V2 ref kind of the pinned ref; absent = legacy record without ref metadata. */
   refKind?: GithubRefKind
+  /** Persisted classification tag; absent = the documented `plugin` default. */
+  classification?: PluginMarketClassification
+  /** Runnable entry of the checkout; defaults from the classification
+   *  (`index.js` for a plugin, null for a skills/other checkout). */
+  entry?: string | null
 }
 
 /** Build one ManagedPluginView from a compact seed. */
 export function makeView(seed: ManagedViewSeed): ManagedPluginView {
   const enabled = seed.enabled ?? false
   const phase = seed.phase ?? (enabled ? 'active' : null)
+  const classification: PluginMarketClassification = seed.classification ?? 'plugin'
+  const entry = seed.entry === undefined
+    ? (classification === 'plugin' ? 'index.js' : null)
+    : seed.entry
   return {
     key: seed.key as PluginMarketRecord['key'],
     record: {
@@ -374,7 +385,8 @@ export function makeView(seed: ManagedViewSeed): ManagedPluginView {
         ...(seed.refKind === undefined ? {} : { refKind: seed.refKind }),
       },
       localDirName: `gh-${seed.key}`,
-      entry: null,
+      entry,
+      classification,
       installedAt: '2026-01-01T00:00:00.000Z',
       enabled,
       trusted: 'trusted',
@@ -386,6 +398,9 @@ export function makeView(seed: ManagedViewSeed): ManagedPluginView {
       phase,
       lastError: seed.lastError === undefined ? null : seed.lastError,
     },
+    // Mirrors the control service's load gate: only a `plugin`-classified
+    // record with a resolved entry can ever be registered.
+    loadable: classification === 'plugin' && entry !== null,
   }
 }
 
@@ -473,7 +488,15 @@ export interface InstallReviewSeed {
   peerDependencies?: string[]
   /** Version resolved by the preview (branch/tag name when pinned). */
   version?: string
-  /** Smart-analysis refusal the review carries (installable: false). */
+  /** Classification the review predicts the download will be filed under. */
+  classification?: PluginMarketClassification
+  /** Extra analyzer explanation shown under the classification line. */
+  entryNote?: string
+  /** Structured, localizable note of the review (host-authored kinds only). */
+  note?: MarketInstallNote
+  /** Whether the checkout needs a build before it can be enabled. */
+  buildRequired?: boolean
+  /** Smart-analysis verdict the review carries (no longer a refusal). */
   analysis?: { readonly kind: MarketCheckoutKind; readonly reason: string }
 }
 
@@ -492,6 +515,12 @@ export function makeInstallReview(seed: InstallReviewSeed) {
   const preview = seed.degraded === true
     ? { status: 'degraded', summary, reason: 'manifest unreadable', code: 'github/bad-response' }
     : { status: 'ready', summary }
+  // A skills-shaped analysis files `skills`; every other non-plugin kind folds
+  // into `other` (the host analyzer's own vocabulary mapping).
+  const classification = seed.classification
+    ?? (seed.analysis === undefined
+      ? 'plugin'
+      : seed.analysis.kind === 'skills' ? 'skills' : 'other')
   return {
     repository: slug,
     key,
@@ -501,6 +530,10 @@ export function makeInstallReview(seed: InstallReviewSeed) {
     existing: null,
     confirmToken: `token-${slug}`,
     expiresAt: '2026-01-02T00:00:00.000Z',
+    classification,
+    ...(seed.buildRequired === true ? { buildRequired: true } : {}),
+    ...(seed.entryNote === undefined ? {} : { entryNote: seed.entryNote }),
+    ...(seed.note === undefined ? {} : { note: seed.note }),
     ...(seed.analysis === undefined ? {} : { analysis: seed.analysis }),
   }
 }
@@ -547,3 +580,4 @@ export function managePageHarness(overrides: Record<string, unknown> = {}) {
   }
   return { props, mocks }
 }
+

@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { MarketControlError, REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
-import {
-  FakeLoader,
-  entryModuleNameFor,
-  key,
-  makeRecord,
-  testbed,
-} from './support/control-testbed.ts'
+import { key, testbed } from './support/control-testbed.ts'
 
 describe('MarketPluginController record-driven lifecycle', () => {
   it('rebuild registers records in key order with disabled stays disabled and enabled loads', async () => {
@@ -204,6 +198,136 @@ describe('MarketPluginController record-driven lifecycle', () => {
     expect(bed.loader.view(key('gh-later'))?.phase).toBe('active')
     const bad = (await controller.list()).entries.find(entry => entry.key === 'gh-bad')
     expect(bad?.runtime.lastError).toContain('boom')
+  })
+})
+
+describe('MarketPluginController load gate (classification / entry)', () => {
+  it('reports loadable per record: only a plugin classification with an entry can load', async () => {
+    const bed = testbed()
+    bed.records.seed('gh-plugin', { enabled: false, localDirName: 'plugin', entry: 'plugin.mjs' })
+    bed.records.seed('gh-legacy', { enabled: false, localDirName: 'legacy', entry: 'plugin.mjs', classification: 'plugin' })
+    bed.records.seed('gh-noentry', { enabled: false, localDirName: 'noentry', entry: null, classification: 'plugin' })
+    bed.records.seed('gh-skills', { enabled: false, localDirName: 'skills', entry: null, classification: 'skills' })
+    bed.records.seed('gh-other', { enabled: false, localDirName: 'other', entry: null, classification: 'other' })
+
+    const list = await bed.controller().list()
+    expect(list.entries.map(entry => [entry.key, entry.loadable])).toEqual([
+      ['gh-legacy', true],
+      ['gh-noentry', false],
+      ['gh-other', false],
+      ['gh-plugin', true],
+      ['gh-skills', false],
+    ])
+  })
+
+  it('refuses to enable a skills/other checkout with market/not-loadable and stays manageable', async () => {
+    const bed = testbed()
+    const skills = bed.records.seed('gh-skills-pack', {
+      enabled: false,
+      localDirName: 'skills-pack',
+      entry: null,
+      classification: 'skills',
+    })
+    const other = bed.records.seed('gh-docs', {
+      enabled: false,
+      localDirName: 'docs',
+      entry: null,
+      classification: 'other',
+    })
+    const controller = bed.controller()
+    await controller.rebuild()
+
+    const skillsError = await controller.setEnabled(skills.key, true).catch((error: unknown) => error)
+    expect(skillsError).toBeInstanceOf(MarketControlError)
+    expect(skillsError).toMatchObject({
+      code: 'market/not-loadable',
+      details: { key: 'gh-skills-pack', reason: 'classification' },
+    })
+    expect((skillsError as Error).message).toContain('skills')
+    expect((await controller.setEnabled(other.key, true).catch((error: unknown) => error))).toMatchObject({
+      code: 'market/not-loadable',
+      details: { key: 'gh-docs', reason: 'classification' },
+    })
+
+    // Nothing was persisted or loaded: the gate fires before any side effect.
+    expect((await bed.records.get(skills.key))?.enabled).toBe(false)
+    expect((await bed.records.get(other.key))?.enabled).toBe(false)
+    expect(bed.loader.view(skills.key)).toMatchObject({ disabled: true, phase: null })
+
+    // Disabling stays allowed (idempotent no-op here), as does removal.
+    expect((await controller.setEnabled(other.key, false)).enabled).toBe(false)
+    const request = await controller.requestRemove(skills.key)
+    expect(request.key).toBe(skills.key)
+  })
+
+  it('refuses a plugin-classified record filed without an entry (market/not-loadable, reason entry)', async () => {
+    const bed = testbed()
+    const record = bed.records.seed('gh-build-required', {
+      enabled: false,
+      localDirName: 'build-required',
+      entry: null,
+      classification: 'plugin',
+    })
+    const caught = await bed.controller().setEnabled(record.key, true).catch((error: unknown) => error)
+    expect(caught).toMatchObject({
+      code: 'market/not-loadable',
+      details: { key: 'gh-build-required', reason: 'entry' },
+    })
+    expect((caught as Error).message).toContain('no plugin entry')
+  })
+
+  it('keeps enabling a plain plugin record (no classification tag) working', async () => {
+    const bed = testbed()
+    const record = bed.records.seed('gh-plain', { enabled: false, localDirName: 'plain', entry: 'plugin.mjs' })
+    const controller = bed.controller()
+    const enabled = await controller.setEnabled(record.key, true)
+    expect(enabled.enabled).toBe(true)
+    expect(bed.loader.view(record.key)).toMatchObject({ disabled: false, phase: 'active' })
+    expect((await controller.list()).entries[0]).toMatchObject({ key: 'gh-plain', loadable: true })
+  })
+
+  it('never builds an ENABLED row for a non-loadable record whose flag was hand-edited', async () => {
+    const bed = testbed()
+    // A hand-edited records file can claim `enabled: true`; the row builder is
+    // the second line of defence and must not import a missing entry.
+    const skills = bed.records.seed('gh-skills-pack', {
+      enabled: true,
+      localDirName: 'skills-pack',
+      entry: null,
+      classification: 'skills',
+    })
+    const noEntry = bed.records.seed('gh-noentry', {
+      enabled: true,
+      localDirName: 'noentry',
+      entry: null,
+      classification: 'plugin',
+    })
+    const controller = bed.controller()
+    await controller.rebuild()
+
+    expect(bed.loader.view(skills.key)).toMatchObject({ disabled: true, phase: null })
+    expect(bed.loader.view(noEntry.key)).toMatchObject({ disabled: true, phase: null })
+    // The unreachable flag is written back so the record agrees with the row.
+    expect((await bed.records.get(skills.key))?.enabled).toBe(false)
+    expect((await bed.records.get(noEntry.key))?.enabled).toBe(false)
+
+    const entries = (await controller.list()).entries
+    expect(entries.every(entry => entry.loadable === false)).toBe(true)
+    expect(entries.every(entry => entry.runtime.disabled === true)).toBe(true)
+    // The reason is reported per row instead of silently dropping the state.
+    expect(entries[0]?.runtime.lastError).toContain('cannot be loaded')
+  })
+
+  it('keeps an enabled row of a loadable record (the guard only targets non-loadable ones)', async () => {
+    const bed = testbed()
+    const record = bed.records.seed('gh-on', { enabled: true, localDirName: 'on', entry: 'plugin.mjs' })
+    await bed.controller().rebuild()
+    expect(bed.loader.view(record.key)).toMatchObject({ disabled: false, phase: 'active' })
+    expect((await bed.records.get(record.key))?.enabled).toBe(true)
+    expect((await bed.controller().list()).entries[0]).toMatchObject({
+      loadable: true,
+      runtime: { disabled: false, lastError: null },
+    })
   })
 })
 

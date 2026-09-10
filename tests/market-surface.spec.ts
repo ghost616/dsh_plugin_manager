@@ -18,14 +18,20 @@ import {
   parseRefSeg,
   parsePluginKey,
   pluginKeyForGithubRef,
+  probeCheckoutEntry,
   refSegOf,
   requireMarketLlm,
+  resolveAnalysisDistribution,
   resolveAnalysisVerdict,
   resolveInstallTarget,
   normalizeMarketConfig,
   openMarketRepository,
 } from '../src/host/market/index.ts'
 import { MarketError } from '../src/host/market/errors.ts'
+import {
+  DEFAULT_PLUGIN_MARKET_CLASSIFICATION,
+  isPluginMarketClassification,
+} from '../src/types.ts'
 
 /**
  * Guards the single-import reuse surface the framework composer consumes:
@@ -81,11 +87,27 @@ describe('plugin-market-host public export surface', () => {
     expect(typeof buildAnalyzePrompt).toBe('function')
     expect(typeof parseAnalysisOutput).toBe('function')
     expect(typeof resolveAnalysisVerdict).toBe('function')
+    expect(typeof probeCheckoutEntry).toBe('function')
     expect(typeof requireMarketLlm).toBe('function')
     expect(README_CANDIDATES[0]).toBe('README')
     expect(SNAPSHOT_ENTRY_LIMIT).toBeGreaterThan(0)
     expect(ANALYSIS_REASON_MAX_LENGTH).toBeGreaterThan(0)
     expect(ANALYSIS_OUTPUT_MAX_LENGTH).toBeGreaterThan(ANALYSIS_REASON_MAX_LENGTH)
+  })
+
+  it('classifies instead of refusing through the analyzer surface', () => {
+    expect(resolveAnalysisDistribution).toBe(resolveAnalysisVerdict)
+    expect(resolveAnalysisDistribution({ kind: 'skills', reason: 'a skills pack', entryHint: null })).toMatchObject({
+      classification: 'skills',
+      entry: null,
+      reason: 'a skills pack',
+    })
+    expect(resolveAnalysisDistribution({ kind: 'preset', reason: 'a preset', entryHint: null }).classification).toBe('other')
+    expect(resolveAnalysisDistribution({ kind: 'plugin', reason: 'plugin', entryHint: 'index.js' }).classification).toBe('plugin')
+    // The classification tag vocabulary is shared with the record store.
+    expect(DEFAULT_PLUGIN_MARKET_CLASSIFICATION).toBe('plugin')
+    expect(isPluginMarketClassification('skills')).toBe(true)
+    expect(isPluginMarketClassification('preset')).toBe(false)
   })
 
   it('keeps stable error behavior through the surface (market/llm-unconfigured)', () => {
