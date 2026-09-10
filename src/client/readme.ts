@@ -1,4 +1,4 @@
-﻿/**
+/**
  * README markdown → sanitized HTML for the repository detail view.
  *
  * Pipeline: marked (GFM) → DOMPurify.sanitize → best-effort URL fixup inside

@@ -5,14 +5,22 @@
  * search / previewInstall / install surface and its failure branches.
  *
  * HTTP robustness (this spec used to flake as "fetch failed / bad port" when
- * several specs bound sockets in parallel): every case serves on an EPHEMERAL
- * port (listen 0 → read the assigned port), waits until the listener is
- * actually accepting connections before asserting (`serve()` retries the
- * connect step), and retries a transient request failure with backoff instead
- * of depending on a lucky rerun. Teardown destroys idle keep-alive sockets so
- * `close()` cannot hang.
+ * several specs bound sockets in parallel):
+ * - every case serves on an EPHEMERAL port (`listen 0` → read the assigned
+ *   port) and `serve()` waits until the listener really accepts connections
+ *   (`OPTIONS` probe, 3 s bound) before any assertion runs;
+ * - TEARDOWN actually used: `closeServer()` = destroy the tracked live sockets
+ *   (`RouterServer.destroySockets()`, so a keep-alive connection can never make
+ *   `close()` hang) → `server.closeIdleConnections()` → wait for `close` with a
+ *   2 s bound. Nothing else terminates the listeners.
+ * - REQUEST retries are method-aware and observable: `GET`/`OPTIONS` (the
+ *   readiness probe and the raw 405 probe) may repeat freely, while a `POST`
+ *   (state-mutating: install/remove/enable) is repeated ONLY when the transport
+ *   proves the request never reached a listener (`ECONNREFUSED`/`ENOTFOUND`);
+ *   every repeat logs one `[control-webchannel] retry …` line, so a genuine
+ *   defect surfaces as a failure instead of being masked by silent retries.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
@@ -25,34 +33,60 @@ import { FakeEngines, fakeAnalysisEngine, fakeDistribution, makeSourceOps, testb
 const SERVE_READY_TIMEOUT_MS = 3_000
 /** Attempts of one request (initial try + retries) on a transient failure. */
 const REQUEST_ATTEMPTS = 4
+/** Idempotent methods: repeating them can never duplicate a state change. */
+const IDEMPOTENT_METHODS: readonly string[] = ['GET', 'OPTIONS', 'HEAD']
+/**
+ * Transport codes a NON-idempotent request may be repeated on. Both mean no
+ * listener ever accepted the request, so no handler ran and no state changed.
+ */
+const NOT_SERVED_CODES: readonly string[] = ['ECONNREFUSED', 'ENOTFOUND']
+/** Transport codes an idempotent request may be repeated on (socket churn). */
+const TRANSIENT_CODES: readonly string[] = [...NOT_SERVED_CODES, 'ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']
 
 const contexts: Context[] = []
-const servers: Server[] = []
+const servers: RouterServer[] = []
+/** Every router this spec started (teardown validation reads them back). */
+const servedRouters: RouterServer[] = []
+/** Sockets the teardown really destroyed (must be > 0 — see the afterAll). */
+let destroyedSocketCount = 0
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
-  await Promise.all(servers.splice(0).map(server => closeServer(server)))
+  await Promise.all(servers.splice(0).map(router => closeServer(router)))
+})
+
+afterAll(() => {
+  // Teardown validation: the socket-destroy step is not decorative — the
+  // requests above leave keep-alive sockets behind, and the teardown has to cut
+  // them. If this ever drops to 0, the tracking/listener pair went stale again.
+  expect(destroyedSocketCount).toBeGreaterThan(0)
+  expect(servedRouters.every(router => !router.server.listening)).toBe(true)
 })
 
 /**
- * Close one test server without ever hanging the suite: destroy the idle
- * keep-alive sockets a previous request left behind, then wait for `close`
- * with a short bound.
+ * Close one test server without ever hanging the suite: destroy the tracked
+ * live sockets (a keep-alive connection would otherwise hold `close()` open),
+ * drop the idle ones as well, then wait for `close` with a short bound.
  */
-function closeServer(server: Server): Promise<void> {
+function closeServer(router: RouterServer): Promise<void> {
+  const { server } = router
   return new Promise<void>((resolve) => {
     if (!server.listening) {
+      router.destroySockets()
       resolve()
       return
     }
-    const done = (): void => { resolve() }
-    const timer = setTimeout(done, 2_000)
+    const timer = setTimeout(() => {
+      router.destroySockets()
+      resolve()
+    }, 2_000)
     timer.unref?.()
     server.close(() => {
       clearTimeout(timer)
-      done()
+      resolve()
     })
     server.closeIdleConnections()
+    router.destroySockets()
   })
 }
 
@@ -62,7 +96,7 @@ class RouterServer {
   private readonly exact = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>()
   /** Origin of the running listener; set by {@link serve} once it is ready. */
   private origin: string | null = null
-  /** Live sockets, tracked so teardown can destroy keep-alive connections. */
+  /** Live sockets; teardown destroys them so `close()` can never hang. */
   private readonly sockets = new Set<Socket>()
 
   constructor() {
@@ -99,8 +133,13 @@ class RouterServer {
     this.origin = `http://127.0.0.1:${address.port}`
   }
 
-  /** Drop every tracked socket (teardown must not wait on keep-alive). */
+  /**
+   * Destroy every tracked live socket (teardown step, see `closeServer`):
+   * keep-alive connections left by a previous request must not make `close()`
+   * wait for their idle timeout.
+   */
   destroySockets(): void {
+    if (this.sockets.size > 0) destroyedSocketCount += this.sockets.size
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
   }
@@ -126,7 +165,8 @@ class RouterServer {
  * platform, so the readiness step is a real request rather than a callback.
  */
 async function serve(router: RouterServer): Promise<void> {
-  servers.push(router.server)
+  servers.push(router)
+  servedRouters.push(router)
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => { reject(error) }
     router.server.once('error', onError)
@@ -154,15 +194,24 @@ function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => { setTimeout(resolve, ms) })
 }
 
-/** Whether a thrown fetch error is worth retrying (transient transport). */
-function isRetryableFetchError(error: unknown): boolean {
+/** Transport code of a thrown fetch error (the `cause.code` Node attaches). */
+function transportCodeOf(error: unknown): string | undefined {
   const cause = (error as { cause?: { code?: string } } | null)?.cause
-  const code = typeof cause?.code === 'string' ? cause.code : undefined
-  return code === 'ECONNRESET'
-    || code === 'ECONNREFUSED'
-    || code === 'EPIPE'
-    || code === 'UND_ERR_SOCKET'
-    || code === 'ENOTFOUND'
+  return typeof cause?.code === 'string' ? cause.code : undefined
+}
+
+/**
+ * Whether one attempt may be repeated. A state-mutating request (POST) is only
+ * repeated when the transport proves nothing was served — the connection was
+ * refused or the host was unknown — because a repeated POST could otherwise
+ * duplicate a side effect and hide a real defect; idempotent methods may also
+ * absorb socket churn.
+ */
+function mayRepeat(method: string, error: unknown): boolean {
+  const code = transportCodeOf(error)
+  if (code === undefined) return false
+  const allowed = IDEMPOTENT_METHODS.includes(method.toUpperCase()) ? TRANSIENT_CODES : NOT_SERVED_CODES
+  return allowed.includes(code)
 }
 
 type WireResult =
@@ -170,30 +219,34 @@ type WireResult =
   | { ok: false; error: { code: string; message: string; details: object } }
 
 /**
- * One HTTP round trip with a bounded retry: an ephemeral port avoids conflicts,
- * and the retry absorbs the residual "socket not reusable yet" window a fast
- * sequence of local requests can hit under load.
+ * One HTTP round trip with a bounded, method-aware retry (see `mayRepeat`).
+ * Every actual repeat logs one line with the method, the attempt number and the
+ * transport code, so a retry can never silently mask a defect while debugging.
  */
 async function request(
   router: RouterServer,
   init: { method: string; body?: unknown },
 ): Promise<{ status: number; text: string }> {
-  let lastError: unknown
-  for (let attempt = 0; attempt < REQUEST_ATTEMPTS; attempt += 1) {
+  const method = init.method.toUpperCase()
+  let attempt = 0
+  for (;;) {
+    attempt += 1
     try {
       const response = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
-        method: init.method,
+        method,
         headers: { 'content-type': 'application/json' },
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
       })
       return { status: response.status, text: await response.text() }
     } catch (error) {
-      lastError = error
-      if (!isRetryableFetchError(error)) throw error
-      await delay(25 * (attempt + 1))
+      // Not repeatable, or out of attempts: surface the real failure as-is.
+      if (!mayRepeat(method, error) || attempt >= REQUEST_ATTEMPTS) throw error
+      console.warn(
+        `[control-webchannel] retry ${method} ${MARKET_WEB_ROUTE_PATH} — attempt ${attempt + 1}/${REQUEST_ATTEMPTS} after ${transportCodeOf(error) ?? 'unknown transport error'}`,
+      )
+      await delay(25 * attempt)
     }
   }
-  throw new Error(`the local channel request did not succeed after ${REQUEST_ATTEMPTS} attempts: ${String(lastError)}`)
 }
 
 async function post(router: RouterServer, body: unknown, expectStatus = 200): Promise<{ status: number; body: WireResult }> {

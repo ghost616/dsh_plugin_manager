@@ -60,8 +60,9 @@ Requires Node `^22.19.0 || >=24` and pnpm.
 pnpm install
 pnpm build        # tsc -b (types to lib/types) && tsdown (lib/index.js, lib/client.js)
 pnpm verify       # demo profile + real single-row Loader activation
-pnpm test         # check-encoding && tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
+pnpm test         # check-encoding && selftest && tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
 pnpm check:encoding   # the pre-flight alone (also the first step of `test`)
+pnpm check:encoding:selftest   # fixture-driven self-test of the pre-flight (second step of `test`)
 ```
 
 - `node scripts/check-encoding.mjs` runs first because it is the cheapest gate
@@ -69,6 +70,15 @@ pnpm check:encoding   # the pre-flight alone (also the first step of `test`)
   can see: invalid UTF-8, C1 control characters, cp1252 mojibake and `U+FFFD`,
   plus `git diff --check`-style whitespace. Warnings (UTF-8 BOM, blank line at
   end of file) are printed but never fail the run.
+- `node scripts/check-encoding.mjs --self-test` (also `pnpm
+  check:encoding:selftest`) creates synthetic fixtures in a temp directory and
+  asserts every judgement and the exit code: clean UTF-8 with non-ASCII text
+  passes, invalid bytes / C1 / mojibake / `U+FFFD` fail, BOM and blank-at-eof
+  only warn, NUL-bearing and empty files are skipped, and the `git diff --check`
+  parser ignores diff-content lines. It never writes inside the repository and
+  cleans up after itself. It is the second step of `pnpm test`, so the gate can
+  never silently rot: editing the checker without updating its expectations fails
+  the same run.
 - `tsc -b` type-checks both leaves and emits `lib/types`.
 - `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` (which spans both
   faces, so that project has DOM + React JSX and node ambient types at once)
@@ -94,6 +104,18 @@ artifacts alike. `.gitignore` ignores the directory wholesale (`.lizhu_env/`),
 so nothing inside it is version-controlled; `git rm -r --cached .lizhu_env` was
 run once to drop the files that had been added, keeping the working tree
 untouched.
+
+**This is a deliberate decision, not an oversight.** The browser specs are a
+machine-local verification tool: their value is the *conclusion* they produce
+("the layout holds in a real Chromium"), and that conclusion is recorded in the
+module change history rather than by committing the harness. The specs are also
+not portable as-is (they depend on a local Chromium install, local
+`node_modules` and a local dev-server port), so tracking them would add a second,
+silently rotting copy of component markup without giving CI anything runnable.
+The single-writer rule below is the alternative discipline: machine runs are
+recorded where they are read (the module history), not where they cannot run.
+Do not "fix" this by moving a spec under `tests/` or by re-adding `.lizhu_env/`
+to the index.
 
 `vitest.config.ts` keeps excluding `.lizhu_env/**` from collection. Being
 ignored by git does not make a directory invisible to the unit runner — vitest

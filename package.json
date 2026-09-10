@@ -61,8 +61,9 @@
     "prepare": "tsdown --config tsdown.prepare.config.ts",
     "verify": "node scripts/verify-load.mjs",
     "check:encoding": "node scripts/check-encoding.mjs",
+    "check:encoding:selftest": "node scripts/check-encoding.mjs --self-test",
     "install-profile": "node scripts/install-profile.mjs",
-    "test": "node scripts/check-encoding.mjs && tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run",
+    "test": "node scripts/check-encoding.mjs && node scripts/check-encoding.mjs --self-test && tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run",
     "test:watch": "vitest"
   },
   "peerDependencies": {

@@ -678,21 +678,118 @@ function compact(text: string): string {
   return text.replace(/\s+/g, ' ')
 }
 
+/** 去掉行尾 `//` 注释（字符串内的 `//` 不视为注释起点）。 */
+function stripLineComment(line: string): string {
+  let quote: '"' | "'" | '`' | null = null
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i]
+    if (quote !== null) {
+      if (char === '\\') i += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '/' && line[i + 1] === '/') return line.slice(0, i)
+    if (char === '"' || char === "'" || char === '`') quote = char
+  }
+  return line
+}
+
+/** 该行的函数体是否就在这一行开启（去掉行尾注释后以 `{` 收尾）。 */
+function bodyOpensOnThisLine(line: string): boolean {
+  return stripLineComment(line).trimEnd().endsWith('{')
+}
+
 /**
- * 收集一处 spec 文本里的**全部** `it` 声明行并返回不合规者（声明行未以 `{`
- * 收尾，说明语句被塞进了签名行）。
- *
- * 词法刻意放宽为「行首 `it` + 词边界」，`it` 之后允许任意可行字符，因此
- * `it('…', () => {`、`it.each([[1], [2]])('…', () => {`、
- * `it.skip('…', () => {`、`it.only(…)`、多行参数的起始行等形态都会被纳入检查
- * ——不再依赖「`it.each(<无嵌套括号>)`」这种更窄的猜测，避免静默漏检。
+ * 逐行计算**圆括号净深度**（累加值）：`depths[i]` 是第 i 行结束时的深度。
+ * 扫描时跳过字符串/模板/行注释内容，因此字符串或注释里的 `(`、`)` 不参与配平
+ * （模板表达式内的括号按代码计）。
  */
-function strayStatementsOnItDeclarations(text: string): string[] {
+function parenDepths(lines: readonly string[]): number[] {
+  let depth = 0
+  return lines.map((line) => {
+    let quote: '"' | "'" | '`' | null = null
+    let inLineComment = false
+    for (let i = 0; i < line.length; i += 1) {
+      const char = line[i]
+      const next = line[i + 1]
+      if (inLineComment) break
+      if (quote !== null) {
+        if (char === '\\') i += 1
+        else if (char === quote) quote = null
+        continue
+      }
+      if (char === '/' && next === '/') {
+        inLineComment = true
+        continue
+      }
+      if (char === '"' || char === "'" || char === '`') {
+        quote = char
+        continue
+      }
+      if (char === '(') depth += 1
+      else if (char === ')') depth -= 1
+    }
+    return depth
+  })
+}
+
+/**
+ * 行首以 `it` 词元开头、且该词元后紧跟可行字符（`(`/`.`/反引号/引号）的行 ——
+ * 即一处 `it` 声明的起始行（`it(`、`it.each(`、`it.skip(`、`it.only(` …）。
+ */
+function itDeclarationStartLines(text: string): { line: string; index: number }[] {
   return text
     .split(/\r?\n/)
     .map((line, index) => ({ line, index }))
     .filter(({ line }) => /^\s*it\b/.test(line) && /[([`'"]/.test(line.slice(line.indexOf('it') + 2)))
-    .filter(({ line }) => !line.trim().endsWith('{'))
+}
+
+/**
+ * 跨行（多行参数）`it` 声明的起始行：该行于行首开启圆括号、并在后续行才闭合。
+ *
+ * 仅用作**前置条件探测**（见下方守卫的约定），不参与违规判定：一旦目标文件
+ * 出现这种写法，严格守卫就会把它误报为违规，所以先把它探测出来并断言为
+ * false，让「严格断言」的可靠性可证。
+ */
+function opensCrossLineItCall(text: string): boolean {
+  const lines = text.split(/\r?\n/)
+  const depths = parenDepths(lines)
+  return itDeclarationStartLines(text).some(({ line, index }) => {
+    if (bodyOpensOnThisLine(line)) return false
+    const delta = parenDepths([line])[0] ?? 0
+    const depthBefore = (depths[index] ?? 0) - delta
+    const depthAfter = depths[index] ?? 0
+    // 行首开启调用（此前深度为 0）且该行结束时仍在该调用内部。
+    return depthBefore === 0 && depthAfter > 0
+  })
+}
+
+/**
+ * 收集一处 spec 文本里的 `it` 声明行并返回不合规者（声明行未以 `{` 收尾，
+ * 说明语句被塞进了签名行）。
+ *
+ * 词法放宽为「行首 `it` + 词边界 + 后随可行字符」，因此 `it(`、
+ * `it.each([[1], [2]])(`、`it.each(items.map((x) => [x]))(`、`it.skip(`、
+ * `it.only(` 等形态都被纳入 —— 不再依赖「`it.each(<无嵌套括号>)`」这种更窄的
+ * 猜测，避免静默漏检。
+ *
+ * **方案选择（b：保留严格词法 + 明确约定）与理由**：方案 a（按括号配平容忍
+ * 续行）在实现中被证伪 —— 一行式违规 `it('x', () => { const y = 1` 与续行
+ * 起始行 `it.each([` 的行末圆括号深度**完全相同**（都是「行首开调用、行末
+ * 仍在调用内部」），任何纯行内/深度信号都无法把两者区分开，据此容忍会连带
+ * 放过真实违规；而基于「后续行是否闭合」的启发式在**函数体花括号未闭合**
+ * 的样本上与文件级余量相撞，同样不可靠。因此采用方案 b，把约定写死为：
+ *
+ *   本仓库的 spec **不使用跨行 `it` 声明**；每一处 `it`（含 `it.each`、
+ *   `it.skip`、`it.only`）必须整体写在一行并以 `{` 收尾。
+ *
+ * 违规即报出「行号: 行内容」。该约定的可靠性由调用方的前置断言
+ * {@link opensCrossLineItCall} === false 保证：目标文件确实没有跨行写法，
+ * 严格断言因此不存在假阳性面。
+ */
+function strayStatementsOnItDeclarations(text: string): string[] {
+  return itDeclarationStartLines(text)
+    .filter(({ line }) => !bodyOpensOnThisLine(line))
     .map(({ line, index }) => `${index + 1}: ${line.trim()}`)
 }
 
@@ -704,6 +801,10 @@ describe('[挑战] §5 契约检查', () => {
     // 一次）。按放宽后的词法找**每一处**声明（与标题措辞、参数个数、修饰符、
     // 参数嵌套深度无关），断言声明行以 `{` 收尾——即语句没有被塞进签名行。
     const text = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
+    // 约定（方案 b）：本仓库 spec 不使用跨行 it 声明。这里显式断言该前提，
+    // 使下面的严格断言（声明行必须以 `{` 收尾，含 it.each）不存在假阳性面；
+    // 一旦将来出现跨行写法，本断言会先失败并提示改写为一行式。
+    expect(opensCrossLineItCall(text)).toBe(false)
     const offenders = strayStatementsOnItDeclarations(text)
     expect(offenders).toEqual([])
     // 反向守卫：本次关注的用例确实存在，避免断言因改名而空转。
@@ -713,24 +814,40 @@ describe('[挑战] §5 契约检查', () => {
   })
 
   it.each([
-    ["it('x', async () => { const y = 1", 'plain it with a trailing statement'],
-    ["it.skip('x', () => { const y = 1", 'it.skip with a trailing statement'],
-    ["it.only('x', () => { const y = 1", 'it.only with a trailing statement'],
-    ["it.each([[1], [2]])('x', () => { const y = 1", 'it.each with nested array arguments'],
-    ["it.each([[1], [2]])('x', () => {", 'it.each with nested arguments but a clean body'],
-    ["it('x', () => {", 'plain it with a clean body'],
+    // 一行式违规：语句被塞在签名行上（含带尾注释的形态）。
+    ["it('x', async () => { const y = 1", 'plain it with a trailing statement', 1],
+    ["it.skip('x', () => { const y = 1", 'it.skip with a trailing statement', 1],
+    ["it.only('x', () => { const y = 1", 'it.only with a trailing statement', 1],
+    ["it.each([[1], [2]])('x', () => { const y = 1", 'it.each with nested array arguments', 1],
+    ["it('x (with parens)', () => { const y = 1", 'parens inside the title string (violation)', 1],
+    ["it('x', () => { const y = 1 // trailing comment", 'violation with a trailing comment', 1],
+    // 合规的一行式声明。
+    ["it('x', () => {", 'plain it with a clean body', 0],
+    ["it.each([[1], [2]])('x', () => {", 'it.each with nested arguments but a clean body', 0],
+    ["it.each(items.map((x) => [x]))('x', () => {", 'it.each whose argument contains )', 0],
+    ['it(`template ${name} title`, () => {', 'template literal in the title with a clean body', 0],
+    ["it('x', () => { // trailing ) comment", 'trailing line comment carrying a stray paren', 0],
+    ["it('x (with parens)', () => {", 'parens inside the title string (clean body)', 0],
   ] as const)(
     'the it-collection guard handles %s (%s)',
-    (line, _label) => {
+    (line, _label, expectedOffenders) => {
       const offenders = strayStatementsOnItDeclarations(`${line}\n  expect(1).toBe(1)\n})\n`)
-      if (line.trim().endsWith('{')) {
-        expect(offenders).toEqual([])
-      } else {
-        expect(offenders).toHaveLength(1)
-        expect(offenders[0]).toContain('1: ')
-      }
+      expect(offenders).toHaveLength(expectedOffenders)
+      if (expectedOffenders === 1) expect(offenders[0]).toContain('1: ')
     },
   )
+
+  it('documents the strict convention: cross-line it declarations are detected as a precondition', () => {
+    // 约定（方案 b）：spec 不使用跨行 it 声明。守卫的前置断言负责探测它，
+    // 一旦出现即失败并提示改写为一行式，而不是悄悄放过或事后误报。
+    const crossLine = "  it.each([\n    ['a'],\n    ['b (with parens)'],\n  ])('x', () => {\n    expect(1).toBe(1)\n  })\n"
+    expect(opensCrossLineItCall(crossLine)).toBe(true)
+    const singleLine = "  it('a', () => {\n    expect(1).toBe(1)\n  })\n  it.skip('b', () => {\n  })\n"
+    expect(opensCrossLineItCall(singleLine)).toBe(false)
+    // 探测只看「行首开调用且行末仍在调用内部」，不依赖字符串/注释里的括号。
+    expect(opensCrossLineItCall("  it('x (parens)', () => {\n    expect(1).toBe(1)\n  })\n")).toBe(false)
+    expect(opensCrossLineItCall("  it('x', () => { // stray ) in comment\n    expect(1).toBe(1)\n  })\n")).toBe(false)
+  })
 
   it('src/types.ts stays client-safe: no runtime node:* import or require', async () => {
     // 客户端按值导入本文件（分类词表/守卫/默认值），因此这里只校验真正的
