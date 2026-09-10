@@ -90,6 +90,12 @@ function pageOf(page: number, items: SearchItemSeed[], totalCount: number) {
  * Switch to the GitHub tab and return the tab's own panel. Every GitHub-tab
  * assertion is scoped to this element: the page also carries the local
  * repository tab, which owns a filter input of its own.
+ *
+ * The MODAL dialogs are the one exception: InstallDialog and RemoveDialog are
+ * rendered by the page (a sibling of both tabpanels), because a panel is only
+ * `hidden` when the other tab is selected and a modal inside a hidden subtree
+ * would be mounted-but-invisible. Look those up with `host.querySelector`,
+ * never through `panelOf(host)`.
  */
 async function openMarket(host: HTMLElement): Promise<HTMLElement> {
   await click(host.querySelector('[data-market-tab="github"]'))
@@ -313,7 +319,10 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     expect(installAction.textContent).toContain(zh.downloadButton)
     await click(installAction)
     await flush()
-    const installDialog = dialog.querySelector('[data-dialog="install"]')
+    // The download dialog is rendered by the PAGE, not by the GitHub panel:
+    // it must stay visible while that panel is hidden, so look it up on the
+    // page host rather than inside the panel subtree.
+    const installDialog = host.querySelector('[data-dialog="install"]')
     expect(installDialog).not.toBeNull()
     expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'dev', 'branch')
 
@@ -322,7 +331,7 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'dev', 'branch')
     await click(installDialog?.querySelector('[data-dialog-done]'))
     await flush()
-    expect(dialog.querySelector('[data-dialog="install"]')).toBeNull()
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
 
     // The roster reloaded; the downloaded dev ref is annotated inside the
     // dropdown, and the still-selected action turns into a downloaded state.
@@ -369,7 +378,7 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     await click(dialog.querySelector('[data-ref-install]'))
     await flush()
     expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'main', 'branch')
-    const installDialog = dialog.querySelector('[data-dialog="install"]')
+    const installDialog = host.querySelector('[data-dialog="install"]')
     expect(installDialog?.querySelector('[data-overwrite-notice]')).not.toBeNull()
     const degraded = installDialog?.querySelector('[data-degraded-notice]')
     expect(degraded?.getAttribute('data-degraded-code')).toBe('github/bad-response')
@@ -403,14 +412,14 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     await click(dialog.querySelector('[data-ref-install]'))
     await flush()
     expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'v1.0.0', 'tag')
-    await click(dialog.querySelector('[data-install-confirm]'))
+    await click(host.querySelector('[data-install-confirm]'))
     await flush()
     expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0', 'tag')
-    const error = dialog.querySelector('[data-install-error]')
+    const error = host.querySelector('[data-install-error]')
     expect(error).not.toBeNull()
     expect(error?.getAttribute('data-error-code')).toBe('market/confirm-expired')
     expect(error?.textContent).toContain(zh.confirmExpired)
-    expect(dialog.querySelector('[data-repreview]')).not.toBeNull()
+    expect(host.querySelector('[data-repreview]')).not.toBeNull()
   })
 
   it('ignores a late search result after the page unmounts', async () => {
@@ -1084,7 +1093,8 @@ describe('ManagePluginsTab smart-install analysis states', () => {
     await flush()
     await click(market.querySelector('[data-ref-install]'))
     await flush()
-    const installDialog = market.querySelector('[data-dialog="install"]')
+    // Page-level dialog (the GitHub panel never contains it).
+    const installDialog = host.querySelector('[data-dialog="install"]')
     if (installDialog === null) throw new Error('install dialog did not open')
     return installDialog as HTMLElement
   }
@@ -1234,7 +1244,105 @@ describe('ManagePluginsTab smart-install analysis states', () => {
   })
 })
 
+describe('ManagePluginsTab tab switches with an open dialog', () => {
+  /** Open the download review from the GitHub tab's detail view. */
+  async function openInstallDialog(host: HTMLElement): Promise<HTMLElement> {
+    const market = await openMarket(host)
+    await searchIn(market, 'helper')
+    await click(market.querySelector('[data-row-details]'))
+    await flush()
+    await selectIn(market.querySelector('[data-ref-select]'), 'branch:main')
+    await flush()
+    await click(market.querySelector('[data-ref-install]'))
+    await flush()
+    const dialog = host.querySelector('[data-dialog="install"]')
+    if (dialog === null) throw new Error('install dialog did not open')
+    return dialog as HTMLElement
+  }
+
+  function oneRepoHarness() {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    return { repositoryDetail, search }
+  }
+
+  it('keeps the open download dialog visible and focusable when the GitHub tab is hidden', async () => {
+    const { repositoryDetail, search } = oneRepoHarness()
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openInstallDialog(host)
+    expect(dialog.contains(document.activeElement)).toBe(true)
+
+    await click(host.querySelector('[data-market-tab="local"]'))
+    await flush()
+
+    // The dialogs live at page level, so hiding the GitHub panel cannot hide
+    // them: no mounted-but-invisible aria-modal, and the focus stays on a
+    // visible control inside the dialog.
+    const githubPanel = host.querySelector<HTMLElement>('[data-market-panel="github"]')!
+    expect(githubPanel.hidden).toBe(true)
+    expect(githubPanel.contains(dialog)).toBe(false)
+    const stillOpen = host.querySelector('[data-dialog="install"]')
+    expect(stillOpen).not.toBeNull()
+    expect(stillOpen!.closest('[hidden]')).toBeNull()
+    expect(stillOpen!.contains(document.activeElement)).toBe(true)
+    expect(document.activeElement?.closest('[hidden]')).toBeNull()
+
+    // The review is still fully operable from the local tab, and closing it
+    // returns the user to the tab they are actually looking at.
+    await click(stillOpen!.querySelector('[data-dialog-cancel]'))
+    await flush()
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+    expect(host.querySelector('[data-market-tab="local"]')?.getAttribute('aria-selected')).toBe('true')
+    // The hidden GitHub tab kept its own state through all of it.
+    expect(panelOf(host).querySelector('[data-detail-view]')).not.toBeNull()
+  })
+
+  it('keeps the open removal dialog visible and focusable when the local tab is hidden', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-a', repository: 'octocat/demo-plugin', enabled: false },
+    ]))
+    const { props } = managePageHarness({ list })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    await click(host.querySelector('[data-remove-trigger]'))
+    await flush()
+    const dialog = host.querySelector('[data-dialog="remove"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.contains(document.activeElement)).toBe(true)
+
+    await click(host.querySelector('[data-market-tab="github"]'))
+    await flush()
+
+    const localPanel = host.querySelector<HTMLElement>('[data-market-panel="local"]')!
+    expect(localPanel.hidden).toBe(true)
+    expect(localPanel.contains(dialog)).toBe(false)
+    const stillOpen = host.querySelector('[data-dialog="remove"]')
+    expect(stillOpen).not.toBeNull()
+    expect(stillOpen!.closest('[hidden]')).toBeNull()
+    expect(stillOpen!.contains(document.activeElement)).toBe(true)
+
+    // Escape still dismisses it from the GitHub tab, and the removal target is
+    // cleared rather than left pending behind the hidden panel.
+    await act(async () => {
+      stillOpen!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    await flush()
+    expect(host.querySelector('[data-dialog="remove"]')).toBeNull()
+    expect(host.querySelector('[data-plugin-row]')).not.toBeNull()
+  })
+})
+
 describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
+  /** Open the market modal and drive it into the install review dialog. */
   /** Open the market modal and drive it into the install review dialog. */
   async function openInstallDialog(host: HTMLElement): Promise<HTMLElement> {
     const market = await openMarket(host)
@@ -1245,7 +1353,8 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     await flush()
     await click(market.querySelector('[data-ref-install]'))
     await flush()
-    const installDialog = market.querySelector('[data-dialog="install"]')
+    // Page-level dialog (the GitHub panel never contains it).
+    const installDialog = host.querySelector('[data-dialog="install"]')
     if (installDialog === null) throw new Error('install dialog did not open')
     return installDialog as HTMLElement
   }

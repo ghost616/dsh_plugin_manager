@@ -132,8 +132,15 @@ export function apply(ctx: Context): void {
 
   // One top-level settings page; it is the only entry point of this plugin
   // (the Plugins section keeps owning its own tabs, so no tab is registered
-  // there). Ordered right after Plugins: both manage the same plugin roster,
-  // this page through the GitHub side of it.
+  // there).
+  //
+  // `order: 16` is an ANCHOR, not an arbitrary slot: the shipped deployment
+  // lays its settings pages out as General 0 (ui-settings-general) → Models 10
+  // (ui-settings-models) → Plugins 15 (ui-settings-plugins) → this page →
+  // agent presets 20 (ui-agent-preset). Sitting one step behind Plugins keeps
+  // this page inside the plugin-management group (it manages the same roster,
+  // through the GitHub side of it) instead of drifting into the later
+  // preference pages; retune it only together with those anchors.
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'market',

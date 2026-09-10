@@ -1021,9 +1021,10 @@ function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstal
  * the repository detail view covering that list in place (the header switches
  * to the detail title plus its back control, and keywords/page survive the
  * round trip). It is plain in-page content — no modal shell, no drag — and the
- * download review still opens as its own dialog above it.
+ * download review it opens is owned and rendered by the page itself (see
+ * {@link ManagePluginsTab}), never inside this switchable panel.
  */
-function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, previewInstall, install, onInstalled }: {
+function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, onInstall }: {
   readonly t: Translate
   /** Repositories that already own a managed record (row badge markers). */
   readonly installed: ReadonlySet<string>
@@ -1031,10 +1032,8 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, pr
   readonly installedRefs: InstalledRefsByRepository
   readonly search: ManagePluginsTabInjected['search']
   readonly repositoryDetail: ManagePluginsTabInjected['repositoryDetail']
-  readonly previewInstall: ManagePluginsTabInjected['previewInstall']
-  readonly install: ManagePluginsTabInjected['install']
-  /** Notified after a successful download so the page can refresh the roster. */
-  readonly onInstalled: (repository: string) => void
+  /** Ask the page to open the download review for one ref of a repository. */
+  readonly onInstall: (target: MarketInstallTarget) => void
 }): ReactNode {
   const mounted = useRef(true)
   const generation = useRef(0)
@@ -1044,7 +1043,6 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, pr
   const [detailSlug, setDetailSlug] = useState<string | null>(null)
   const [detailTick, setDetailTick] = useState(0)
   const [detailState, setDetailState] = useState<MarketDetailState>({ status: 'loading' })
-  const [installTarget, setInstallTarget] = useState<MarketInstallTarget | null>(null)
   const [jumpValue, setJumpValue] = useState('')
   /** One empty-keyword auto browse per mounted panel (never on later clears). */
   const autoBrowsed = useRef(false)
@@ -1081,9 +1079,9 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, pr
     setDetailSlug(null)
   }
 
-  /** Open the download review for one branch/tag ref of the shown repository. */
+  /** Ask the page to open the download review for one branch/tag ref. */
   const openRefInstall = (repository: string, choice: RefChoice): void => {
-    setInstallTarget({ repository, version: choice.name, refKind: choice.kind })
+    onInstall({ repository, version: choice.name, refKind: choice.kind })
   }
 
   const runSearch = (keywords: string, page: number): void => {
@@ -1335,20 +1333,6 @@ function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, pr
           </button>
         </footer>
       ) : null}
-
-      {installTarget !== null ? (
-        <InstallDialog
-          key={`${installTarget.repository}@${installTarget.refKind}:${installTarget.version}`}
-          repository={installTarget.repository}
-          version={installTarget.version}
-          refKind={installTarget.refKind}
-          previewInstall={previewInstall}
-          install={install}
-          t={t}
-          onClose={() => { setInstallTarget(null) }}
-          onInstalled={(repository) => { onInstalled(repository) }}
-        />
-      ) : null}
     </section>
   )
 }
@@ -1388,6 +1372,8 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
   const [rowFailures, setRowFailures] = useState<ReadonlyMap<string, ManageUiFailure>>(() => new Map())
   const [removeTarget, setRemoveTarget] = useState<ManagedPluginView | null>(null)
+  /** Pending download review, opened from the GitHub tab's detail view. */
+  const [installTarget, setInstallTarget] = useState<MarketInstallTarget | null>(null)
 
   useEffect(() => {
     mounted.current = true
@@ -1631,12 +1617,32 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
             installedRefs={installedRefs}
             search={search}
             repositoryDetail={repositoryDetail}
-            previewInstall={previewInstall}
-            install={install}
-            onInstalled={() => { reloadList() }}
+            onInstall={setInstallTarget}
           />
         ) : null}
       </div>
+
+      {/*
+        Both dialogs are rendered by the PAGE, never inside a switchable panel:
+        a panel is hidden (not unmounted) when the other tab is selected, and a
+        modal living inside a hidden subtree would stay mounted-but-invisible —
+        an aria-modal dialog nobody can see, holding the focus its a11y hook
+        moved into it. Hoisting them keeps an in-flight review/removal visible
+        and focusable across tab switches instead of silently destroying it.
+      */}
+      {installTarget !== null ? (
+        <InstallDialog
+          key={`${installTarget.repository}@${installTarget.refKind}:${installTarget.version}`}
+          repository={installTarget.repository}
+          version={installTarget.version}
+          refKind={installTarget.refKind}
+          previewInstall={previewInstall}
+          install={install}
+          t={t}
+          onClose={() => { setInstallTarget(null) }}
+          onInstalled={() => { reloadList() }}
+        />
+      ) : null}
 
       {removeTarget !== null ? (
         <RemoveDialog
