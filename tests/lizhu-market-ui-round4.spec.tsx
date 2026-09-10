@@ -20,11 +20,13 @@ import { zh } from '../src/client/locales.ts'
 import { MarketCallFailure } from '../src/client/channel.ts'
 import { ManagePluginsTab, type ManagePluginsTabInjected } from '../src/client/ManagePluginsTab.tsx'
 import {
-  makeInstallOutcome,
+  makeCommit,
   makeInstallReview,
   makeList,
+  makePreparation,
   makeRepositoryDetail,
   makeSearchPage,
+  makeVerdict,
   managePageHarness,
   type SearchItemSeed,
 } from './support/client-platform.ts'
@@ -198,10 +200,27 @@ describe('[离朱] 2. 下载入口不再检测已下载/已安装', () => {
     }))
     const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}), exists }))
-    const install = vi.fn(async (repository: string, _token: string, version?: string | null) =>
-      makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}), overwritten: exists }))
-    const { props } = managePageHarness({ list, search, repositoryDetail, previewInstall, install })
-    return { props, previewInstall, install }
+    // The staged download the page now drives: clone → classify → commit.
+    const prepareDownload = vi.fn(async (repository: string) => makePreparation({
+      repository,
+      token: 'dl-acme-helper',
+      version: 'v1.0.0',
+      refKind: 'tag',
+      overwrite: exists,
+    }))
+    const classifyDownload = vi.fn(async () => makeVerdict({ classification: 'plugin' }))
+    const commitDownload = vi.fn(async (repository: string, version: string | null = null) =>
+      makeCommit({
+        repository,
+        token: 'dl-acme-helper',
+        version,
+        refKind: 'tag',
+        overwritten: exists,
+      }))
+    const { props } = managePageHarness({
+      list, search, repositoryDetail, previewInstall, prepareDownload, classifyDownload, commitDownload,
+    })
+    return { props, previewInstall, commitDownload }
   }
 
   it('结果卡没有已下载徽标，且每行都有可用的详情入口', async () => {
@@ -220,7 +239,7 @@ describe('[离朱] 2. 下载入口不再检测已下载/已安装', () => {
   })
 
   it('ref 下拉对既有记录不做任何标注，选中既有 ref 后仍可下载并走完确认流', async () => {
-    const { props, previewInstall, install } = existingRecordHarness(true)
+    const { props, previewInstall, commitDownload } = existingRecordHarness(true)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const market = await openMarket(host)
@@ -256,12 +275,13 @@ describe('[离朱] 2. 下载入口不再检测已下载/已安装', () => {
     expect(confirm.disabled).toBe(false)
     await click(confirm)
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0', 'tag')
+    // 三阶段走完，既有检出被换入（overwritten）。
+    expect(commitDownload).toHaveBeenCalledWith('dl-acme-helper', 'plugin')
     expect(dialog.querySelector('[data-install-done]')).not.toBeNull()
   })
 
   it('未安装过的新仓库与既有仓库走同一条下载路径（无分支差异）', async () => {
-    const { props, previewInstall, install } = existingRecordHarness(false)
+    const { props, previewInstall, commitDownload } = existingRecordHarness(false)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const market = await openMarket(host)
@@ -277,7 +297,7 @@ describe('[离朱] 2. 下载入口不再检测已下载/已安装', () => {
     expect(dialog.querySelector('[data-overwrite-notice]')).toBeNull()
     await click(dialog.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledTimes(1)
+    expect(commitDownload).toHaveBeenCalledTimes(1)
     expect(dialog.querySelector('[data-install-done]')).not.toBeNull()
   })
 })
@@ -295,8 +315,8 @@ describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () =
       repository, branches: ['main'], tags: [],
     }))
     const install = vi.fn(async (repository: string, _token: string, version: string | null = null) =>
-      makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) }))
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+      makeCommit({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, commitDownload: install })
     return { props, install }
   }
 
@@ -564,11 +584,16 @@ describe('[离朱] 4. 本地仓库列表分类标签与启停禁用', () => {
 
     for (const row of Array.from(host.querySelectorAll<HTMLElement>('[data-plugin-row]'))) {
       const controls = Array.from(row.querySelectorAll('button'))
-      expect(controls).toHaveLength(2)
+      // 移除 + 启停 + 分类标签（标签本身是可点的「人工修正」入口，不算新增安装按钮）。
+      expect(controls).toHaveLength(3)
       for (const control of controls) {
-        expect(control.hasAttribute('data-remove-trigger') || control.hasAttribute('data-plugin-toggle'))
-          .toBe(true)
+        expect(
+          control.hasAttribute('data-remove-trigger')
+          || control.hasAttribute('data-plugin-toggle')
+          || control.hasAttribute('data-classification-tag'),
+        ).toBe(true)
       }
+      expect(row.querySelector('[data-install-trigger]')).toBeNull()
       expect(row.querySelector('[data-installed]')).toBeNull()
       expect(row.textContent).not.toContain('已下载')
     }

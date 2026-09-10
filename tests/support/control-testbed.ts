@@ -30,12 +30,14 @@ import type {
 } from '../../src/host/control/loader-adapter.ts'
 import { isProtectedRecordKey } from '../../src/host/control/protect.ts'
 import type { MarketRepository } from '../../src/host/market/index.ts'
+import { MarketError } from '../../src/host/market/errors.ts'
 import {
   MarketSourceOperations,
+  type DownloadPreparationClassify,
   type InstallAnalysisEngine,
-  type InstalledPluginFacts,
   type InstallerPort,
   type MarketSourceDeps,
+  type PrepareDownloadRequest,
   type PreviewEnginePort,
   type RepositoryDetailPort,
   type SearchEnginePort,
@@ -115,6 +117,25 @@ export class FakeRecords implements RecordsPort {
     const record = this.byKey.get(key)
     if (record === undefined) throw new Error(`no record ${key}`)
     const next = { ...record, enabled }
+    this.byKey.set(key, next)
+    return next
+  }
+
+  /**
+   * Mirror the host store's manual-fix write: only `classification` moves, and
+   * `plugin` on an entry-less record is refused (a `plugin` tag promises a
+   * runnable entry).
+   */
+  async setClassification(key: PluginMarketKey, classification: PluginMarketClassification): Promise<PluginMarketRecord> {
+    const record = this.byKey.get(key)
+    if (record === undefined) throw new Error(`no record ${key}`)
+    if (classification === 'plugin' && record.entry === null) {
+      throw new MarketError(
+        'record/invalid',
+        `record "${key}" has no runnable "entry", so it cannot be classified as "plugin".`,
+      )
+    }
+    const next = { ...record, classification }
     this.byKey.set(key, next)
     return next
   }
@@ -216,35 +237,17 @@ export class FakeEngines {
     summary: { name: 'demo-plugin', version: '1.0.0', dependencies: { dependencies: ['@deepseek-ai/cordis'], peerDependencies: [] } },
   }
   previewCalls: string[] = []
-  installCalls: {
-    repositoryRoot: string
-    key: string
-    repository: string
-    version: string | null
-    refKind?: 'branch' | 'tag'
-    classification?: PluginMarketClassification
-  }[] = []
+  /** Prepare-phase inputs of the fake download engine, in call order. */
+  installCalls: PrepareDownloadRequest[] = []
   /** Returned record; built on demand unless preset. */
   installedRecord: PluginMarketRecord | null = null
   /**
    * Runnable entry the fake checkout carries, or null for an entry-less
    * checkout (skills pack / not-built plugin). The host rule under test is
-   * "the entry probe wins", so this — not the reviewed classification —
+   * "the entry probe wins", so this — not the committed classification —
    * decides the filed tag.
    */
   installedEntry: string | null = 'index.js'
-  /**
-   * Facts the fake installer reports back on the last install call. Only the
-   * fields at the installer boundary are preset here; `record`/`checkoutDir`
-   * are always attached by {@link FakeEngines.installer} from the record it
-   * just filed.
-   */
-  installedFacts: Omit<InstalledPluginFacts, 'record' | 'checkoutDir'> = {
-    classification: 'plugin',
-    entry: 'index.js',
-    entryNote: null,
-    dependenciesInstalled: true,
-  }
   installError: unknown = undefined
   synced: PluginMarketRecord[] = []
 
@@ -306,35 +309,75 @@ export class FakeEngines {
     },
   }
 
+  /**
+   * Three-phase download engine over this fixture. The port keeps its own
+   * in-memory handle registry (the control layer's contract is that one port
+   * serves all phases of a download) and NEVER runs the dependency step: a
+   * download only clones, classifies and files, mirroring the host pipeline
+   * where `pnpm` moved off the download path.
+   */
   installer(records: FakeRecords): InstallerPort {
+    const handles = new Map<string, { readonly request: PrepareDownloadRequest; state: 'prepared' | 'classified' | 'committed' }>()
+    let counter = 0
     return {
-      install: async (input) => {
+      prepare: async (input) => {
         this.installCalls.push(input)
         if (this.installError !== undefined) throw this.installError
-        // Mirror the host pipeline's staging rule (entry probe wins): a checkout
-        // carrying a runnable entry is ALWAYS filed `plugin`, whatever the
-        // review classified it as. The reviewed classification only decides the
-        // tag of an entry-less checkout (skills, else other).
-        const entry = this.installedEntry
-        const classification: PluginMarketClassification = entry === null
-          ? (input.classification === 'skills' ? 'skills' : 'other')
-          : 'plugin'
-        const entryNote = entry === null ? 'The checkout has no runnable plugin entry.' : null
-        // v2 ref installs register the per-tuple layout `<owner>/<repo>/<kind>/<refSeg>`
-        // and a source carrying refKind; legacy installs keep the key as the
+        const token = `dl-${(counter++).toString(36)}-${input.key}`
+        // v2 ref downloads register the per-tuple layout
+        // `<owner>/<repo>/<kind>/<refSeg>`; legacy downloads keep the key as the
         // single-segment checkout and no ref kind (old-record compatible).
         const v2DirName = input.refKind === undefined ? null : refDirName(input.repository, input.refKind, input.version)
-        const record = this.installedRecord ?? makeRecord(input.key, {
-          source: input.refKind === undefined
-            ? makeSource(input.repository)
-            : { kind: 'github', repository: input.repository, refKind: input.refKind, version: input.version, commit: null },
+        handles.set(token, { request: input, state: 'prepared' })
+        this.stagedCalls.push({ kind: 'prepare', token, key: input.key })
+        return {
+          token,
+          key: input.key,
+          repository: input.repository,
+          refKind: input.refKind,
+          ref: input.version,
           localDirName: v2DirName ?? input.key,
+          commit: 'a'.repeat(40),
+          startedAt: '2026-01-01T00:00:00.000Z',
+          state: 'prepared',
+        }
+      },
+
+      classify: async (token) => {
+        const handle = this.requireHandle(handles, token)
+        this.stagedCalls.push({ kind: 'classify', token, key: handle.request.key })
+        if (this.classifyError !== undefined) throw this.classifyError
+        const answer = this.classification
+        handles.set(token, { request: handle.request, state: 'classified' })
+        return answer
+      },
+
+      commit: async (input) => {
+        const handle = this.requireHandle(handles, input.token)
+        this.stagedCalls.push({ kind: 'commit', token: input.token, key: handle.request.key })
+        this.classifications.push(input.classification)
+        if (this.commitError !== undefined) throw this.commitError
+        const { request } = handle
+        // Mirror the host staging rule (entry probe wins): a checkout carrying a
+        // runnable entry is ALWAYS filed `plugin`; the committed classification
+        // only decides the tag of an entry-less checkout.
+        const entry = this.installedEntry
+        const classification: PluginMarketClassification = entry === null
+          ? (input.classification === 'plugin' ? 'other' : input.classification)
+          : 'plugin'
+        const v2DirName = request.refKind === undefined ? null : refDirName(request.repository, request.refKind, request.version)
+        const existing = await records.get(request.key)
+        const record = this.installedRecord ?? makeRecord(request.key, {
+          source: request.refKind === undefined
+            ? makeSource(request.repository)
+            : { kind: 'github', repository: request.repository, refKind: request.refKind, version: request.version, commit: null },
+          localDirName: v2DirName ?? request.key,
           entry,
           classification,
           trusted: 'trusted',
           trustedAt: '2026-01-01T00:00:00.000Z',
         })
-        records.seed(input.key, {
+        records.seed(request.key, {
           ...record,
           key: record.key,
           source: record.source,
@@ -347,19 +390,60 @@ export class FakeEngines {
           trusted: 'trusted',
           trustedAt: record.trustedAt,
         })
-        this.installedFacts = {
-          classification: record.classification ?? 'plugin',
-          entry: record.entry,
-          entryNote,
-          dependenciesInstalled: entry !== null,
-        }
+        handles.set(input.token, { request, state: 'committed' })
+        handles.delete(input.token)
         return {
           record,
-          checkoutDir: `${input.repositoryRoot}/${v2DirName ?? input.key}`,
-          ...this.installedFacts,
+          checkoutDir: `${request.repositoryRoot}/${v2DirName ?? request.key}`,
+          classification,
+          entry,
+          // The download path never installs dependencies.
+          dependenciesInstalled: false,
+          overwritten: existing !== null,
+          note: input.entry === undefined ? null : null,
         }
       },
+
+      cancel: async (token) => {
+        const handle = handles.get(token)
+        if (handle === undefined || handle.state === 'committed') return false
+        handles.delete(token)
+        this.stagedCalls.push({ kind: 'cancel', token, key: handle.request.key })
+        this.cancelledCalls.push(token)
+        return true
+      },
     }
+  }
+
+  /** One staged call recorded by the fake download engine. */
+  stagedCalls: { kind: 'prepare' | 'classify' | 'commit' | 'cancel'; token: string; key: string }[] = []
+  /** Labels the commit phase was asked to file, in call order. */
+  classifications: PluginMarketClassification[] = []
+  /** Tokens the fake engine was asked to cancel. */
+  cancelledCalls: string[] = []
+  /** Answer of the classification phase (never thrown, see the port contract). */
+  classification: DownloadPreparationClassify = {
+    outcome: 'classified',
+    classification: 'plugin',
+    reason: 'the model judged the checkout a plugin',
+    unclassified: false,
+    entryPresent: true,
+    entryHint: 'index.js',
+  }
+  /** Injected classification-phase failure (a real port never fails the phase). */
+  classifyError: unknown = undefined
+  /** Injected commit failure (e.g. an install/io inconsistency). */
+  commitError: unknown = undefined
+
+  private requireHandle(
+    handles: Map<string, { readonly request: PrepareDownloadRequest; state: 'prepared' | 'classified' | 'committed' }>,
+    token: string,
+  ): { readonly request: PrepareDownloadRequest; state: 'prepared' | 'classified' | 'committed' } {
+    const handle = handles.get(token)
+    if (handle === undefined) {
+      throw new MarketError('record/not-found', 'This download handle is unknown or has expired; start the download again.')
+    }
+    return handle
   }
 
   syncRecord: (record: PluginMarketRecord) => Promise<void> = async (record) => {
@@ -388,12 +472,16 @@ export function makeSourceOps(
     analysisEntryProbe?: (repository: string, relativeEntry: string) => boolean | Promise<boolean>
   } = {},
 ): MarketSourceOperations {
+  // One port per source: the staged-download handle lives in the port's own
+  // registry, so prepare/classify/commit/cancel must reach the same instance
+  // (see MarketSourceDeps.installer).
+  const port = engines.installer(records)
   const deps: MarketSourceDeps = {
     repository: () => repository,
     searchEngine: engines.searchEngine,
     detailEngine: engines.detailEngine,
     previewEngine: engines.previewEngine,
-    installer: () => engines.installer(records),
+    installer: () => port,
     protection: {
       isProtectedKey: options.isProtectedKey ?? isProtectedRecordKey,
       isSelfModule: options.isSelfModule ?? (() => false),

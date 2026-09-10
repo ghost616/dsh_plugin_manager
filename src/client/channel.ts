@@ -5,9 +5,10 @@
  *
  * Wire shape (see src/host/control/web-channel.ts):
  *   POST /api/plugins-market
- *   { "method": "status" | "listManaged" | "setEnabled" | "requestRemove"
- *       | "confirmRemove" | "search" | "repositoryDetail" | "previewInstall"
- *       | "install",
+ *   { "method": "status" | "listManaged" | "setEnabled" | "setClassification"
+ *       | "requestRemove" | "confirmRemove" | "search" | "repositoryDetail"
+ *       | "previewInstall" | "prepareDownload" | "classifyDownload"
+ *       | "commitDownload" | "cancelDownload",
  *     "args": { ... } }
  *   → { "ok": true, "value": ... }
  *   | { "ok": false, "error": { "code", "message", "details" } }
@@ -25,14 +26,68 @@ import type {
   ManagedPluginList,
   MarketStatus,
   MarketWireErrorCode,
-  PluginInstallOutcome,
   PluginInstallReview,
+  PluginMarketClassification,
   PluginMarketKey,
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
   RepositoryDetail,
 } from '../types.ts'
+
+/**
+ * Download-phase wire shapes as this half consumes them.
+ *
+ * MIRRORS OF THE HOST CONTRACT (authoritative definitions live in
+ * `src/host/control/source.ts`: `DownloadPreparation` / `DownloadClassification`
+ * / `DownloadCommit`, built on `src/host/market/install.ts`). They are declared
+ * locally because the client tsconfig leaf includes only `src/client` +
+ * `src/types.ts`, so the host module is not importable from this face — and
+ * `src/types.ts` (framework-owned) does not carry them yet. REQUESTED
+ * PROMOTION: these three belong on the shared cross-face surface; until they
+ * move, keep this block in lockstep with the host interfaces (same field names,
+ * same optionality) so a drift is a small, reviewable diff rather than silent
+ * runtime surprise.
+ */
+export interface DownloadPreparation {
+  /** Process-local download handle; never persisted, never reused across restarts. */
+  readonly token: string
+  readonly key: PluginMarketKey
+  readonly repository: string
+  readonly refKind?: GithubRefKind
+  readonly ref: string | null
+  readonly localDirName: string
+  readonly commit: string | null
+  readonly startedAt: string
+  readonly state: 'prepared' | 'classified' | 'committed'
+  /** Whether a record already exists for this key (the commit overwrites it). */
+  readonly overwrite: boolean
+}
+
+/** Classification-phase answer. Never a thrown model failure (see the host). */
+export interface DownloadClassification {
+  readonly outcome: 'classified' | 'unclassified' | 'failed'
+  readonly classification: PluginMarketClassification
+  /** Engine rationale; optionally shown as a secondary detail. */
+  readonly reason: string
+  readonly unclassified: boolean
+  readonly entryPresent: boolean | null
+  readonly entryHint: string | null
+  readonly errorCode?: string
+}
+
+/** Commit-phase answer: the record the download was actually filed as. */
+export interface DownloadCommit {
+  readonly key: PluginMarketKey
+  readonly overwritten: boolean
+  readonly record: PluginMarketRecord
+  readonly checkoutDir: string
+  readonly classification: PluginMarketClassification
+  readonly entry: string | null
+  /** Always false: downloading sources never installs dependencies. */
+  readonly dependenciesInstalled: boolean
+  readonly note: string | null
+}
 
 /** Exact route path registered by the Host control row. */
 export const MARKET_CONTROL_WEB_PATH = '/api/plugins-market'
@@ -95,12 +150,26 @@ export async function listManaged(): Promise<MarketCallResult<ManagedPluginList>
   return post<ManagedPluginList>('listManaged', {})
 }
 
-/** Persist and apply one record's enablement through the channel. */
+/**
+ * Persist and apply one record's enablement through the channel.
+ */
 export async function setEnabled(
   key: PluginMarketKey,
   enabled: boolean,
 ): Promise<MarketCallResult<PluginMarketRecord>> {
   return post<PluginMarketRecord>('setEnabled', { key, enabled })
+}
+
+/**
+ * Re-file one managed record under a different classification (the manual
+ * correction path of the roster). An invalid label is refused by the host with
+ * the stable `market/bad-request` code; the record itself is preserved.
+ */
+export async function setClassification(
+  key: PluginMarketKey,
+  classification: PluginMarketClassification,
+): Promise<MarketCallResult<PluginMarketRecord>> {
+  return post<PluginMarketRecord>('setClassification', { key, classification })
 }
 
 /** Step 1 of the double-confirmed removal protocol. */
@@ -141,14 +210,16 @@ export async function repositoryDetail(
 }
 
 /**
- * Review one repository (or one of its refs) and mint its single-use install
+ * Review one repository (or one of its refs) and mint its single-use download
  * confirmation. `refKind` selects the v2 per-ref review (`'branch'`/`'tag'`,
  * requires `version`); omitting it reviews the default branch the legacy way.
+ *
+ * Argument order follows the host surface (`repository, refKind, version`).
  */
 export async function previewInstall(
   repository: string,
-  version?: string | null,
   refKind?: GithubRefKind,
+  version?: string | null,
 ): Promise<MarketCallResult<PluginInstallReview>> {
   const args: { repository: string; version?: string; refKind?: GithubRefKind } = { repository }
   if (version !== undefined && version !== null) args.version = version
@@ -157,16 +228,17 @@ export async function previewInstall(
 }
 
 /**
- * Run the double-confirmed install for a reviewed repository/ref. The
- * `refKind`/`version` pair must reproduce the reviewed tuple (the token is
- * bound to its derived key).
+ * Download phase 1 — consume the single-use review confirmation and clone the
+ * checkout into the host's private staging area. Nothing is filed, classified
+ * or installed here; the answer carries the process-local download handle the
+ * next two phases present (`token`), plus the facts of "sources cloned".
  */
-export async function install(
+export async function prepareDownload(
   repository: string,
   confirmToken: string,
-  version?: string | null,
   refKind?: GithubRefKind,
-): Promise<MarketCallResult<PluginInstallOutcome>> {
+  version?: string | null,
+): Promise<MarketCallResult<DownloadPreparation>> {
   const args: {
     repository: string
     confirmToken: string
@@ -175,7 +247,41 @@ export async function install(
   } = { repository, confirmToken }
   if (version !== undefined && version !== null) args.version = version
   if (refKind !== undefined) args.refKind = refKind
-  return post<PluginInstallOutcome>('install', args)
+  return post<DownloadPreparation>('prepareDownload', args)
+}
+
+/**
+ * Download phase 2 — classify the staged checkout. Model problems never
+ * surface as a rejection: the host degrades them to
+ * `outcome: 'unclassified' | 'failed'` with an `errorCode`, so the caller
+ * renders the "not classified" state from the VALUE and only treats
+ * `record/not-found` (unknown handle) as a genuine failure.
+ */
+export async function classifyDownload(
+  token: string,
+): Promise<MarketCallResult<DownloadClassification>> {
+  return post<DownloadClassification>('classifyDownload', { token })
+}
+
+/**
+ * Download phase 3 — swap the staged checkout in and file it under
+ * `classification`. The label is the classification phase's verdict, or the one
+ * the user corrected by hand.
+ */
+export async function commitDownload(
+  token: string,
+  classification: PluginMarketClassification,
+): Promise<MarketCallResult<DownloadCommit>> {
+  return post<DownloadCommit>('commitDownload', { token, classification })
+}
+
+/**
+ * Cancel a staged download: the host deletes the staging directory (zero
+ * residue) and forgets the handle. Idempotent — an already-committed or
+ * already-cancelled handle answers `false` without touching the filesystem.
+ */
+export async function cancelDownload(token: string): Promise<MarketCallResult<boolean>> {
+  return post<boolean>('cancelDownload', { token })
 }
 
 async function post<T>(method: string, args: object): Promise<MarketCallResult<T>> {

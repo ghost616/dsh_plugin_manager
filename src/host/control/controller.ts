@@ -29,6 +29,7 @@ import type {
   ManagedPluginRuntime,
   MarketRemoteErrorDetails,
   MarketWireErrorCode,
+  PluginMarketClassification,
   PluginMarketKey,
   PluginMarketRecord,
   RemoveOutcome,
@@ -81,6 +82,12 @@ export interface RecordsPort {
   list(): Promise<PluginMarketRecord[]>
   get(key: PluginMarketKey): Promise<PluginMarketRecord | null>
   setEnabled(key: PluginMarketKey, enabled: boolean): Promise<PluginMarketRecord>
+  /**
+   * Atomically replace the classification tag of one record (host store:
+   * `PluginRecordStore.setClassification`). Every other field is preserved;
+   * `plugin` without an entry and unknown tags are refused by the store.
+   */
+  setClassification(key: PluginMarketKey, classification: PluginMarketClassification): Promise<PluginMarketRecord>
   remove(key: PluginMarketKey): Promise<boolean>
 }
 
@@ -232,6 +239,29 @@ export class MarketPluginController {
     }
     this.failures.delete(key)
     return this.deps.records.setEnabled(key, false)
+  }
+
+  /**
+   * Correct the classification of one managed record (the manual fix after a
+   * download that could not be classified). The store writes the label
+   * atomically and keeps every other field; the loader row is then re-aligned,
+   * because the tag decides whether the record may be enabled at all
+   * (`market/not-loadable`): a record corrected to `skills`/`other` loses its
+   * enabled row, while one corrected to `plugin` with an entry becomes
+   * loadable.
+   *
+   * Failures: `record/not-found` (no such record), `record/invalid`
+   * (`plugin` without an entry, or an unknown tag), `market/protected` for a
+   * protected/self record.
+   */
+  async setClassification(key: PluginMarketKey, classification: PluginMarketClassification): Promise<PluginMarketRecord> {
+    const record = await this.requireRecord(key)
+    this.assertManageable(key, record)
+    const updated = await this.deps.records.setClassification(key, classification)
+    // Re-file the row: the tag may have made the record unloadable (row stays
+    // disabled) or loadable again. Both paths are the builder's job.
+    await this.ensureRow(updated, indexEntries(this.deps.loader.entries()))
+    return (await this.deps.records.get(key)) ?? updated
   }
 
   /** Live view: records merged with the loader projection (no second cache). */

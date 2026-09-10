@@ -121,7 +121,20 @@ interface GatewaySurface {
     confirmToken: string
     note?: { kind: string }
   }>
-  install(repository: string, token: string, refKind: string | null, version: string | null): Promise<{
+  prepareDownload(repository: string, confirmToken: string, refKind: string | null, version: string | null): Promise<{
+    token: string
+    key: string
+    state: string
+    localDirName: string
+  }>
+  classifyDownload(token: string): Promise<{
+    outcome: 'classified' | 'unclassified' | 'failed'
+    classification: string
+    unclassified: boolean
+    reason: string
+    errorCode?: string
+  }>
+  commitDownload(token: string, classification: string): Promise<{
     record: { classification?: string; entry: string | null }
     classification?: string
     entry?: string | null
@@ -175,16 +188,23 @@ describe('market control production assembly: install files what the checkout is
     return { store, ctx, surface }
   }
 
-  /** Review + install one fixture checkout through the real assembly. */
+  /**
+   * Review + download one fixture checkout through the real assembly: preview
+   * (the two-step confirmation), prepare (the real clone), classify and commit —
+   * the same phases the UI drives one by one.
+   */
   async function installFixture(
     surface: GatewaySurface,
     fixture: Fixture,
     name: string,
-  ): Promise<Awaited<ReturnType<GatewaySurface['install']>>> {
+    commitAs?: string,
+  ): Promise<Awaited<ReturnType<GatewaySurface['commitDownload']>>> {
     const bare = buildFixtureRepository(tmp, name, fixture)
     return await withCloneRewrite(bare, async () => {
       const review = await surface.previewInstall(SLUG, null, null)
-      return await surface.install(SLUG, review.confirmToken, null, null)
+      const prepared = await surface.prepareDownload(SLUG, review.confirmToken, null, null)
+      const classification = await surface.classifyDownload(prepared.token)
+      return await surface.commitDownload(prepared.token, commitAs ?? classification.classification)
     })
   }
 
@@ -246,7 +266,7 @@ describe('market control production assembly: install files what the checkout is
     // and the failure must surface as install/git-failed with no record written.
     const error = await withCloneRewrite(join(tmp, 'missing-remote'), async () => {
       const review = await surface.previewInstall(SLUG, null, null)
-      return await surface.install(SLUG, review.confirmToken, null, null).catch((caught: unknown) => caught)
+      return await surface.prepareDownload(SLUG, review.confirmToken, null, null).catch((caught: unknown) => caught)
     })
     expect(error).toMatchObject({ code: 'install/git-failed' })
     expect(await store.get(parsePluginKey(PLUGIN_KEY))).toBeNull()

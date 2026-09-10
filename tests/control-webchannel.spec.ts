@@ -1,8 +1,9 @@
 /**
  * Web channel spec (M1 source ops) against the tsc-emitted gateway artifact
  * (see control-gateway.spec.ts header for why decorator sources run compiled).
- * Covers the original record-control methods plus the extended
- * search / previewInstall / install surface and its failure branches.
+ * Covers the record-control methods plus the phased download channel
+ * (prepareDownload → classifyDownload → commitDownload, cancelDownload,
+ * setClassification) and its failure branches.
  *
  * HTTP robustness (this spec used to flake as "fetch failed / bad port" when
  * several specs bound sockets in parallel):
@@ -15,10 +16,11 @@
  *   2 s bound. Nothing else terminates the listeners.
  * - REQUEST retries are method-aware and observable: `GET`/`OPTIONS` (the
  *   readiness probe and the raw 405 probe) may repeat freely, while a `POST`
- *   (state-mutating: install/remove/enable) is repeated ONLY when the transport
- *   proves the request never reached a listener (`ECONNREFUSED`/`ENOTFOUND`);
- *   every repeat logs one `[control-webchannel] retry …` line, so a genuine
- *   defect surfaces as a failure instead of being masked by silent retries.
+ *   (state-mutating: download/remove/enable) is repeated ONLY when the
+ *   transport proves the request never reached a listener
+ *   (`ECONNREFUSED`/`ENOTFOUND`); every repeat logs one
+ *   `[control-webchannel] retry …` line, so a genuine defect surfaces as a
+ *   failure instead of being masked by silent retries.
  */
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -269,6 +271,31 @@ async function call(router: RouterServer, method: string, args: object): Promise
   return (await post(router, { method, args })).body
 }
 
+/**
+ * Walk the three download phases over the wire: prepare (with the review's
+ * confirmation), classify, then commit under the label the classification phase
+ * proposed (or the caller's override).
+ */
+async function download(
+  router: RouterServer,
+  repository: string,
+  confirmToken: string,
+  refKind: string | null = null,
+  version: string | null = null,
+  commitAs?: string,
+): Promise<WireResult> {
+  const args: Record<string, unknown> = { repository, confirmToken }
+  if (refKind !== null) args.refKind = refKind
+  if (version !== null) args.version = version
+  const prepared = await call(router, 'prepareDownload', args)
+  if (!prepared.ok) return prepared
+  const handle = (prepared as { ok: true; value: { token: string } }).value.token
+  const classified = await call(router, 'classifyDownload', { token: handle })
+  if (!classified.ok) return classified
+  const label = commitAs ?? (classified as { ok: true; value: { classification: string } }).value.classification
+  return await call(router, 'commitDownload', { token: handle, classification: label })
+}
+
 /** One route-wired gateway over fakes (records + source engines). */
 function routeFor(options: {
   idle?: boolean
@@ -386,27 +413,23 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
     // An unreviewed repository is refused outright; a wrong token after a
     // review is invalid; the reviewed token runs once and is single-use.
-    const unreviewed = await call(router, 'install', { repository: 'other/repo', confirmToken: 'nope' })
+    const unreviewed = await call(router, 'prepareDownload', { repository: 'other/repo', confirmToken: 'nope' })
     expect(unreviewed.ok).toBe(false)
     if (!unreviewed.ok) expect(unreviewed.error.code).toBe('market/confirm-required')
 
-    const wrong = await call(router, 'install', { repository: 'octocat/demo-plugin', confirmToken: 'nope' })
+    const wrong = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: 'nope' })
     expect(wrong.ok).toBe(false)
     if (!wrong.ok) expect(wrong.error.code).toBe('market/confirm-invalid')
 
-    const installed = await call(router, 'install', {
-      repository: 'octocat/demo-plugin',
-      confirmToken: reviewValue.confirmToken,
-    })
-    expect(installed.ok).toBe(true)
-    const outcome = (installed as { ok: true; value: { key: string; overwritten: boolean; record: { enabled: boolean } } }).value
-    expect(outcome.key).toBe('gh-octocat-demo-plugin')
-    expect(outcome.overwritten).toBe(false)
-    expect(outcome.record.enabled).toBe(false)
+    const outcome = await download(router, 'octocat/demo-plugin', reviewValue.confirmToken)
+    expect(outcome).toMatchObject({ ok: true, value: { key: 'gh-octocat-demo-plugin', overwritten: false } })
+    const committed = (outcome as { ok: true; value: { record: { enabled: boolean; classification?: string } } }).value
+    expect(committed.record.enabled).toBe(false)
     expect(engines.installCalls).toHaveLength(1)
     expect(engines.installCalls[0]?.version).toBeNull()
 
-    const retry = await call(router, 'install', {
+    // The review confirmation is consumed by the prepare phase.
+    const retry = await call(router, 'prepareDownload', {
       repository: 'octocat/demo-plugin',
       confirmToken: reviewValue.confirmToken,
     })
@@ -439,15 +462,11 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(tagValue.refKind).toBe('tag')
     expect(branchValue.key).not.toBe(tagValue.key)
 
-    const branchInstalled = await call(router, 'install', {
-      repository: 'octocat/demo-plugin', confirmToken: branchValue.confirmToken, refKind: 'branch', version: 'v1.2.3',
-    })
-    expect(branchInstalled.ok).toBe(true)
-    const tagInstalled = await call(router, 'install', {
-      repository: 'octocat/demo-plugin', confirmToken: tagValue.confirmToken, refKind: 'tag', version: 'v1.2.3',
-    })
-    expect(tagInstalled.ok).toBe(true)
-    const tagOutcome = (tagInstalled as { ok: true; value: { key: string; record: { source?: { refKind?: string } } } }).value
+    const branchDownloaded = await download(router, 'octocat/demo-plugin', branchValue.confirmToken, 'branch', 'v1.2.3')
+    expect(branchDownloaded.ok).toBe(true)
+    const tagDownloaded = await download(router, 'octocat/demo-plugin', tagValue.confirmToken, 'tag', 'v1.2.3')
+    expect(tagDownloaded.ok).toBe(true)
+    const tagOutcome = (tagDownloaded as { ok: true; value: { key: string; record: { source?: { refKind?: string } } } }).value
     expect(tagOutcome.key).toBe(tagValue.key)
     // The ref kind lives on the record source (PluginMarketGithubSource),
     // mirroring how host installs and the source spec model it.
@@ -476,12 +495,12 @@ describe('market control web channel (M1 source ops round trip)', () => {
   it('rejects an invalid refKind value with a 400 transport envelope', async () => {
     const { router, dispose } = routeFor()
     await serve(router)
-    for (const method of ['previewInstall', 'install']) {
+    for (const method of ['previewInstall', 'prepareDownload']) {
       const refused = await post(router, {
         method,
         args: {
           repository: 'octocat/demo-plugin',
-          ...(method === 'install' ? { confirmToken: 'tok' } : {}),
+          ...(method === 'prepareDownload' ? { confirmToken: 'tok' } : {}),
           refKind: 'release',
           version: 'v1',
         },
@@ -533,12 +552,20 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(idleSearch.ok).toBe(false)
     if (!idleSearch.ok) expect(idleSearch.error.code).toBe('market/idle')
 
-    const idleInstall = await call(router, 'install', {
+    const idlePrepare = await call(router, 'prepareDownload', {
       repository: 'octocat/demo-plugin',
       confirmToken: 'x',
     })
-    expect(idleInstall.ok).toBe(false)
-    if (!idleInstall.ok) expect(idleInstall.error.code).toBe('market/idle')
+    expect(idlePrepare.ok).toBe(false)
+    if (!idlePrepare.ok) expect(idlePrepare.error.code).toBe('market/idle')
+
+    const idleClassify = await call(router, 'classifyDownload', { token: 'dl-tok-1' })
+    expect(idleClassify.ok).toBe(false)
+    if (!idleClassify.ok) expect(idleClassify.error.code).toBe('market/idle')
+
+    const idleCommit = await call(router, 'commitDownload', { token: 'dl-tok-1', classification: 'other' })
+    expect(idleCommit.ok).toBe(false)
+    if (!idleCommit.ok) expect(idleCommit.error.code).toBe('market/idle')
 
     const idleDetail = await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
     expect(idleDetail.ok).toBe(false)
@@ -564,7 +591,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
-  it('serves the smart-install classification over HTTP and still installs the checkout', async () => {
+  it('serves the smart-install classification over HTTP through the phased download', async () => {
     const degradedNoManifest: import('../src/types.ts').PluginPreviewOutcome = {
       status: 'degraded',
       summary: { name: null, version: null, dependencies: { dependencies: [], peerDependencies: [] } },
@@ -575,6 +602,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
       result: fakeDistribution({ classification: 'skills', reason: 'an agent skills pack' }),
     })
     const { router, engines, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
+    // The staged checkout carries no runnable entry (an agent skills pack).
     engines.installedEntry = null
     await serve(router)
 
@@ -595,19 +623,23 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(reviewValue.note).toEqual({ kind: 'classified', text: 'an agent skills pack' })
     expect(reviewValue.analysis).toEqual({ installable: false, kind: 'skills', reason: 'an agent skills pack' })
 
-    const installed = await call(router, 'install', {
-      repository: 'octocat/demo-plugin',
-      confirmToken: reviewValue.confirmToken,
-    })
+    // The staged classifier answers skills, which the commit phase files as-is.
+    engines.classification = {
+      ...engines.classification,
+      classification: 'skills',
+      entryPresent: false,
+      entryHint: null,
+    }
+    const installed = await download(router, 'octocat/demo-plugin', reviewValue.confirmToken)
     expect(installed.ok).toBe(true)
     const outcome = (installed as {
       ok: true
       value: { classification?: string; entry?: string | null; record: { classification?: string; entry: string | null } }
     }).value
     expect(outcome.record).toMatchObject({ classification: 'skills', entry: null })
-    // The install-time facts are surfaced back on the outcome as well.
-    expect(outcome).toMatchObject({ classification: 'skills', entry: null })
-    expect(engines.installCalls[0]).toMatchObject({ classification: 'skills' })
+    // The download-time facts are surfaced back on the outcome as well.
+    expect(outcome).toMatchObject({ classification: 'skills', entry: null, dependenciesInstalled: false })
+    expect(engines.classifications).toEqual(['skills'])
     dispose()
   })
 
@@ -629,17 +661,22 @@ describe('market control web channel (M1 source ops round trip)', () => {
     const token = (review as { ok: true; value: { confirmToken: string; classification: string } }).value
     expect(token.classification).toBe('skills')
 
-    const installed = await call(router, 'install', {
-      repository: 'octocat/demo-plugin',
-      confirmToken: token.confirmToken,
-    })
+    // The staged classifier answers plugin (the checkout carries an entry), so
+    // the download files a loadable record regardless of the preview prediction.
+    engines.classification = {
+      ...engines.classification,
+      classification: 'plugin',
+      outcome: 'classified',
+      unclassified: false,
+      entryPresent: true,
+      entryHint: 'index.js',
+    }
+    const installed = await download(router, 'octocat/demo-plugin', token.confirmToken)
     expect(installed.ok).toBe(true)
     const outcome = (installed as {
       ok: true
       value: { classification?: string; entry?: string | null; record: { classification?: string; entry: string | null } }
     }).value
-    // The checkout carries a runnable entry, so it is loadable regardless of
-    // the preview prediction.
     expect(outcome.record).toMatchObject({ classification: 'plugin', entry: 'index.js' })
     expect(outcome).toMatchObject({ classification: 'plugin', entry: 'index.js' })
     dispose()
@@ -717,25 +754,103 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
-  it('passes an install/entry-missing failure through over HTTP', async () => {
+  it('passes a prepare failure through over HTTP (stable install/* code)', async () => {
     const { router, engines, dispose } = routeFor()
     await serve(router)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
     const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
     engines.installError = new MarketError(
-      'install/entry-missing',
-      'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
+      'install/git-failed',
+      'The git clone step failed (offline).',
     )
-    const failed = await call(router, 'install', {
+    const failed = await call(router, 'prepareDownload', {
       repository: 'octocat/demo-plugin',
       confirmToken: token,
     })
     expect(failed.ok).toBe(false)
     if (!failed.ok) {
-      expect(failed.error.code).toBe('install/entry-missing')
-      expect(failed.error.message).toContain('dist/index.js')
+      expect(failed.error.code).toBe('install/git-failed')
+      expect(failed.error.message).toContain('clone')
     }
+    dispose()
+  })
+
+  it('serves the phased download over HTTP and rejects an unknown handle', async () => {
+    const { router, engines, dispose } = routeFor()
+    await serve(router)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
+
+    const prepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: token })
+    expect(prepared.ok).toBe(true)
+    const handle = (prepared as { ok: true; value: { token: string; state: string; localDirName: string } }).value
+    expect(handle.state).toBe('prepared')
+    expect(handle.token).toMatch(/^dl-/)
+
+    const classification = await call(router, 'classifyDownload', { token: handle.token })
+    expect(classification.ok).toBe(true)
+    expect((classification as { ok: true; value: { outcome: string; classification: string } }).value)
+      .toMatchObject({ outcome: 'classified', classification: 'plugin' })
+
+    const committed = await call(router, 'commitDownload', { token: handle.token, classification: 'plugin' })
+    expect(committed.ok).toBe(true)
+    expect((committed as { ok: true; value: { dependenciesInstalled: boolean } }).value.dependenciesInstalled).toBe(false)
+    // The handle is consumed by the commit.
+    const again = await call(router, 'classifyDownload', { token: handle.token })
+    expect(again.ok).toBe(false)
+    if (!again.ok) expect(again.error.code).toBe('record/not-found')
+
+    // A second download can be cancelled instead of committed.
+    const second = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const secondToken = (second as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const secondPrepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: secondToken })
+    const secondHandle = (secondPrepared as { ok: true; value: { token: string } }).value.token
+    const cancelled = await call(router, 'cancelDownload', { token: secondHandle })
+    expect(cancelled).toMatchObject({ ok: true, value: true })
+    const twice = await call(router, 'cancelDownload', { token: secondHandle })
+    expect(twice).toMatchObject({ ok: true, value: false })
+    dispose()
+  })
+
+  it('validates the committed classification over HTTP with market/bad-request', async () => {
+    const { router, dispose } = routeFor()
+    await serve(router)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const prepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: token })
+    const handle = (prepared as { ok: true; value: { token: string } }).value.token
+
+    for (const bad of ['preset', 'PLUGIN', '']) {
+      const refused = await call(router, 'commitDownload', { token: handle, classification: bad })
+      expect(refused.ok).toBe(false)
+      if (!refused.ok) expect(refused.error.code).toBe('market/bad-request')
+    }
+    // The handle survives a refused label and still commits a valid one.
+    const committed = await call(router, 'commitDownload', { token: handle, classification: 'other' })
+    expect(committed.ok).toBe(true)
+    dispose()
+  })
+
+  it('corrects a filed classification over HTTP with setClassification', async () => {
+    const { router, bed, dispose } = routeFor()
+    await serve(router)
+    bed.records.seed('gh-skills-pack', { localDirName: 'skills-pack', entry: null, classification: 'other' })
+
+    const promoted = await call(router, 'setClassification', { key: 'gh-skills-pack', classification: 'plugin' })
+    expect(promoted.ok).toBe(false)
+    if (!promoted.ok) expect(promoted.error.code).toBe('record/invalid')
+
+    const relabelled = await call(router, 'setClassification', { key: 'gh-skills-pack', classification: 'skills' })
+    expect(relabelled).toMatchObject({ ok: true, value: { classification: 'skills', entry: null } })
+
+    const bad = await call(router, 'setClassification', { key: 'gh-skills-pack', classification: 'preset' })
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.error.code).toBe('market/bad-request')
+
+    const missing = await call(router, 'setClassification', { key: 'gh-nope', classification: 'other' })
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.error.code).toBe('record/not-found')
     dispose()
   })
 

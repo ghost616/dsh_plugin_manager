@@ -29,6 +29,23 @@ afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
 })
 
+/**
+ * Walk the three download phases through the gateway surface: prepare with the
+ * review's confirmation, classify the staged checkout, then commit under the
+ * label the classification phase proposed.
+ */
+async function downloadVia(
+  gateway: MarketControllerGateway,
+  repository: string,
+  confirmToken: string,
+  refKind: string | null,
+  version: string | null,
+): Promise<Awaited<ReturnType<MarketControllerGateway['commitDownload']>>> {
+  const prepared = await gateway.prepareDownload(repository, confirmToken, refKind, version)
+  const classification = await gateway.classifyDownload(prepared.token)
+  return await gateway.commitDownload(prepared.token, classification.classification)
+}
+
 function gatewayWith(
   options: {
     idle?: boolean
@@ -69,7 +86,7 @@ function gatewayWith(
 }
 
 describe('MarketControllerGateway host Remote surface', () => {
-  it('publishes the marketControl namespace with nine direct methods', () => {
+  it('publishes the marketControl namespace with the phased download surface', () => {
     const { gateway } = gatewayWith()
     expect(gateway.typertRemote).toMatchObject({
       serviceKey: MARKET_CONTROL_SERVICE_KEY,
@@ -84,7 +101,11 @@ describe('MarketControllerGateway host Remote surface', () => {
       { method: 'search', invocation: { kind: 'direct' } },
       { method: 'repositoryDetail', invocation: { kind: 'direct' } },
       { method: 'previewInstall', invocation: { kind: 'direct' } },
-      { method: 'install', invocation: { kind: 'direct' } },
+      { method: 'prepareDownload', invocation: { kind: 'direct' } },
+      { method: 'classifyDownload', invocation: { kind: 'direct' } },
+      { method: 'commitDownload', invocation: { kind: 'direct' } },
+      { method: 'cancelDownload', invocation: { kind: 'direct' } },
+      { method: 'setClassification', invocation: { kind: 'direct' } },
     ])
   })
 
@@ -128,8 +149,12 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(remoteErrorOf(idle)).toMatchObject({ code: 'market/idle' })
     const idleSearch = await gateway.search('demo', null, null).catch((error: unknown) => error)
     expect(remoteErrorOf(idleSearch)).toMatchObject({ code: 'market/idle' })
-    const idleInstall = await gateway.install('octocat/demo', 'tok', null, null).catch((error: unknown) => error)
-    expect(remoteErrorOf(idleInstall)).toMatchObject({ code: 'market/idle' })
+    const idlePrepare = await gateway.prepareDownload('octocat/demo', 'tok', null, null).catch((error: unknown) => error)
+    expect(remoteErrorOf(idlePrepare)).toMatchObject({ code: 'market/idle' })
+    const idleClassify = await gateway.classifyDownload('dl-tok-1').catch((error: unknown) => error)
+    expect(remoteErrorOf(idleClassify)).toMatchObject({ code: 'market/idle' })
+    const idleCommit = await gateway.commitDownload('dl-tok-1', 'other').catch((error: unknown) => error)
+    expect(remoteErrorOf(idleCommit)).toMatchObject({ code: 'market/idle' })
     const idlePreview = await gateway.previewInstall('octocat/demo', 'tag', 'v1').catch((error: unknown) => error)
     expect(remoteErrorOf(idlePreview)).toMatchObject({ code: 'market/idle' })
     const idleDetail = await gateway.repositoryDetail('octocat/demo').catch((error: unknown) => error)
@@ -179,8 +204,8 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(tagReview.refKind).toBe('tag')
     expect(branchReview.key).not.toBe(tagReview.key)
 
-    await gateway.install('octocat/demo-plugin', branchReview.confirmToken, 'branch', 'v1.2.3')
-    await gateway.install('octocat/demo-plugin', tagReview.confirmToken, 'tag', 'v1.2.3')
+    await downloadVia(gateway, 'octocat/demo-plugin', branchReview.confirmToken, 'branch', 'v1.2.3')
+    await downloadVia(gateway, 'octocat/demo-plugin', tagReview.confirmToken, 'tag', 'v1.2.3')
     expect(engines.installCalls.map(call => call.key)).toEqual([branchReview.key, tagReview.key])
     expect(engines.installCalls.map(call => call.refKind)).toEqual(['branch', 'tag'])
   })
@@ -226,10 +251,9 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(review.entryNote).toBe('an include-tree preset')
     expect(review.analysis).toEqual({ installable: false, kind: 'other', reason: 'an include-tree preset' })
 
-    const outcome = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
+    const outcome = await downloadVia(gateway, 'octocat/demo-plugin', review.confirmToken, null, null)
     expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
-    expect(outcome).toMatchObject({ classification: 'other', entry: null })
-    expect(engines.installCalls[0]).toMatchObject({ classification: 'other' })
+    expect(outcome).toMatchObject({ classification: 'other', entry: null, dependenciesInstalled: false })
   })
 
   it('classifies an unconventional preview without an analysis engine as other (no refusal)', async () => {
@@ -262,7 +286,7 @@ describe('MarketControllerGateway host Remote surface', () => {
     const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
     expect(review.classification).toBe('other')
     expect(review.note).toEqual({ kind: 'analysis-unavailable' })
-    await expect(gateway.install('octocat/demo-plugin', review.confirmToken, null, null))
+    await expect(downloadVia(gateway, 'octocat/demo-plugin', review.confirmToken, null, null))
       .resolves.toMatchObject({ key: key('gh-octocat-demo-plugin') })
   })
 
@@ -289,7 +313,7 @@ describe('MarketControllerGateway host Remote surface', () => {
       'install/entry-missing',
       'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
     )
-    const caught = await gateway.install('octocat/demo-plugin', review.confirmToken, null, null)
+    const caught = await gateway.prepareDownload('octocat/demo-plugin', review.confirmToken, null, null)
       .catch((error: unknown) => error)
     expect(remoteErrorOf(caught)).toMatchObject({ code: 'install/entry-missing' })
   })

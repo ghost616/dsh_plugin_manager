@@ -146,11 +146,49 @@ export class PluginRecordStore {
     })
   }
 
-  /** Record a trust decision (stamping `trustedAt`) for one record. */
+  /**
+   * Record a trust decision (stamping `trustedAt`) for one record. */
   async setTrusted(key: PluginMarketKey, trusted: PluginMarketTrustState): Promise<PluginMarketRecord> {
     return this.update(key, (record) => {
       if (record.trusted === trusted) return record
       return { ...record, trusted, trustedAt: new Date().toISOString() }
+    })
+  }
+
+  /**
+   * Correct the classification tag of one record (manual/UI correction after a
+   * model-less or failed download filed it as `other`).
+   *
+   * Atomic and field-preserving: every other field (`entry`, `source`,
+   * `localDirName`, `enabled`, `trusted*`, `installedAt`) is carried over
+   * unchanged; only `classification` moves.
+   *
+   * @throws {MarketError} `record/not-found` when no record has the key;
+   * `record/invalid` for an unknown label, or for `'plugin'` on a record whose
+   * `entry` is null — a `plugin` tag promises a runnable entry, so a caller
+   * promoting an entry-less checkout must register its entry first.
+   */
+  async setClassification(
+    key: PluginMarketKey,
+    classification: PluginMarketClassification,
+  ): Promise<PluginMarketRecord> {
+    if (!isPluginMarketClassification(classification)) {
+      throw new MarketError(
+        'record/invalid',
+        `classification ${JSON.stringify(classification)} is not a valid classification tag ("plugin", "skills" or "other").`,
+        { path: this.filePath },
+      )
+    }
+    return this.update(key, (record) => {
+      if (record.classification === classification) return record
+      if (classification === 'plugin' && record.entry === null) {
+        throw new MarketError(
+          'record/invalid',
+          `record "${key}" has no runnable "entry", so it cannot be classified as "plugin"; register the checkout entry first (or keep it "skills"/"other").`,
+          { path: this.filePath },
+        )
+      }
+      return { ...record, classification }
     })
   }
 

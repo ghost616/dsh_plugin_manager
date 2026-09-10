@@ -338,6 +338,74 @@ describe('ManagePluginsTab managed roster', () => {
     expect(setEnabled).not.toHaveBeenCalled()
   })
 
+  it('re-files a row through the classification picker and refreshes the roster', async () => {
+    let snapshot = makeList([
+      { key: 'gh-skills', repository: 'acme/skills-pack', classification: 'skills' },
+    ])
+    const list = vi.fn(async () => snapshot)
+    const setClassification = vi.fn(async (_key: PluginMarketKey) => {
+      snapshot = makeList([
+        { key: 'gh-skills', repository: 'acme/skills-pack', classification: 'plugin' },
+      ])
+      return snapshot.entries[0]!.record
+    })
+    const { props } = managePageHarness({ list, setClassification })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    // The tag is the manual-correction entry of the row.
+    expect(host.querySelector('[data-classification-tag]')?.textContent).toBe(zh.classificationSkills)
+    await click(host.querySelector('[data-classification-tag]'))
+    await flush()
+
+    const dialog = host.querySelector('[data-dialog="classification"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.getAttribute('data-classification-key')).toBe('gh-skills')
+    // One radio per tag, with the current one pre-selected.
+    const options = Array.from(dialog?.querySelectorAll<HTMLElement>('[data-classification-option]') ?? [])
+    expect(options.map(option => option.getAttribute('data-classification-option')))
+      .toEqual(['plugin', 'skills', 'other'])
+    expect(dialog?.querySelector('[data-classification-option="skills"]')?.getAttribute('data-selected'))
+      .toBe('true')
+    expect(dialog?.querySelector('[data-classification-option="skills"] input')?.hasAttribute('checked')).toBe(true)
+
+    // Pick another tag and save: the host is asked for exactly that change.
+    await click(dialog?.querySelector('[data-classification-option="plugin"] input'))
+    await flush()
+    await click(dialog?.querySelector('[data-classification-confirm]'))
+    await flush()
+
+    expect(setClassification).toHaveBeenCalledWith('gh-skills', 'plugin')
+    expect(host.querySelector('[data-dialog="classification"]')).toBeNull()
+    // The roster reloaded and the row now carries the corrected tag.
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(host.querySelector('[data-classification-tag]')?.textContent).toBe(zh.classificationPlugin)
+  })
+
+  it('keeps the correction dialog open with the wire code when the label is refused', async () => {
+    const list = vi.fn(async () => makeList([
+      { key: 'gh-skills', repository: 'acme/skills-pack', classification: 'skills' },
+    ]))
+    const setClassification = vi.fn(async () => {
+      throw new MarketCallFailure({ code: 'market/bad-request', message: 'nope', details: {} })
+    })
+    const { props } = managePageHarness({ list, setClassification })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    await click(host.querySelector('[data-classification-tag]'))
+    await flush()
+    await click(host.querySelector('[data-dialog="classification"] [data-classification-confirm]'))
+    await flush()
+
+    const error = host.querySelector('[data-classification-error]')
+    expect(error).not.toBeNull()
+    expect(error?.getAttribute('data-error-code')).toBe('market/bad-request')
+    expect(error?.textContent).toContain('market/bad-request')
+    // The dialog stays open so the user can retry or cancel.
+    expect(host.querySelector('[data-dialog="classification"]')).not.toBeNull()
+  })
+
   it('filters managed rows and shows the empty-search state', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-a', repository: 'octocat/demo-plugin', enabled: false },

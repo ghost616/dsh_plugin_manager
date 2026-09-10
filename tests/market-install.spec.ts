@@ -137,7 +137,7 @@ describe('PluginInstaller.install', () => {
     expect(await store.list()).toEqual([])
   })
 
-  it('clones, installs and registers a confirmed plugin with defaults and trust', async () => {
+  it('clones, files and registers a confirmed plugin with defaults and trust (no package manager)', async () => {
     const root = await freshRepo('repo-success')
     const { run, calls } = fakeRunner({
       manifest: { name: 'sample-plugin', main: 'lib/index.js' },
@@ -159,14 +159,16 @@ describe('PluginInstaller.install', () => {
     expect(result.record.source).toMatchObject({ kind: 'github', repository: 'owner/sample-plugin' })
     expect((result.record.source as PluginMarketGithubSource).commit).toBe('b'.repeat(40))
 
-    // The checkout and conventions landed on disk; git/pnpm ran once each.
+    // The checkout and conventions landed on disk; git ran, a package manager did not.
     const pkg = JSON.parse(await readFile(join(root, 'gh-owner-repo', 'package.json'), 'utf8')) as { main: string }
     expect(pkg.main).toBe('lib/index.js')
     // The final directory is a managed checkout: it holds the `.git` created
     // by the (fake) clone, not a leftover of any pre-existing data.
     expect(await readdir(join(root, 'gh-owner-repo', '.git'))).toEqual([])
     expect(calls.some((call) => call.command === 'git' && call.args[0] === 'clone')).toBe(true)
-    expect(calls.some((call) => call.command === 'pnpm')).toBe(true)
+    // The download path NEVER installs dependencies.
+    expect(calls.some((call) => call.command === 'pnpm')).toBe(false)
+    expect(result.dependenciesInstalled).toBe(false)
 
     // Reload: the record persisted exactly once with the defaults above.
     const store = new PluginRecordStore(repositoryRecordsPath(root))
@@ -228,7 +230,7 @@ describe('PluginInstaller.install', () => {
     expect(result.record.entry).toBe('index.js')
   })
 
-  it('tolerates an unreadable package.json and files the checkout as other', async () => {
+  it('tolerates an unparseable package.json and files the checkout as other', async () => {
     const root = await freshRepo('repo-broken-manifest')
     const { run } = fakeRunner({ manifest: {}, rawManifest: 'not json', files: ['README.md'] })
     const result = await new PluginInstaller({ run }).install({
@@ -240,7 +242,9 @@ describe('PluginInstaller.install', () => {
     })
     expect(result.classification).toBe('other')
     expect(result.entry).toBeNull()
-    expect(result.entryNote).toContain('package.json')
+    // The note names the entry that could not be resolved (the manifest is
+    // tolerated, never a hard failure).
+    expect(result.entryNote).toContain('index.js')
     expect(result.record.entry).toBeNull()
     expect(result.record.classification).toBe('other')
   })
@@ -261,7 +265,7 @@ describe('PluginInstaller.install', () => {
     expect(result.entry).toBeNull()
     expect(result.record.classification).toBe('skills')
     expect(result.record.entry).toBeNull()
-    // A non-plugin checkout has no loader entry to satisfy: pnpm is skipped.
+    // A non-plugin checkout has no loader entry to satisfy: dependencies are never installed.
     expect(result.dependenciesInstalled).toBe(false)
     expect(calls.some((call) => call.command === 'pnpm')).toBe(false)
     expect((await new PluginRecordStore(repositoryRecordsPath(root)).get(key('gh-skills-pack')))?.classification).toBe('skills')
@@ -282,10 +286,11 @@ describe('PluginInstaller.install', () => {
     expect(result.classification).toBe('plugin')
     expect(result.entry).toBe('index.js')
     expect(result.record.classification).toBe('plugin')
-    expect(result.dependenciesInstalled).toBe(true)
+    // Downloads never install dependencies (even for a plugin checkout).
+    expect(result.dependenciesInstalled).toBe(false)
   })
 
-  it('skips pnpm for a checkout without package.json instead of failing on ERR_PNPM_NO_PKG_MANIFEST', async () => {
+  it('never runs a package manager for a checkout without package.json', async () => {
     const root = await freshRepo('repo-no-manifest')
     // The runner emulates pnpm refusing to run without a manifest; more
     // importantly it records whether pnpm is invoked at all.
@@ -346,23 +351,21 @@ describe('PluginInstaller.install', () => {
     expect(await readdir(join(root, 'gh-readme-only'))).toEqual(expect.arrayContaining(['docs']))
   })
 
-  it('reports deps-failed and rolls back on a pnpm failure', async () => {
-    const root = await freshRepo('repo-deps-fail')
-    const { run } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'], failPnpm: true })
+  it('files the checkout successfully even though pnpm would fail (a package manager is never invoked)', async () => {
+    const root = await freshRepo('repo-deps-never')
+    const { run, calls } = fakeRunner({ manifest: { main: 'index.js' }, files: ['index.js'], failPnpm: true })
     const installer = new PluginInstaller({ run })
-    await rejectCode(
-      installer.install({
-        repositoryRoot: root,
-        key: key('gh-deps-fail'),
-        ownerRepo: 'owner/depsfail',
-        localDirName: 'gh-deps-fail',
-        confirmed: true,
-      }),
-      'install/deps-failed',
-    )
-    const dirs = await readdir(root)
-    expect(dirs.some((name) => name === 'gh-deps-fail')).toBe(false)
-    expect(dirs.some((name) => name.startsWith('.install-'))).toBe(false)
+    const result = await installer.install({
+      repositoryRoot: root,
+      key: key('gh-deps-never'),
+      ownerRepo: 'owner/depsfail',
+      localDirName: 'gh-deps-never',
+      confirmed: true,
+    })
+    expect(result.dependenciesInstalled).toBe(false)
+    expect(calls.some((call) => call.command === 'pnpm')).toBe(false)
+    expect((await readdir(root)).some((name) => name === 'gh-deps-never')).toBe(true)
+    expect((await readdir(root)).some((name) => name.startsWith('.install-'))).toBe(false)
   })
 
   it('overwrite-updates the same key (stale checkout removed, single record)', async () => {

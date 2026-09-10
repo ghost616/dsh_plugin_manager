@@ -6,9 +6,10 @@
  *
  * Wire shape:
  *   POST /api/plugins-market
- *   { "method": "status" | "listManaged" | "setEnabled" | "requestRemove"
- *       | "confirmRemove" | "search" | "repositoryDetail" | "previewInstall"
- *       | "install",
+ *   { "method": "status" | "listManaged" | "setEnabled" | "setClassification"
+ *       | "requestRemove" | "confirmRemove" | "search" | "repositoryDetail"
+ *       | "previewInstall" | "prepareDownload" | "classifyDownload"
+ *       | "commitDownload" | "cancelDownload",
  *     "args": { ... } }
  *   200 → { "ok": true, "value": ... }
  *        | { "ok": false, "error": { "code", "message", "details" } }
@@ -25,13 +26,17 @@ import type {
   GitHubSearchPage,
   ManagedPluginList,
   MarketStatus,
-  PluginInstallOutcome,
   PluginInstallReview,
   PluginMarketRecord,
   RemoveOutcome,
   RemoveRequest,
   RepositoryDetail,
 } from '../../types.ts'
+import type {
+  DownloadClassification,
+  DownloadCommit,
+  DownloadPreparation,
+} from './source.ts'
 import type { MarketControllerGateway } from './gateway.ts'
 import { toRemoteError } from './gateway.ts'
 
@@ -109,15 +114,31 @@ const METHODS: Record<string, MethodMeta> = {
       optionalVersion(args.version),
     ),
   },
-  install: {
+  prepareDownload: {
     parameters: ['repository', 'confirmToken'],
     optional: ['refKind', 'version'],
-    call: (gateway, args) => gateway.install(
+    call: (gateway, args) => gateway.prepareDownload(
       String(args.repository),
       String(args.confirmToken),
       optionalRefKind(args.refKind),
       optionalVersion(args.version),
     ),
+  },
+  classifyDownload: {
+    parameters: ['token'],
+    call: (gateway, args) => gateway.classifyDownload(String(args.token)),
+  },
+  commitDownload: {
+    parameters: ['token', 'classification'],
+    call: (gateway, args) => gateway.commitDownload(String(args.token), String(args.classification)),
+  },
+  cancelDownload: {
+    parameters: ['token'],
+    call: (gateway, args) => gateway.cancelDownload(String(args.token)),
+  },
+  setClassification: {
+    parameters: ['key', 'classification'],
+    call: (gateway, args) => gateway.setClassification(String(args.key), String(args.classification)),
   },
 }
 
@@ -292,5 +313,8 @@ export type MarketChannelValue =
   | RemoveOutcome
   | GitHubSearchPage
   | PluginInstallReview
-  | PluginInstallOutcome
+  | DownloadPreparation
+  | DownloadClassification
+  | DownloadCommit
+  | boolean
   | RepositoryDetail

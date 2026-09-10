@@ -34,7 +34,7 @@ import { MarketControllerGateway } from './gateway.ts'
 import { createInstallerPort } from './installer-port.ts'
 import { createLoaderAdapter } from './loader-adapter.ts'
 import { createProtectionPolicy } from './protect.ts'
-import { MarketSourceOperations, type InstallAnalysisEngine, type InstallerPort } from './source.ts'
+import { MarketSourceOperations, type DownloadClassifyOptions, type InstallAnalysisEngine, type InstallerPort } from './source.ts'
 import { registerMarketWebChannel } from './web-channel.ts'
 import { createLlmCompletion, runCheckoutAnalysis, snapshotFromPreview, type LlmStreamService } from './analysis.ts'
 import type {} from '../market/service.ts'
@@ -99,10 +99,15 @@ export function apply(ctx: Context, config?: Config): void {
   // analysis fails.
   const llmConfig = config?.llm
   let analysisEngine: InstallAnalysisEngine | undefined
+  let classifyOptions: DownloadClassifyOptions | undefined
   if (llmConfig !== undefined) {
     try {
       const endpoint = requireMarketLlm(llmConfig.provider, llmConfig.model)
       const complete = createLlmCompletion({ llm: () => liveLlm(ctx) })
+      // The staged-download classification uses the same endpoint as the review
+      // analysis: one `LlmCompletion` shape serves both, the host classifier
+      // sends its own prompt over it.
+      classifyOptions = { complete, provider: endpoint.provider, model: endpoint.model }
       analysisEngine = {
         async analyze({ repository, preview, hasFile }) {
           let readme: string | null = null
@@ -127,17 +132,28 @@ export function apply(ctx: Context, config?: Config): void {
       }
     } catch (error) {
       // Partial/blank llm section: leave the engine unset, so unconventional
-      // previews are reviewed with the conservative `other` classification.
+      // previews are reviewed with the conservative `other` classification and
+      // a download classification answers `unclassified` + `other`.
       logger.warn(`Smart-install analysis disabled: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+  // One download engine per repository root: the staged-download handle lives in
+  // the port's registry, so prepare/classify/commit/cancel must reach the SAME
+  // instance (see MarketSourceDeps.installer).
+  const ports = new Map<string, InstallerPort>()
   const source = new MarketSourceOperations({
     repository: () => runtime?.repository ?? null,
     searchEngine: github,
     detailEngine: github,
     previewEngine: new PluginPreviewer(),
     ...(analysisEngine === undefined ? {} : { analysis: analysisEngine }),
-    installer: (repository): InstallerPort => createInstallerPort(repository),
+    installer: (repository): InstallerPort => {
+      const existing = ports.get(repository.root)
+      if (existing !== undefined) return existing
+      const port = createInstallerPort(repository, classifyOptions === undefined ? {} : { classify: classifyOptions })
+      ports.set(repository.root, port)
+      return port
+    },
     protection,
     syncRecord: async (record) => {
       await runtime?.controller.syncRecordRow(record)

@@ -32,8 +32,8 @@ import type {
   GithubRefKind,
   ManagedPluginList,
   MarketStatus,
-  PluginInstallOutcome,
   PluginInstallReview,
+  PluginMarketClassification,
   PluginMarketKey,
   PluginMarketRecord,
   RemoveOutcome,
@@ -41,16 +41,23 @@ import type {
   RepositoryDetail,
 } from '../types.ts'
 import {
+  cancelDownload as channelCancelDownload,
+  classifyDownload as channelClassifyDownload,
+  commitDownload as channelCommitDownload,
   confirmRemove as channelConfirmRemove,
-  install as channelInstall,
   listManaged,
+  prepareDownload as channelPrepareDownload,
   previewInstall as channelPreviewInstall,
   repositoryDetail as channelRepositoryDetail,
   requestRemove as channelRequestRemove,
   search as channelSearch,
+  setClassification as channelSetClassification,
   setEnabled,
   status as channelStatus,
   unwrap,
+  type DownloadClassification,
+  type DownloadCommit,
+  type DownloadPreparation,
 } from './channel.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import { en, zh } from './locales.ts'
@@ -94,6 +101,10 @@ export function apply(ctx: Context): void {
     async (key: PluginMarketKey, enabled: boolean): Promise<PluginMarketRecord> => {
       return unwrap(await setEnabled(key, enabled))
     }
+  const setClassificationRecord: ManagePluginsTabInjected['setClassification'] =
+    async (key: PluginMarketKey, classification: PluginMarketClassification): Promise<PluginMarketRecord> => {
+      return unwrap(await channelSetClassification(key, classification))
+    }
   const requestRemoveRecord: ManagePluginsTabInjected['requestRemove'] =
     async (key: PluginMarketKey): Promise<RemoveRequest> => {
       return unwrap(await channelRequestRemove(key))
@@ -112,22 +123,43 @@ export function apply(ctx: Context): void {
     }
   const previewInstallRecord: ManagePluginsTabInjected['previewInstall'] =
     async (repository: string, version?: string | null, refKind?: GithubRefKind): Promise<PluginInstallReview> => {
-      return unwrap(await channelPreviewInstall(repository, version ?? null, refKind))
+      return unwrap(await channelPreviewInstall(repository, refKind, version ?? null))
     }
-  const installRecord: ManagePluginsTabInjected['install'] =
-    async (repository: string, confirmToken: string, version?: string | null, refKind?: GithubRefKind): Promise<PluginInstallOutcome> => {
-      return unwrap(await channelInstall(repository, confirmToken, version ?? null, refKind))
+  const prepareDownloadRecord: ManagePluginsTabInjected['prepareDownload'] =
+    async (
+      repository: string,
+      confirmToken: string,
+      version?: string | null,
+      refKind?: GithubRefKind,
+    ): Promise<DownloadPreparation> => {
+      return unwrap(await channelPrepareDownload(repository, confirmToken, refKind, version ?? null))
+    }
+  const classifyDownloadRecord: ManagePluginsTabInjected['classifyDownload'] =
+    async (token: string): Promise<DownloadClassification> => {
+      return unwrap(await channelClassifyDownload(token))
+    }
+  const commitDownloadRecord: ManagePluginsTabInjected['commitDownload'] =
+    async (token: string, classification: PluginMarketClassification): Promise<DownloadCommit> => {
+      return unwrap(await channelCommitDownload(token, classification))
+    }
+  const cancelDownloadRecord: ManagePluginsTabInjected['cancelDownload'] =
+    async (token: string): Promise<boolean> => {
+      return unwrap(await channelCancelDownload(token))
     }
   const injected = (): ManagePluginsTabInjected => ({
     status,
     list,
     setEnabled: setEnabledRecord,
+    setClassification: setClassificationRecord,
     requestRemove: requestRemoveRecord,
     confirmRemove: confirmRemoveRecord,
     search: searchRecord,
     repositoryDetail: repositoryDetailRecord,
     previewInstall: previewInstallRecord,
-    install: installRecord,
+    prepareDownload: prepareDownloadRecord,
+    classifyDownload: classifyDownloadRecord,
+    commitDownload: commitDownloadRecord,
+    cancelDownload: cancelDownloadRecord,
   })
 
   // One top-level settings page; it is the only entry point of this plugin

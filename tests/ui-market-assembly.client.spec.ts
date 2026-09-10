@@ -78,12 +78,21 @@ type InjectedFace = {
   status: () => Promise<unknown>
   list: () => Promise<unknown>
   setEnabled: (key: string, enabled: boolean) => Promise<unknown>
+  setClassification: (key: string, classification: string) => Promise<unknown>
   requestRemove: (key: string) => Promise<unknown>
   confirmRemove: (key: string, token: string) => Promise<unknown>
   search: (keywords: string, page: number) => Promise<unknown>
   repositoryDetail: (repository: string) => Promise<unknown>
   previewInstall: (repository: string, version?: string | null, refKind?: 'branch' | 'tag') => Promise<unknown>
-  install: (repository: string, confirmToken: string, version?: string | null, refKind?: 'branch' | 'tag') => Promise<unknown>
+  prepareDownload: (
+    repository: string,
+    confirmToken: string,
+    version?: string | null,
+    refKind?: 'branch' | 'tag',
+  ) => Promise<unknown>
+  classifyDownload: (token: string) => Promise<unknown>
+  commitDownload: (token: string, classification: string) => Promise<unknown>
+  cancelDownload: (token: string) => Promise<unknown>
 }
 
 function faceOf(entry: FakeStoredEntry): InjectedFace {
@@ -123,7 +132,8 @@ describe('plugin-market browser half assembly', () => {
     const face = faceOf(entry)
     for (const member of [
       'status', 'list', 'setEnabled', 'requestRemove', 'confirmRemove',
-      'search', 'repositoryDetail', 'previewInstall', 'install',
+      'search', 'repositoryDetail', 'previewInstall', 'prepareDownload', 'classifyDownload',
+      'commitDownload', 'cancelDownload', 'setClassification',
     ]) {
       expect(typeof (face as Record<string, unknown>)[member]).toBe('function')
     }
@@ -157,9 +167,34 @@ describe('plugin-market browser half assembly', () => {
         args: { repository: 'octocat/demo' },
       },
       {
-        call: () => face.install('octocat/demo', 'tok', 'main', 'branch'),
-        method: 'install',
+        // Phase 1 of the download: clone the reviewed ref into staging.
+        call: () => face.prepareDownload('octocat/demo', 'tok', 'main', 'branch'),
+        method: 'prepareDownload',
         args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main', refKind: 'branch' },
+      },
+      {
+        // Phase 2: classify the staged checkout (model problems are values).
+        call: () => face.classifyDownload('dl-token'),
+        method: 'classifyDownload',
+        args: { token: 'dl-token' },
+      },
+      {
+        // Phase 3: swap in + file the record under the chosen tag.
+        call: () => face.commitDownload('dl-token', 'skills'),
+        method: 'commitDownload',
+        args: { token: 'dl-token', classification: 'skills' },
+      },
+      {
+        // Cancel: delete the staging directory (idempotent).
+        call: () => face.cancelDownload('dl-token'),
+        method: 'cancelDownload',
+        args: { token: 'dl-token' },
+      },
+      {
+        // Manual correction of a record's tag.
+        call: () => face.setClassification('gh-octocat-demo', 'other'),
+        method: 'setClassification',
+        args: { key: 'gh-octocat-demo', classification: 'other' },
       },
     ]
     for (const page of pages) {
@@ -168,10 +203,10 @@ describe('plugin-market browser half assembly', () => {
       expect(url).toBe(MARKET_CONTROL_WEB_PATH)
       expect(JSON.parse(String(init.body))).toMatchObject({ method: page.method, args: page.args })
     }
-    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(fetchMock).toHaveBeenCalledTimes(pages.length)
   })
 
-  it('omits refKind from the wire when a legacy review/install is requested', async () => {
+  it('omits refKind from the wire when a legacy review/download is requested', async () => {
     const { slots } = await bench()
     const fetchMock = vi.fn(async () =>
       jsonResponse({ ok: true, value: makeInstallReview({ repository: 'octocat/demo' }) }))
@@ -180,19 +215,19 @@ describe('plugin-market browser half assembly', () => {
     const face = faceOf(sectionEntry(slots))
 
     await face.previewInstall('octocat/demo', 'v2.0.0')
-    await face.install('octocat/demo', 'tok', 'main')
+    await face.prepareDownload('octocat/demo', 'tok', 'main')
     expect(fetchMock).toHaveBeenCalledTimes(2)
 
     // Legacy calls never serialize a refKind key: the host treats the absence
-    // as the pre-v2 default-branch review/install.
+    // as the pre-v2 default-branch review/download.
     const preview = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(JSON.parse(String(preview[1].body))).toEqual({
       method: 'previewInstall',
       args: { repository: 'octocat/demo', version: 'v2.0.0' },
     })
-    const installCall = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
-    expect(JSON.parse(String(installCall[1].body))).toEqual({
-      method: 'install',
+    const prepare = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(prepare[1].body))).toEqual({
+      method: 'prepareDownload',
       args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main' },
     })
   })
@@ -219,7 +254,8 @@ describe('plugin-market browser half assembly', () => {
     declareSection(slots)
 
     const face = faceOf(sectionEntry(slots))
-    const error = await face.install('octocat/demo', 'tok', null, undefined).catch((caught: unknown) => caught)
+    const error = await face.prepareDownload('octocat/demo', 'tok', null, undefined)
+      .catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
     expect(error as MarketCallFailure).toMatchObject({ code: 'market/unreachable' })
   })

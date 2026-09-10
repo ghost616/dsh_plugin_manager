@@ -53,6 +53,16 @@ export const zh = {
   switchNotLoadable: '「{name}」不是可加载的插件，无法启用。',
   /** Why a plugin checkout without a runnable entry can never be enabled. */
   switchNotLoadableEntry: '「{name}」没有可加载的入口文件，无法启用。',
+  /** Accessible name/tooltip of a row's classification tag (manual correction). */
+  classificationFix: '修正「{name}」的分类标签',
+  /** Manual-correction dialog title. */
+  classificationDialogTitle: '修正分类标签',
+  /** Manual-correction dialog explanation (re-files the tag only). */
+  classificationDialogBody: '选择「{name}」应被记录的分类：只改写入库标签，不动本地源码与启停状态。',
+  /** Manual-correction confirm action. */
+  classificationConfirm: '保存标签',
+  /** Manual-correction in-flight state. */
+  classificationSaving: '正在保存…',
   /** Phase dot label when no live loader fiber exists. */
   unobserved: '未运行',
   /** Phase dot label while the entry waits for dependencies. */
@@ -165,10 +175,46 @@ export const zh = {
   previewFailed: '无法读取该仓库的插件清单。',
   /** Download in-flight state. */
   downloading: '正在下载…',
-  /** Download success message. */
-  downloadDone: '下载完成。插件默认停用，可在已管理列表中启用。',
+  /**
+   * Download success message. "Download" only ever means "fetch the sources
+   * into the repository": no dependency is installed, and enabling/installing
+   * is a later, separate action. (Deliberately avoids the retired "已下载"
+   * status wording — nothing is marked as downloaded any more.)
+   */
+  downloadDone: '下载完成：源码已入库。不会安装依赖，插件默认停用，可在本地仓库列表中处理。',
   /** Download failure heading. */
   downloadFailed: '下载失败。',
+  /** Stage row: clone the sources into the staging area. */
+  stageClone: '克隆源码',
+  /** Stage row: classify the checkout with the model. */
+  stageClassify: '分析类型',
+  /** Stage row: write the configuration (swap in + record). */
+  stageCommit: '写入配置',
+  /** Stage state: not started yet. */
+  stageWaiting: '等待中',
+  /** Stage state: in flight. */
+  stageRunning: '进行中',
+  /** Stage state: finished. */
+  stageDone: '已完成',
+  /** Stage state: failed (the row also carries the failure copy). */
+  stageFailed: '失败',
+  /** Per-phase retry action of the staged download. */
+  stageRetry: '重试该阶段',
+  /**
+   * Verdict notice: the model was not available, so the checkout stays
+   * unclassified. Informational — the download continues as `other` and the
+   * tag can be corrected by hand from the roster.
+   */
+  verdictUnclassified: '未判定：模型不可用，可先按「其他」入库，随后在本地仓库列表人工修正分类。',
+  /** Verdict notice: the model call failed (same manual-correction path). */
+  verdictFailed: '未判定：分析失败，可先按「其他」入库，随后在本地仓库列表人工修正分类。',
+  /** Final verdict line of a finished download. */
+  verdictFinal: '入库分类：{classification}',
+  /**
+   * Reminder shown after a download: sources only. Installing dependencies is a
+   * later, separate action that this UI does not offer yet.
+   */
+  depsNotInstalledNotice: '本次仅下载源码，未安装依赖；安装依赖是后续独立动作。',
   /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: '正在检查该仓库并分析可否安装…',
   /** Confirmation line naming the classification the download will be filed under. */
@@ -248,6 +294,11 @@ export const en: Record<MarketManageLocaleKey, string> = {
   classificationOther: 'Other',
   switchNotLoadable: '{name} is not a loadable plugin and cannot be enabled.',
   switchNotLoadableEntry: '{name} has no loadable entry file and cannot be enabled.',
+  classificationFix: 'Correct the classification tag of {name}',
+  classificationDialogTitle: 'Correct classification',
+  classificationDialogBody: 'Pick the classification {name} should be filed under: only the stored tag changes, sources and enablement stay as they are.',
+  classificationConfirm: 'Save tag',
+  classificationSaving: 'Saving…',
   unobserved: 'Not running',
   phasePending: 'Waiting for dependencies',
   phaseLoading: 'Loading',
@@ -304,8 +355,25 @@ export const en: Record<MarketManageLocaleKey, string> = {
   degradedNotice: 'Dependency list unreadable ({code}); you can still download.',
   previewFailed: 'Could not read the plugin manifest.',
   downloading: 'Downloading…',
-  downloadDone: 'Downloaded. The plugin is disabled by default; enable it from the managed list.',
+  /**
+   * Download success message. "Download" only ever means "fetch the sources
+   * into the repository": no dependency is installed, and enabling/installing
+   * is a later, separate action.
+   */
+  downloadDone: 'Sources downloaded into the repository. No dependencies were installed; the plugin stays disabled until you work with it in the local repository list.',
   downloadFailed: 'Download failed.',
+  stageClone: 'Clone sources',
+  stageClassify: 'Classify type',
+  stageCommit: 'Write configuration',
+  stageWaiting: 'Waiting',
+  stageRunning: 'Running',
+  stageDone: 'Done',
+  stageFailed: 'Failed',
+  stageRetry: 'Retry this stage',
+  verdictUnclassified: 'Not classified: the model is unavailable. It is filed as "other"; correct the tag by hand from the local repository list if needed.',
+  verdictFailed: 'Not classified: the analysis failed. It is filed as "other"; correct the tag by hand from the local repository list if needed.',
+  verdictFinal: 'Filed as: {classification}',
+  depsNotInstalledNotice: 'Sources only — no dependencies were installed. Installing dependencies is a separate, later action.',
   /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: 'Inspecting the repository and analyzing whether it can be installed…',
   /** Confirmation line naming the classification the download will be filed under. */

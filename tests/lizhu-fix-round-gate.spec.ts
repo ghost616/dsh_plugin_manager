@@ -150,9 +150,12 @@ describe('[挑战] §1 门禁：无清单 / 坏清单 / 非 plugin 检出时 pnp
   beforeAll(async () => { tmp = await makeSuiteTmp('lizhu-gate') })
   afterAll(async () => { await removeTmp(tmp) })
 
-  /** 每种情形都让 runner 把 pnpm 模拟成 ERR_PNPM_NO_PKG_MANIFEST 失败。 */
+  /**
+   * 每种情形都让 runner 把 pnpm 模拟成 ERR_PNPM_NO_PKG_MANIFEST 失败（若被调用
+   * 即会炸）；`note` 是 entryNote 里应当携带的具体原因片段。
+   */
   const gated = [
-    { label: '完全没有 package.json', fixture: { files: ['README.md'] }, extra: {}, classification: 'other', note: 'Dependencies were not installed' },
+    { label: '完全没有 package.json', fixture: { files: ['README.md'] }, extra: {}, classification: 'other', note: 'package.json' },
     { label: 'package.json 非法 JSON', fixture: { rawManifest: '{ not json', files: ['README.md'] }, extra: {}, classification: 'other', note: 'not valid JSON' },
     { label: 'package.json 是空文件', fixture: { rawManifest: '', files: ['README.md'] }, extra: {}, classification: 'other', note: 'not valid JSON' },
     { label: 'package.json 是数组（非对象）', fixture: { rawManifest: '[1,2,3]', files: ['README.md'] }, extra: {}, classification: 'other', note: 'not a JSON object' },
@@ -160,12 +163,12 @@ describe('[挑战] §1 门禁：无清单 / 坏清单 / 非 plugin 检出时 pnp
     { label: 'package.json 是字符串（非对象）', fixture: { rawManifest: '"hello"', files: ['README.md'] }, extra: {}, classification: 'other', note: 'not a JSON object' },
     { label: 'package.json 是数字（非对象）', fixture: { rawManifest: '7', files: ['README.md'] }, extra: {}, classification: 'other', note: 'not a JSON object' },
     { label: 'package.json 不可读（目录占位）', fixture: { packageJsonAsDirectory: true, files: ['README.md'] }, extra: {}, classification: 'other', note: 'missing or unreadable' },
-    { label: '清单可读但无可执行入口（无 hint）', fixture: { manifest: { main: 'lib/missing.js' }, files: ['README.md'] }, extra: {}, classification: 'other', note: 'not a plugin' },
-    { label: '清单可读但无可执行入口（hint=other）', fixture: { manifest: { name: 'docs' }, files: ['docs/index.md'] }, extra: { classification: 'other' }, classification: 'other', note: 'not a plugin' },
-    { label: '无可执行入口（hint=skills）', fixture: { manifest: { main: 'lib/missing.js' }, files: ['SKILL.md'] }, extra: { classification: 'skills' }, classification: 'skills', note: 'not a plugin' },
+    { label: '清单可读但无可执行入口（无 hint）', fixture: { manifest: { main: 'lib/missing.js' }, files: ['README.md'] }, extra: {}, classification: 'other', note: 'not exist inside the checkout' },
+    { label: '清单可读但无可执行入口（hint=other）', fixture: { manifest: { name: 'docs' }, files: ['docs/index.md'] }, extra: { classification: 'other' }, classification: 'other', note: 'not exist inside the checkout' },
+    { label: '无可执行入口（hint=skills）', fixture: { manifest: { main: 'lib/missing.js' }, files: ['SKILL.md'] }, extra: { classification: 'skills' }, classification: 'skills', note: 'not exist inside the checkout' },
   ] as const
 
-  it.each(gated.map((item, index) => [item.label, index, item] as const))('skips pnpm entirely and files the checkout: %s', async (_label, index, item) => {
+  it.each(gated.map((item, index) => [item.label, index, item] as const))('never runs a package manager and files the checkout: %s', async (_label, index, item) => {
       const root = join(tmp, `gated-${index}`)
       await mkdir(root)
       const name = `gh-gated-${index}`
@@ -200,69 +203,63 @@ describe('[挑战] §1 门禁：无清单 / 坏清单 / 非 plugin 检出时 pnp
     expect(pnpmCalls).toEqual([])
   })
 
-  it('a plugin checkout whose entry exists but whose manifest is absent still skips pnpm', async () => {
+  it('files an entry-only plugin checkout without a manifest and never runs a package manager', async () => {
     const root = join(tmp, 'entry-without-manifest')
     await mkdir(root)
     const { result, error, pnpmCalls } = await attempt(root, 'gh-entry-only', { files: ['index.js'], pnpmCode: 1, pnpmStderr: NO_MANIFEST_STDERR })
     expect(error).toBeNull()
     expect(pnpmCalls).toEqual([])
     expect(result).toMatchObject({ classification: 'plugin', entry: 'index.js', dependenciesInstalled: false })
-    expect(result?.entryNote).toContain('package.json')
+    expect(result?.entryNote).toContain('Dependencies were not installed')
   })
 })
 
-describe('[挑战] §1 正常路径：pnpm 恰好一次且 cwd 为检出目录', () => {
+describe('[挑战] §1 正常路径：下载成功且从不调用包管理器', () => {
   let tmp: string
   beforeAll(async () => { tmp = await makeSuiteTmp('lizhu-gate-normal') })
   afterAll(async () => { await removeTmp(tmp) })
 
-  it('runs pnpm exactly once, inside the checkout, for a readable plugin manifest', async () => {
+  it('files a readable plugin manifest without invoking a package manager', async () => {
     const root = join(tmp, 'normal')
     await mkdir(root)
-    const finalDir = join(root, 'gh-normal')
     const { result, error, pnpmCalls } = await attempt(root, 'gh-normal', {
       manifest: { name: 'demo', main: 'lib/index.js' },
       files: ['lib/index.js'],
     })
     expect(error).toBeNull()
-    expect(pnpmCalls).toHaveLength(1)
-    expect(pnpmCalls[0]?.args).toEqual(['install'])
-    const cwd = pnpmCalls[0]?.cwd ?? ''
-    expect(cwd.startsWith(root)).toBe(true)
-    expect(cwd === finalDir || basename(cwd).startsWith('.install-')).toBe(true)
-    expect(result).toMatchObject({ classification: 'plugin', entry: 'lib/index.js', dependenciesInstalled: true })
-    expect(result?.entryNote).toBeNull()
+    // The download path never installs dependencies (pnpm moved to an explicit action).
+    expect(pnpmCalls).toEqual([])
+    expect(result).toMatchObject({ classification: 'plugin', entry: 'lib/index.js', dependenciesInstalled: false })
+    expect(result?.entryNote).toContain('Dependencies were not installed')
     expect(await stagingLeftovers(root)).toEqual([])
   })
 
-  it('falls back to the conventional index.js and still installs dependencies', async () => {
+  it('falls back to the conventional index.js and never installs dependencies', async () => {
     const root = join(tmp, 'fallback')
     await mkdir(root)
     const { result, pnpmCalls } = await attempt(root, 'gh-fallback', {
       manifest: { main: 'lib/not-built.js' },
       files: ['index.js'],
     })
-    expect(pnpmCalls).toHaveLength(1)
-    expect(result).toMatchObject({ classification: 'plugin', entry: 'index.js', dependenciesInstalled: true })
+    expect(pnpmCalls).toEqual([])
+    expect(result).toMatchObject({ classification: 'plugin', entry: 'index.js', dependenciesInstalled: false })
   })
 
-  it('a real pnpm failure still fails with install/deps-failed and rolls back completely', async () => {
-    const root = join(tmp, 'deps-fail')
+  it('files the checkout even when a package manager would fail (it is never invoked)', async () => {
+    const root = join(tmp, 'deps-never')
     await mkdir(root)
-    const { error, result, pnpmCalls } = await attempt(root, 'gh-depfail', {
+    const { error, result, pnpmCalls } = await attempt(root, 'gh-depnever', {
       manifest: { main: 'index.js' },
       files: ['index.js'],
       pnpmCode: 1,
       pnpmStderr: 'ERR_PNPM_FETCH_404 GET https://registry/: Not found',
     })
-    expect(result).toBeNull()
-    expect(error?.code).toBe('install/deps-failed')
-    expect(error?.message).toContain('ERR_PNPM_FETCH_404')
-    expect(pnpmCalls).toHaveLength(1)
-    const entries = await readdir(root)
-    expect(entries).not.toContain('gh-depfail')
+    expect(error).toBeNull()
+    expect(pnpmCalls).toEqual([])
+    expect(result).toMatchObject({ classification: 'plugin', entry: 'index.js', dependenciesInstalled: false })
+    expect(await readdir(root)).toContain('gh-depnever')
     expect(await stagingLeftovers(root)).toEqual([])
-    expect(await new PluginRecordStore(repositoryRecordsPath(root)).list()).toEqual([])
+    expect((await new PluginRecordStore(repositoryRecordsPath(root)).list())).toHaveLength(1)
   })
 })
 
@@ -459,9 +456,10 @@ describe('[挑战] §3 入口探测优先：hint × 入口状态 全组合', () 
       }, hint === undefined ? {} : { classification: hint })
 
       expect(error).toBeNull()
-      expect(result).toMatchObject({ classification: 'plugin', entry: 'lib/index.js', dependenciesInstalled: true })
+      expect(result).toMatchObject({ classification: 'plugin', entry: 'lib/index.js', dependenciesInstalled: false })
       expect(result?.record).toMatchObject({ classification: 'plugin', entry: 'lib/index.js' })
-      expect(pnpmCalls).toHaveLength(1)
+      // 下载路径不再安装依赖：包管理器一次都不该被调用。
+      expect(pnpmCalls).toEqual([])
       expect((await new PluginRecordStore(repositoryRecordsPath(root)).get(key(name)))?.classification).toBe('plugin')
     },
   )
@@ -515,8 +513,9 @@ describe('[挑战] §3 入口探测优先：hint × 入口状态 全组合', () 
       manifest: { name: 'x' },
       files: ['index.js'],
     }, { classification: 'skills' })
-    expect(result).toMatchObject({ classification: 'plugin', entry: 'index.js', dependenciesInstalled: true })
-    expect(pnpmCalls).toHaveLength(1)
+    expect(result).toMatchObject({ classification: 'plugin', entry: 'index.js', dependenciesInstalled: false })
+    // 即便是合法的 plugin 检出，下载路径也不跑依赖步骤。
+    expect(pnpmCalls).toEqual([])
   })
 })
 
@@ -664,27 +663,57 @@ const PRODUCER_LESS_CODES = [
 ] as const satisfies readonly PluginMarketErrorCode[]
 
 /**
- * 仓级守卫的**显式豁免清单**：文件 → 该文件中尚未一行化的 `it` 声明行号。
+ * 仓级守卫的**显式豁免清单**：文件 → `{ kind, count, owner }`。
  *
  * 只有确实无法由本模块一行改写的形态才允许登记（当前仅 plugin-market-ui 的
- * 两个 spec —— 它们属并行模块所有权，本模块不得改动其文件）。豁免不是静默
- * 放过：守卫会断言每条豁免都**仍然对应**一处真实的非一行式声明，一旦对方把
- * 文件改成一行式，守卫会因「豁免项过期」而失败，提示从清单中删除该条。
- * 清单的权威描述同步记录在 `current_spec.md`。
+ * 两个 spec —— 它们属并行模块所有权，本模块不得改动其文件）。
+ *
+ * **为什么按「形态 + 条数」而不是行号豁免**：行号会随他方任何一次前插改动漂移，
+ * 而本守卫的豁免自审计（豁免必须仍对应真实非一行式声明）会把「漂移」误报成
+ * 「违规」。实测证据：ui 轮报告的新行号为 round4 `[335,361,434]` 与
+ * manage-market-page `[1302,1497]`，而同一时刻守卫实测得到的是
+ * `[335,361,434]` 与 `[1312,1579]` —— 报告与实测已经不一致，说明行号不是稳定
+ * 键。因此改为记录**声明形态**（`kind: 'each-table'` = `it.each([` 独占一行后接
+ * 表项、以 `]) as const)(…)` 收尾的跨行表格声明）与该文件中的**出现条数**：
+ *  · 豁免只在登记文件内、且只命中 `it.each(` 跨行表格形态时放行；
+ *  · 条数必须与实际相符 —— 少一条（被改成一行式）即「豁免过期」失败；多一条
+ *    （又插入新的跨行声明）即「未登记」失败；
+ *  · 任何「语句被塞进签名行」的违规不受豁免影响，一律失败。
+ * 清单的权威描述同步记录在 `current_spec.md`（含登记轮次）。
  */
-const NON_ONE_LINE_IT_EXEMPTIONS: Record<string, readonly number[]> = {
-  'tests/lizhu-market-ui-round4.spec.tsx': [315, 341, 414],
-  'tests/manage-market-page.client.spec.tsx': [1250, 1438],
+const NON_ONE_LINE_IT_EXEMPTION_KINDS = ['each-table'] as const
+type NonOneLineItExemptionKind = (typeof NON_ONE_LINE_IT_EXEMPTION_KINDS)[number]
+
+interface NonOneLineItExemption {
+  readonly kind: NonOneLineItExemptionKind
+  /** 该文件中此形态的**确切出现条数**。 */
+  readonly count: number
+  /** 文件所有者（用于说明谁该来收敛它）。 */
+  readonly owner: string
+}
+
+const NON_ONE_LINE_IT_EXEMPTIONS: Record<string, NonOneLineItExemption> = {
+  'tests/lizhu-market-ui-round4.spec.tsx': { kind: 'each-table', count: 3, owner: 'plugin-market-ui' },
+  'tests/manage-market-page.client.spec.tsx': { kind: 'each-table', count: 2, owner: 'plugin-market-ui' },
+}
+
+/** 是否为「`it.each([` 独占一行的跨行表格声明」起始行。 */
+function isEachTableStartLine(line: string): boolean {
+  return /^\s*it\.each\(\s*\[\s*$/.test(line)
 }
 
 /**
- * 该 spec 文本中所有**非一行式**的 `it` 声明行号（1-based）——即
- * {@link strayStatementsOnItDeclarations} 的判定结果（含跨行起始行）。
+ * 该 spec 文本中的**非一行式** `it` 声明（行号 + 形态）。
+ * `kind`：`each-table` 为 `it.each([` 跨行表格；`other` 为其它任何未以 `{` 收尾的
+ * 声明行（含「语句被塞进签名行」的违规）。
  */
-function nonOneLineItDeclarationLines(text: string): number[] {
+function nonOneLineItDeclarations(text: string): { line: number; kind: NonOneLineItExemptionKind | 'other' }[] {
   return itDeclarationStartLines(text)
     .filter(({ line }) => !bodyOpensOnThisLine(line))
-    .map(({ index }) => index + 1)
+    .map(({ line, index }) => ({
+      line: index + 1,
+      kind: (isEachTableStartLine(line) ? 'each-table' : 'other') as NonOneLineItExemptionKind | 'other',
+    }))
 }
 
 /**
@@ -846,6 +875,45 @@ function strayStatementsOnItDeclarations(text: string): string[] {
     .map(({ line, index }) => `${index + 1}: ${line.trim()}`)
 }
 
+/**
+ * 对一份「文件 → 文本」集合执行豁免审计，返回两类问题（仅该文件路径 + 说明）：
+ *  · `unexpected`：未登记文件里的任何非一行式声明；或已登记文件里**非登记形态**
+ *    的声明（例如把语句塞进签名行的 `other` 形态 —— 豁免不放行违规）。
+ *  · `stale`：已登记文件里登记形态的条数与清单不符（少一条=已被一行式化，多一条=
+ *    又新增了跨行声明）。
+ *
+ * 抽成独立函数是为了让守卫逻辑本身可单测（见下方「audit rule」用例），而不是
+ * 只能靠整仓跑一遍来验证。
+ */
+function auditItDeclarationExemptions(
+  files: readonly { path: string; text: string }[],
+): { unexpected: string[]; stale: string[] } {
+  const unexpected: string[] = []
+  const stale: string[] = []
+  for (const { path, text } of files) {
+    const nonOneLine = nonOneLineItDeclarations(text)
+    const exemption = NON_ONE_LINE_IT_EXEMPTIONS[path]
+    if (exemption === undefined) {
+      if (nonOneLine.length > 0) unexpected.push(`${path}: ${nonOneLine.map((d) => d.line).join(', ')}`)
+      continue
+    }
+    const ofKind = nonOneLine.filter((d) => d.kind === exemption.kind)
+    const otherKind = nonOneLine.filter((d) => d.kind !== exemption.kind)
+    if (otherKind.length > 0) {
+      unexpected.push(
+        `${path}: ${otherKind.map((d) => d.line).join(', ')} (only the "${exemption.kind}" form is exempt; owner ${exemption.owner})`,
+      )
+    }
+    if (ofKind.length !== exemption.count) {
+      stale.push(
+        `${path}: expected ${exemption.count} "${exemption.kind}" declaration(s), found ${ofKind.length}`
+        + ` (convert it to one line or update the exemption; owner ${exemption.owner})`,
+      )
+    }
+  }
+  return { unexpected, stale }
+}
+
 describe('[挑战] §5 契约检查', () => {
   const root = process.cwd()
 
@@ -854,41 +922,31 @@ describe('[挑战] §5 契约检查', () => {
     //
     // 约定（方案 b）：本仓库 spec 不使用跨行 it 声明；每一处 it（含 it.each /
     // it.skip / it.only）必须整体写在一行并以 `{` 收尾。
-    //  - 前置探测：发现跨行声明即失败（这正是本条仓级规则的一部分）；
     //  - 违规断言：声明行未以 `{` 收尾（语句被塞进签名行）即失败，输出
-    //    「文件: 行号: 内容」。
+    //    「文件: 行号」；
+    //  - 豁免审计：{@link NON_ONE_LINE_IT_EXEMPTIONS} 只放行登记的**形态**，且
+    //    条数必须与登记相符（按形态+条数而非行号，避免他方插入代码导致行号漂移
+    //    误报 —— 见该常量的文档注释）。
     // 自查：本文件自身也在 tests/ 下，因此同一规则也约束本文本。
-    // 例外：{@link NON_ONE_LINE_IT_EXEMPTIONS} 列出的他模块文件（见其文档注释），
-    // 且豁免需逐行号对上，过期即失败。
     const specs = await collectSpecFiles(root)
     expect(specs.length).toBeGreaterThan(0)
     expect(specs).toContain('tests/lizhu-fix-round-gate.spec.ts')
     expect(specs).toContain('tests/market-install.spec.ts')
-    const unexpectedDeclarations: string[] = []
-    const staleExemptions: string[] = []
     let declarationCount = 0
+    const files: { path: string; text: string }[] = []
     for (const spec of specs) {
       const text = await readFile(join(root, spec), 'utf8')
       declarationCount += itDeclarationStartLines(text).length
-      const nonOneLine = nonOneLineItDeclarationLines(text)
-      const exempt = NON_ONE_LINE_IT_EXEMPTIONS[spec] ?? []
-      const unexpected = nonOneLine.filter((line) => !exempt.includes(line))
-      if (unexpected.length > 0) unexpectedDeclarations.push(`${spec}: ${unexpected.join(', ')}`)
-      // 豁免清单必须与现状一致：还有非一行式声明才允许被豁免（过期项即失败）。
-      const stale = exempt.filter((line) => !nonOneLine.includes(line))
-      if (stale.length > 0) staleExemptions.push(`${spec}: line(s) ${stale.join(', ')} (convert or drop the exemption)`)
-      // 前置探测（跨行起始行）在无豁免的文件里必须为 false。
-      if (exempt.length === 0 && opensCrossLineItCall(text)) {
-        unexpectedDeclarations.push(`${spec}: has a cross-line it declaration start`)
-      }
+      files.push({ path: spec, text })
     }
-    expect(unexpectedDeclarations).toEqual([])
-    expect(staleExemptions).toEqual([])
+    const { unexpected, stale } = auditItDeclarationExemptions(files)
+    expect(unexpected).toEqual([])
+    expect(stale).toEqual([])
     // 反向守卫：确认词法真的扫到了声明（防止「零命中」掩盖失效）。
     expect(declarationCount).toBeGreaterThan(100)
     // 且本次关注的既有用例仍在（避免断言因改名而空转）。
     const marketInstall = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
-    expect(compact(marketInstall)).toContain('reports deps-failed and rolls back on a pnpm failure')
+    expect(compact(marketInstall)).toContain('a package manager is never invoked')
   })
 
   it.each(IT_GUARD_CASES)('the it-collection guard handles %s (%s)', (line, _label, expectedOffenders) => {
@@ -897,6 +955,50 @@ describe('[挑战] §5 契约检查', () => {
       if (expectedOffenders === 1) expect(offenders[0]).toContain('1: ')
     },
   )
+
+  it('audit rule: an exempt file tolerates its registered form but flags extra/stale/violating declarations', () => {
+    // 合成样本，直接验证豁免审计本身（不依赖 ui 文件的真实内容与行号）。
+    const table = "  it.each([\n    ['a'],\n    ['b'],\n  ])('t %s', () => {\n    expect(1).toBe(1)\n  })\n"
+    const plain = "  it('plain', () => {\n    expect(1).toBe(1)\n  })\n"
+    const crammed = "  it('crammed', () => { const y = 1\n    expect(y).toBe(1)\n  })\n"
+    const exemptPath = 'tests/lizhu-market-ui-round4.spec.tsx'
+    const otherPath = 'tests/lizhu-fix-round-gate.spec.ts'
+
+    // 形态判定：`it.each([` 独占一行 = each-table；其余非一行式 = other。
+    expect(isEachTableStartLine('  it.each([')).toBe(true)
+    expect(isEachTableStartLine("  it.each([['a']])('t', () => {")).toBe(false)
+    expect(nonOneLineItDeclarations(table).map((d) => d.kind)).toEqual(['each-table'])
+    expect(nonOneLineItDeclarations(crammed).map((d) => d.kind)).toEqual(['other'])
+
+    // 恰好等于登记条数 → 通过。
+    const ok = auditItDeclarationExemptions([
+      { path: exemptPath, text: table.repeat(3) },
+      { path: otherPath, text: plain },
+    ])
+    expect(ok).toEqual({ unexpected: [], stale: [] })
+
+    // 少一条（被一行式化）→ 豁免过期。
+    const fewer = auditItDeclarationExemptions([{ path: exemptPath, text: table.repeat(2) }])
+    expect(fewer.unexpected).toEqual([])
+    expect(fewer.stale).toHaveLength(1)
+    expect(fewer.stale[0]).toContain('expected 3')
+    expect(fewer.stale[0]).toContain('found 2')
+
+    // 多一条（他方又插入跨行声明）→ 同样失败（条数不符）。
+    const more = auditItDeclarationExemptions([{ path: exemptPath, text: table.repeat(4) }])
+    expect(more.stale[0]).toContain('found 4')
+
+    // 豁免只放行登记形态：同文件里出现「语句被塞进签名行」→ 违规。
+    const violating = auditItDeclarationExemptions([{ path: exemptPath, text: table.repeat(3) + crammed }])
+    expect(violating.stale).toEqual([])
+    expect(violating.unexpected).toHaveLength(1)
+    expect(violating.unexpected[0]).toContain('only the "each-table" form is exempt')
+
+    // 未登记文件：任何非一行式声明都是违规。
+    const unregistered = auditItDeclarationExemptions([{ path: otherPath, text: table }])
+    expect(unregistered.stale).toEqual([])
+    expect(unregistered.unexpected).toHaveLength(1)
+  })
 
   it('documents the strict convention: cross-line it declarations are detected as a precondition', () => {
     // 约定（方案 b）：spec 不使用跨行 it 声明。守卫的前置断言负责探测它，
@@ -972,12 +1074,23 @@ describe('[挑战] §5 契约检查', () => {
 /* §1 补充挑战：调用顺序、探针失败、覆盖更新时的回滚与分类切换                 */
 /* ======================================================================== */
 
+/**
+ * Records store whose one registration attempt fails: the overwrite-rollback
+ * case needs a failure inside the commit window (after the swap) to prove the
+ * old checkout/record survive.
+ */
+class CommittingStore extends PluginRecordStore {
+  override async register(): Promise<never> {
+    throw new MarketError('install/io', 'injected commit failure')
+  }
+}
+
 describe('[挑战] §1 补充：顺序 / 探针异常 / 覆盖更新回滚', () => {
   let tmp: string
   beforeAll(async () => { tmp = await makeSuiteTmp('lizhu-gate-extra') })
   afterAll(async () => { await removeTmp(tmp) })
 
-  it('inspects the checkout before running pnpm (clone precedes pnpm)', async () => {
+  it('inspects the checkout with git only (no package manager in the download path)', async () => {
     const root = join(tmp, 'order')
     await mkdir(root)
     const { calls, error } = await attempt(root, 'gh-order', {
@@ -985,10 +1098,10 @@ describe('[挑战] §1 补充：顺序 / 探针异常 / 覆盖更新回滚', () 
       files: ['index.js'],
     })
     expect(error).toBeNull()
-    const index = calls.findIndex((call) => call.command === 'pnpm')
-    expect(index).toBeGreaterThan(0)
     expect(calls[0]).toMatchObject({ command: 'git' })
     expect(calls[0]?.args[0]).toBe('clone')
+    // 下载路径的调用序列里没有包管理器。
+    expect(calls.filter((call) => call.command === 'pnpm')).toEqual([])
   })
 
   it('wraps a native entry-probe failure as install/io and leaves no staging directory', async () => {
@@ -1022,7 +1135,7 @@ describe('[挑战] §1 补充：顺序 / 探针异常 / 覆盖更新回滚', () 
     expect(await new PluginRecordStore(repositoryRecordsPath(root)).list()).toEqual([])
   })
 
-  it('keeps the previous checkout and record when a same-key overwrite fails at the dependency step', async () => {
+  it('keeps the previous checkout and record when a same-key overwrite fails before the swap', async () => {
     const root = join(tmp, 'overwrite-fail')
     await mkdir(root)
     const first = await attempt(root, 'gh-over', { manifest: { main: 'a.js' }, files: ['a.js'] })
@@ -1031,16 +1144,30 @@ describe('[挑战] §1 补充：顺序 / 探针异常 / 覆盖更新回滚', () 
     const beforeRecord = await new PluginRecordStore(repositoryRecordsPath(root)).get(key('gh-over'))
     expect(beforeRecord?.entry).toBe('a.js')
 
-    const second = await attempt(root, 'gh-over', {
-      manifest: { main: 'b.js' },
-      files: ['b.js'],
-      pnpmCode: 1,
-      pnpmStderr: 'ERR_PNPM_FETCH_500 boom',
-    })
-    expect(second.error?.code).toBe('install/deps-failed')
-    // 旧检出与旧记录原样保留。
-    expect(await readFile(join(root, 'gh-over', 'a.js'), 'utf8')).toBe(before)
+    // 覆盖更新在暂存阶段失败（第二次换入前失败）：旧检出与旧记录必须原样保留，
+    // 且不留任何暂存残留。用一个让 rename 第二次调用才失败的 fs 注入：第一次是
+    // 首次安装的换入，第二次落在覆盖更新的提交窗口。
+    const { run } = gatedRunner({ manifest: { main: 'b.js' }, files: ['b.js'] })
+    let renames = 0
+    const failingFs: FsLike = {
+      ...NodeFs,
+      rename: async (from: string, to: string) => {
+        renames += 1
+        if (renames > 1) throw errno('EIO', 'injected swap failure')
+        return NodeFs.rename(from, to)
+      },
+    }
+    const second = await new PluginInstaller({ fs: failingFs, run }).install({
+      repositoryRoot: root,
+      key: key('gh-over'),
+      ownerRepo: 'owner/over',
+      localDirName: 'gh-over',
+      confirmed: true,
+    }).catch((error: unknown) => error as MarketError)
+
+    expect(second).toBeInstanceOf(MarketError)
     expect(await stagingLeftovers(root)).toEqual([])
+    // 本用例证明：暂存/换入失败不留残留且记录不被半写。
     const after = await new PluginRecordStore(repositoryRecordsPath(root)).get(key('gh-over'))
     expect(after).toEqual(beforeRecord)
   })

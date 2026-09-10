@@ -733,18 +733,127 @@
 
 /* Record classification tag of one row / one download review. Informational
    only: a skills or other checkout still downloads, it just never registers a
-   loader entry. */
+   loader entry. On a roster row the tag doubles as the manual-correction entry,
+   so it is a real (borderless, tag-shaped) button. */
 .classificationTag {
+  border: none;
   border-radius: 5px;
   padding: 2px 8px;
+  font: inherit;
   font-size: 12px;
   line-height: 18px;
+  cursor: pointer;
   background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);
   color: var(--dsw-alias-label-secondary);
 }
 
 .classificationTag[data-kind='plugin'] {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.classificationTag:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+/* Manual-correction dialog: one radio row per classification tag. */
+.classificationOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.classificationOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.classificationOption[data-selected='true'] {
+  border-color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, transparent);
+}
+
+/* Staged download: one row per host phase, with its state text beside it. */
+.stageList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stageRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.stageDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dsw-alias-border-l4);
+}
+
+.stageRow[data-stage-state='running'] .stageDot {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.stageRow[data-stage-state='done'] .stageDot {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.stageRow[data-stage-state='failed'] .stageDot {
+  background: var(--dsw-alias-state-error-primary);
+}
+
+.stageName {
+  flex: none;
+  font-weight: 600;
+}
+
+.stageState {
+  flex: none;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.stageRow[data-stage-state='failed'] .stageState {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.stageError {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Verdict line of the classification phase and of the finished download. */
+.verdictNotice {
+  margin: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 20px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent);
   color: var(--dsw-alias-state-business-primary);
 }
 

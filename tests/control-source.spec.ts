@@ -3,11 +3,36 @@ import { MarketError } from '../src/host/market/errors.ts'
 import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
 import { ANALYSIS_UNAVAILABLE_NOTE } from '../src/host/control/source.ts'
+import type { DownloadCommit, MarketSourceOperations } from '../src/host/control/source.ts'
 import { fakeAnalysisEngine, fakeDistribution, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
 
 /** Repository slug → derived key convention under test. */
 const SLUG = 'octocat/demo-plugin'
 const GH_KEY = 'gh-octocat-demo-plugin'
+
+/**
+ * Run the whole phased download of one reviewed ref: preview (the two-step
+ * confirmation), prepare, classify, commit. `classify` overrides the
+ * classification phase's answer; `commitAs` overrides what the caller passes to
+ * the commit phase (they differ when the user corrects the model's label).
+ */
+async function download(
+  source: MarketSourceOperations,
+  repository: string = SLUG,
+  options: {
+    readonly refKind?: string | null
+    readonly version?: string | null
+    readonly classify?: string
+    readonly commitAs?: string
+  } = {},
+): Promise<DownloadCommit> {
+  const refKind = options.refKind ?? null
+  const version = options.version ?? null
+  const review = await source.previewInstall(repository, refKind, version)
+  const prepared = await source.prepareDownload(repository, review.confirmToken, refKind, version)
+  const classification = await source.classifyDownload(prepared.token)
+  return await source.commitDownload(prepared.token, options.commitAs ?? classification.classification)
+}
 
 /** Preview outcome of an unconventional checkout (no readable manifest). */
 const NO_MANIFEST_PREVIEW = {
@@ -41,7 +66,9 @@ describe('MarketSourceOperations search', () => {
     const source = ops(bed, { idle: true })
     await expect(source.search({ keywords: 'demo' })).rejects.toMatchObject({ code: 'market/idle' })
     await expect(source.previewInstall(SLUG)).rejects.toMatchObject({ code: 'market/idle' })
-    await expect(source.install(SLUG, 'tok')).rejects.toMatchObject({ code: 'market/idle' })
+    await expect(source.prepareDownload(SLUG, 'tok')).rejects.toMatchObject({ code: 'market/idle' })
+    await expect(source.classifyDownload('dl-tok-1')).rejects.toMatchObject({ code: 'market/idle' })
+    await expect(source.commitDownload('dl-tok-1', 'other')).rejects.toMatchObject({ code: 'market/idle' })
     await expect(source.repositoryDetail(SLUG)).rejects.toMatchObject({ code: 'market/idle' })
   })
 
@@ -204,8 +231,9 @@ describe('MarketSourceOperations previewInstall', () => {
 
     // The two-step protocol still runs: the checkout is downloaded and filed
     // with the reviewed classification and no entry.
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(bed.engines.installCalls[0]).toMatchObject({ key: GH_KEY, classification: 'other' })
+    const outcome = await download(source, SLUG)
+    expect(bed.engines.installCalls[0]).toMatchObject({ key: GH_KEY })
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'commit')).toHaveLength(1)
     expect(outcome.record.classification).toBe('other')
     expect(outcome.record.entry).toBeNull()
     expect(outcome).toMatchObject({ classification: 'other', entry: null, dependenciesInstalled: false })
@@ -223,12 +251,15 @@ describe('MarketSourceOperations previewInstall', () => {
     const review = await source.previewInstall(SLUG)
     expect(analysis.calls.map(call => call.repository)).toEqual([SLUG])
     expect(review.classification).toBe('skills')
+    // The staged classifier is the authority for the committed tag.
+    bed.engines.classification = { ...bed.engines.classification, classification: 'skills', outcome: 'classified', unclassified: false, entryPresent: null, entryHint: null }
     expect(review.note).toEqual({ kind: 'classified', text: 'A Claude skills collection' })
     expect(review.entryNote).toBe('A Claude skills collection')
     expect(review.analysis).toEqual({ installable: false, kind: 'skills', reason: 'A Claude skills collection' })
 
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(bed.engines.installCalls[0]).toMatchObject({ key: GH_KEY, classification: 'skills' })
+    const outcome = await download(source, SLUG)
+    expect(bed.engines.installCalls[0]).toMatchObject({ key: GH_KEY })
+    expect(bed.engines.classifications).toContain('skills')
     expect(outcome.record).toMatchObject({ classification: 'skills', entry: null })
     expect(outcome).toMatchObject({ classification: 'skills', entry: null })
     expect(bed.engines.synced).toHaveLength(1)
@@ -248,8 +279,11 @@ describe('MarketSourceOperations previewInstall', () => {
     const review = await source.previewInstall(SLUG)
     expect(review.classification).toBe('skills')
 
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'skills' })
+    // The staged classifier also guessed skills, but the checkout really carries
+    // a runnable entry: the commit phase probes the checkout and files `plugin`.
+    bed.engines.classification = { ...bed.engines.classification, classification: 'skills', entryPresent: true, entryHint: 'index.js' }
+    const outcome = await download(source, SLUG)
+    expect(bed.engines.classifications).toContain('skills')
     expect(outcome).toMatchObject({ classification: 'plugin', entry: 'index.js' })
     expect(outcome.record).toMatchObject({ classification: 'plugin', entry: 'index.js' })
     expect(bed.engines.synced[0]).toMatchObject({ classification: 'plugin', entry: 'index.js' })
@@ -268,8 +302,9 @@ describe('MarketSourceOperations previewInstall', () => {
     expect(review.note).toEqual({ kind: 'classified', text: 'an include-tree preset' })
     expect(review.entryNote).toBe('an include-tree preset')
     expect(review.analysis).toEqual({ installable: false, kind: 'other', reason: 'an include-tree preset' })
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'other' })
+    bed.engines.classification = { ...bed.engines.classification, classification: 'other', reason: 'an include-tree preset' }
+    const outcome = await download(source, SLUG)
+    expect(bed.engines.classifications).toContain('other')
     expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
   })
 
@@ -305,8 +340,15 @@ describe('MarketSourceOperations previewInstall', () => {
       kind: 'other',
       reason: expect.stringContaining('build step first'),
     })
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'other' })
+    // The staged classifier reports the same build-first state.
+    bed.engines.classification = {
+      ...bed.engines.classification,
+      classification: 'other',
+      entryPresent: false,
+      entryHint: 'dist/index.js',
+    }
+    const outcome = await download(source, SLUG)
+    expect(bed.engines.classifications).toContain('other')
     expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
   })
 
@@ -367,8 +409,9 @@ describe('MarketSourceOperations previewInstall', () => {
     expect(review.entryNote).toBeUndefined()
     expect(review.note).toBeUndefined()
     expect(review.analysis).toBeUndefined()
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(bed.engines.installCalls[0]).toMatchObject({ classification: 'plugin' })
+    bed.engines.classification = { ...bed.engines.classification, classification: 'plugin', entryPresent: true, entryHint: 'index.js' }
+    const outcome = await download(source, SLUG)
+    expect(bed.engines.classifications).toContain('plugin')
     expect(outcome.record.classification).toBe('plugin')
     expect(outcome.key).toBe(key(GH_KEY))
   })
@@ -382,7 +425,7 @@ describe('MarketSourceOperations previewInstall', () => {
     expect(analysis.calls.map(call => call.repository)).toEqual([SLUG])
     expect(review.classification).toBe('plugin')
     expect(review.entryNote).toBeUndefined()
-    const outcome = await source.install(SLUG, review.confirmToken)
+    const outcome = await download(source, SLUG)
     expect(outcome.key).toBe(key(GH_KEY))
   })
 
@@ -420,10 +463,12 @@ describe('MarketSourceOperations previewInstall', () => {
       expect(review.note).toEqual(ANALYSIS_UNAVAILABLE_NOTE)
       expect(review.entryNote).toBeUndefined()
       expect(review.analysis).toBeUndefined()
-      await expect(source.install(SLUG, review.confirmToken)).resolves.toMatchObject({ key: key(GH_KEY) })
+      await expect(download(source, SLUG, { commitAs: 'other' })).resolves.toMatchObject({ key: key(GH_KEY) })
     }
     expect(bed.engines.installCalls).toHaveLength(failures.length)
-    expect(bed.engines.installCalls.every(call => call.classification === 'other')).toBe(true)
+    // Every download still filed the conservative tag the review fell back to.
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'commit')).toHaveLength(failures.length)
+    expect((await bed.records.list()).every(record => record.classification !== 'plugin')).toBe(true)
   })
 
   it('degrades an engine market/llm-unconfigured to the other classification as well', async () => {
@@ -446,39 +491,145 @@ describe('MarketSourceOperations previewInstall', () => {
   })
 })
 
-describe('MarketSourceOperations install (double confirmation)', () => {
-  it('requires a preview token, then runs the install with the derived key', async () => {
+describe('MarketSourceOperations download channel (phased, double confirmation)', () => {
+  it('requires a review token, then prepares with the derived key', async () => {
     const bed = testbed()
     const source = ops(bed)
-    await expect(source.install(SLUG, 'missing')).rejects.toMatchObject({ code: 'market/confirm-required' })
+    await expect(source.prepareDownload(SLUG, 'missing')).rejects.toMatchObject({ code: 'market/confirm-required' })
 
     const review = await source.previewInstall(SLUG)
-    await expect(source.install(SLUG, 'wrong-token')).rejects.toMatchObject({ code: 'market/confirm-invalid' })
+    await expect(source.prepareDownload(SLUG, 'wrong-token')).rejects.toMatchObject({ code: 'market/confirm-invalid' })
 
-    const outcome = await source.install(SLUG, review.confirmToken)
-    expect(outcome.key).toBe(key(GH_KEY))
-    expect(outcome.overwritten).toBe(false)
-    expect(outcome.record.enabled).toBe(false)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+    expect(prepared.key).toBe(key(GH_KEY))
+    expect(prepared.state).toBe('prepared')
+    expect(prepared.token).toMatch(/^dl-/)
     expect(bed.engines.installCalls).toEqual([{
       repositoryRoot: '/repo',
       key: GH_KEY,
       repository: SLUG,
       version: null,
-      classification: 'plugin',
+      // No refKind on a legacy (default-branch) download.
+      refKind: undefined,
     }])
+
+    const classification = await source.classifyDownload(prepared.token)
+    expect(classification).toMatchObject({ outcome: 'classified', classification: 'plugin' })
+    const outcome = await source.commitDownload(prepared.token, classification.classification)
+    expect(outcome.key).toBe(key(GH_KEY))
+    expect(outcome.overwritten).toBe(false)
+    expect(outcome.record.enabled).toBe(false)
+    // The download path never installs dependencies.
+    expect(outcome.dependenciesInstalled).toBe(false)
     expect(bed.engines.synced).toHaveLength(1)
 
-    // Tokens are single-use.
-    await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
+    // The review token is single use: preparing again needs a new review.
+    await expect(source.prepareDownload(SLUG, review.confirmToken)).rejects.toMatchObject({
       code: 'market/confirm-required',
+    })
+    // The download handle is consumed by the commit.
+    await expect(source.commitDownload(prepared.token, 'plugin')).rejects.toMatchObject({
+      code: 'record/not-found',
     })
   })
 
-  it('pins the reviewed version on a legacy (no refKind) install', async () => {
+  it('walks the three phases and reports each phase error code', async () => {
     const bed = testbed()
     const source = ops(bed)
-    const review = await source.previewInstall(SLUG, null, 'v2.0.0')
-    await source.install(SLUG, review.confirmToken, null, 'v2.0.0')
+    const review = await source.previewInstall(SLUG)
+
+    // Phase 1 failure: the clone fails (stable install/* code, no handle).
+    bed.engines.installError = new MarketError('install/git-failed', 'clone failed', { path: '/repo' })
+    await expect(source.prepareDownload(SLUG, review.confirmToken)).rejects.toMatchObject({
+      code: 'install/git-failed',
+    })
+    bed.engines.installError = undefined
+
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    // Phase 2 never throws for a model problem: the answer carries the reason.
+    bed.engines.classification = {
+      outcome: 'failed',
+      classification: 'other',
+      reason: 'the model call failed',
+      unclassified: true,
+      entryPresent: null,
+      entryHint: null,
+      errorCode: 'market/llm-failed',
+    }
+    const classification = await source.classifyDownload(prepared.token)
+    expect(classification).toMatchObject({
+      outcome: 'failed',
+      classification: 'other',
+      unclassified: true,
+      errorCode: 'market/llm-failed',
+    })
+
+    // Phase 3 failure: an unexpected commit failure surfaces as install/io.
+    bed.engines.commitError = new MarketError('install/io', 'swap failed', { path: '/repo' })
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({ code: 'install/io' })
+    // ...and the handle is released, so the checkout is gone with it.
+    await expect(source.classifyDownload(prepared.token)).rejects.toMatchObject({ code: 'record/not-found' })
+  })
+
+  it('rejects an unknown download handle on classify/commit without touching the store', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await expect(source.classifyDownload('dl-nope-1')).rejects.toMatchObject({ code: 'record/not-found' })
+    await expect(source.commitDownload('dl-nope-1', 'other')).rejects.toMatchObject({ code: 'record/not-found' })
+    expect(bed.engines.stagedCalls).toHaveLength(0)
+    expect(await bed.records.list()).toEqual([])
+  })
+
+  it('validates the committed classification with market/bad-request (staged handle survives)', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    const error = await source.commitDownload(prepared.token, 'preset').catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'market/bad-request' })
+    // Nothing was filed and the handle is still usable with a valid label.
+    expect(await bed.records.list()).toEqual([])
+    const outcome = await source.commitDownload(prepared.token, 'other')
+    expect(outcome.record.classification).toBe('plugin')
+  })
+
+  it('cancels a staged download and cleans the staging (idempotent)', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    await expect(source.cancelDownload(prepared.token)).resolves.toBe(true)
+    // The fake engine records the cancel and drops the handle.
+    expect(bed.engines.cancelledCalls).toEqual([prepared.token])
+    // Idempotent: a second cancel (and an unknown token) resolve false.
+    await expect(source.cancelDownload(prepared.token)).resolves.toBe(false)
+    await expect(source.cancelDownload('dl-nope-2')).resolves.toBe(false)
+    // The cancelled handle can no longer be classified or committed.
+    await expect(source.classifyDownload(prepared.token)).rejects.toMatchObject({ code: 'record/not-found' })
+    expect(await bed.records.list()).toEqual([])
+  })
+
+  it('sweeps an abandoned staging when its review window has passed', async () => {
+    let nowMs = 1_000
+    const bed = testbed()
+    const source = ops(bed, { now: () => new Date(nowMs) })
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+    expect(bed.engines.cancelledCalls).toEqual([])
+
+    // The next review (after the window) cleans up the abandoned staging.
+    nowMs += REMOVE_CONFIRM_TTL_MS + 1
+    await source.previewInstall(SLUG)
+    expect(bed.engines.cancelledCalls).toEqual([prepared.token])
+  })
+
+  it('pins the reviewed version on a legacy (no refKind) download', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    await download(source, SLUG, { version: 'v2.0.0' })
     expect(bed.engines.installCalls[0]?.version).toBe('v2.0.0')
     expect(bed.engines.installCalls[0]?.refKind).toBeUndefined()
   })
@@ -489,7 +640,7 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     const source = ops(bed, { now: () => new Date(nowMs) })
     const review = await source.previewInstall(SLUG)
     nowMs += REMOVE_CONFIRM_TTL_MS + 1
-    await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
+    await expect(source.prepareDownload(SLUG, review.confirmToken)).rejects.toMatchObject({
       code: 'market/confirm-expired',
     })
   })
@@ -498,36 +649,28 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     const bed = testbed()
     bed.records.seed(GH_KEY, { localDirName: GH_KEY, entry: 'index.js' })
     const source = ops(bed)
-    const review = await source.previewInstall(SLUG)
-    const outcome = await source.install(SLUG, review.confirmToken)
+    const outcome = await download(source, SLUG)
     expect(outcome.overwritten).toBe(true)
   })
 
-  it('passes pipeline failures through with their stable install/* codes', async () => {
+  it('passes prepare failures through with their stable install/* codes', async () => {
     const bed = testbed()
     bed.engines.installError = new MarketError('install/git-failed', 'clone failed', { path: '/repo' })
     const source = ops(bed)
     const review = await source.previewInstall(SLUG)
-    await expect(source.install(SLUG, review.confirmToken)).rejects.toMatchObject({
+    await expect(source.prepareDownload(SLUG, review.confirmToken)).rejects.toMatchObject({
       code: 'install/git-failed',
     })
   })
-  it('leaves an install/entry-missing failure untouched (no message rewriting)', async () => {
+
+  it('never installs dependencies on the download path (no pnpm, dependenciesInstalled false)', async () => {
     const bed = testbed()
     const source = ops(bed)
-    const review = await source.previewInstall(SLUG)
-    bed.engines.installError = new MarketError(
-      'install/entry-missing',
-      'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
-    )
-    const error = await source.install(SLUG, review.confirmToken).catch((e: unknown) => e)
-    expect(error).toMatchObject({ code: 'install/entry-missing' })
-    if (error instanceof Error) {
-      expect(error.message).toContain('dist/index.js')
-      // No message rewrite: the build-first guidance is delivered by the
-      // review's classification/note contract, not by patched errors.
-      expect(error.message).not.toContain('documented build step')
-    }
+    const outcome = await download(source, SLUG)
+    expect(outcome.dependenciesInstalled).toBe(false)
+    // The fake engine's prepare/classify/commit ran; the dependency command is
+    // not part of this port at all (the host moved it to a standalone action).
+    expect(bed.engines.stagedCalls.map(call => call.kind)).toEqual(['prepare', 'classify', 'commit'])
   })
 })
 
@@ -542,7 +685,7 @@ describe('MarketSourceOperations v2 refs (refKind)', () => {
     expect(review.overwrite).toBe(false)
     expect(bed.engines.previewCalls).toEqual([SLUG])
 
-    const outcome = await source.install(SLUG, review.confirmToken, 'branch', 'dev')
+    const outcome = await download(source, SLUG, { refKind: 'branch', version: 'dev' })
     expect(outcome.key).toBe(pluginKeyForGithubRef(SLUG, 'branch', 'dev'))
     expect(bed.engines.installCalls[0]).toMatchObject({
       repositoryRoot: '/repo',
@@ -565,17 +708,18 @@ describe('MarketSourceOperations v2 refs (refKind)', () => {
 
     const branchReview = await source.previewInstall(SLUG, 'branch', 'v1.2.3')
     expect(branchReview.key).toBe(branchKey)
-    const branchOutcome = await source.install(SLUG, branchReview.confirmToken, 'branch', 'v1.2.3')
+    const branchOutcome = await download(source, SLUG, { refKind: 'branch', version: 'v1.2.3' })
 
     // The same-name tag is an independent plugin: no exists/overwrite flags
-    // against the installed branch, and its token is its own.
+    // against the downloaded branch, and its confirmation is bound to its own
+    // tuple — the tag's token cannot prepare the branch.
     const tagReview = await source.previewInstall(SLUG, 'tag', 'v1.2.3')
     expect(tagReview.key).toBe(tagKey)
     expect(tagReview.exists).toBe(false)
     expect(tagReview.overwrite).toBe(false)
-    await expect(source.install(SLUG, tagReview.confirmToken, 'branch', 'v1.2.3'))
+    await expect(source.prepareDownload(SLUG, tagReview.confirmToken, 'branch', 'v1.2.3'))
       .rejects.toMatchObject({ code: 'market/confirm-required' })
-    const tagOutcome = await source.install(SLUG, tagReview.confirmToken, 'tag', 'v1.2.3')
+    const tagOutcome = await download(source, SLUG, { refKind: 'tag', version: 'v1.2.3' })
 
     expect(branchOutcome.key).not.toBe(tagOutcome.key)
     expect(await bed.records.get(branchKey)).not.toBeNull()
@@ -610,7 +754,7 @@ describe('MarketSourceOperations v2 refs (refKind)', () => {
     const bed = testbed()
     const source = ops(bed)
     await expect(source.previewInstall(SLUG, 'release')).rejects.toMatchObject({ code: 'market/bad-request' })
-    await expect(source.install(SLUG, 'tok', 'release', 'v1')).rejects.toMatchObject({ code: 'market/bad-request' })
+    await expect(source.prepareDownload(SLUG, 'tok', 'release', 'v1')).rejects.toMatchObject({ code: 'market/bad-request' })
     expect(bed.engines.previewCalls).toHaveLength(0)
     expect(bed.engines.installCalls).toHaveLength(0)
   })

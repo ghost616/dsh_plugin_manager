@@ -25,7 +25,6 @@ import type {
   GitHubSearchPage,
   ManagedPluginList,
   MarketStatus,
-  PluginInstallOutcome,
   PluginInstallReview,
   PluginMarketKey,
   PluginMarketRecord,
@@ -37,7 +36,7 @@ import type { MarketRepository } from '../market/index.ts'
 import { parsePluginKey } from '../market/keys.ts'
 import { MarketError } from '../market/errors.ts'
 import { MarketControlError, type MarketPluginController } from './controller.ts'
-import type { MarketSourceOperations } from './source.ts'
+import { requireClassification, type DownloadClassification, type DownloadCommit, type DownloadPreparation, type MarketSourceOperations } from './source.ts'
 
 /** The Cordis service key (and wire namespace) of the gateway. */
 export const MARKET_CONTROL_SERVICE_KEY = 'marketControl'
@@ -235,19 +234,66 @@ export class MarketControllerGateway extends TypertRemoteService {
   }
 
   /**
-   * Run the double-confirmed install for a reviewed repository/ref. The
+   * Phase 1 of the download channel: consume the single-use review
+   * confirmation and clone the checkout into the host's staging area. The
    * `refKind`/`version` pair must reproduce the reviewed tuple (the token is
    * bound to its derived key).
    */
-  @Remote('install')
-  async install(
+  @Remote('prepareDownload')
+  async prepareDownload(
     repository: string,
     confirmToken: string,
     refKind: string | null,
     version: string | null,
-  ): Promise<PluginInstallOutcome> {
+  ): Promise<DownloadPreparation> {
     try {
-      return await this.deps.source.install(repository, confirmToken, refKind ?? null, version ?? null)
+      return await this.deps.source.prepareDownload(repository, confirmToken, refKind ?? null, version ?? null)
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** Phase 2: classify the staged checkout (model problems never throw). */
+  @Remote('classifyDownload')
+  async classifyDownload(token: string): Promise<DownloadClassification> {
+    try {
+      return await this.deps.source.classifyDownload(token)
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** Phase 3: swap the staged checkout in and file it under `classification`. */
+  @Remote('commitDownload')
+  async commitDownload(token: string, classification: string): Promise<DownloadCommit> {
+    try {
+      return await this.deps.source.commitDownload(token, classification)
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /** Cancel a staged download (idempotent; false when it is unknown/consumed). */
+  @Remote('cancelDownload')
+  async cancelDownload(token: string): Promise<boolean> {
+    try {
+      return await this.deps.source.cancelDownload(token)
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /**
+   * Correct the classification of an already-filed record (the manual fix after
+   * an `unclassified`/`failed` download). The value is validated here so a bad
+   * label fails with the stable `market/bad-request` before reaching the host
+   * store (which answers `record/invalid` for an unknown tag).
+   */
+  @Remote('setClassification')
+  async setClassification(key: string, classification: string): Promise<PluginMarketRecord> {
+    try {
+      const label = requireClassification(classification)
+      return await this.requireController().setClassification(wireKey(key), label)
     } catch (error) {
       throw toRemoteError(error)
     }

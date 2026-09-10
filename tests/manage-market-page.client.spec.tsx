@@ -20,12 +20,14 @@ import { zh } from '../src/client/locales.ts'
 import { MarketCallFailure } from '../src/client/channel.ts'
 import { ManagePluginsTab, type ManagePluginsTabInjected, type ManagePluginsTabProps } from '../src/client/ManagePluginsTab.tsx'
 import {
-  makeInstallOutcome,
+  makeCommit,
   makeInstallReview,
   makeList,
+  makePreparation,
   makeRepositoryDetail,
   makeSearchPage,
   makeStatus,
+  makeVerdict,
   managePageHarness,
   type SearchItemSeed,
 } from './support/client-platform.ts'
@@ -290,20 +292,35 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     }))
     const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
       makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
-    const install = vi.fn(async (repository: string, _token: string, version: string | null = null) => {
-      snapshot = makeList([{
-        key: `gh-${repository.replace('/', '-')}`,
+    // Staged host contract: clone answers a handle, classify a verdict, commit
+    // files the record. The commit is held open so the stage rows are asserted
+    // while the last phase is genuinely in flight.
+    let releaseCommit: () => void = () => {}
+    const prepareDownload = vi.fn(async (repository: string, _token: string, version: string | null = null) =>
+      makePreparation({
         repository,
-        ...(typeof version === 'string' ? { version } : {}),
+        token: 'dl-acme-helper',
+        version,
+        refKind: 'branch',
+      }))
+    const classifyDownload = vi.fn(async () => makeVerdict({ classification: 'plugin' }))
+    const commitDownload = vi.fn(async () => {
+      await new Promise<void>(resolve => { releaseCommit = resolve })
+      snapshot = makeList([{
+        key: 'gh-acme-helper',
+        repository: 'acme/helper',
+        version: 'dev',
         refKind: 'branch',
         enabled: false,
       }])
-      return makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) })
+      return makeCommit({ repository: 'acme/helper', version: 'dev', refKind: 'branch' })
     })
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const { props } = managePageHarness({ list, search, repositoryDetail, previewInstall, install })
+    const { props } = managePageHarness({
+      list, search, repositoryDetail, previewInstall, prepareDownload, classifyDownload, commitDownload,
+    })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
@@ -341,8 +358,30 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
 
     await click(installDialog?.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'dev', 'branch')
-    await click(installDialog?.querySelector('[data-dialog-done]'))
+    // The download runs as three visible phases: clone → classify → commit.
+    expect(prepareDownload).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'dev', 'branch')
+    expect(classifyDownload).toHaveBeenCalledWith('dl-acme-helper')
+    expect(commitDownload).toHaveBeenCalledWith('dl-acme-helper', 'plugin')
+    const stageRows = installDialog?.querySelectorAll('[data-download-stage]')
+    expect(stageRows).toHaveLength(3)
+    expect(installDialog?.querySelector('[data-download-stage="clone"]')?.getAttribute('data-stage-state'))
+      .toBe('done')
+    expect(installDialog?.querySelector('[data-download-stage="classify"]')?.getAttribute('data-stage-state'))
+      .toBe('done')
+    // The last phase is still running: its row says so and nothing is filed yet.
+    expect(installDialog?.querySelector('[data-download-stage="commit"]')?.getAttribute('data-stage-state'))
+      .toBe('running')
+    expect(installDialog?.querySelector('[data-install-done]')).toBeNull()
+
+    await act(async () => { releaseCommit() })
+    await flush()
+    // The whole pipeline finished: the done state replaces the stage rows (they
+    // are only rendered while a download is in progress or has failed).
+    const settled = host.querySelectorAll('[data-dialog="install"]')
+    expect(settled).toHaveLength(1)
+    expect(host.querySelectorAll('[data-download-stage]')).toHaveLength(0)
+    expect(host.querySelector('[data-install-done]')).not.toBeNull()
+    await click(host.querySelector('[data-dialog-done]'))
     await flush()
     expect(host.querySelector('[data-dialog="install"]')).toBeNull()
 
@@ -395,7 +434,7 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     expect(degraded?.textContent).toContain(zh.degradedNotice.replace('{code}', 'github/bad-response'))
   })
 
-  it('keeps the install dialog open on an expired confirmation and offers re-preview', async () => {
+  it('keeps the download dialog open on a failed clone phase and offers a per-phase retry', async () => {
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository,
       branches: ['main'],
@@ -403,13 +442,15 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     }))
     const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
       makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
-    const install = vi.fn(async () => {
+    // The clone phase consumes the single-use confirmation: an expired one
+    // fails THERE, before any classification or commit.
+    const prepareDownload = vi.fn(async () => {
       throw new MarketCallFailure({ code: 'market/confirm-expired', message: 'expired', details: {} })
     })
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+    const { props, mocks } = managePageHarness({ search, repositoryDetail, previewInstall, prepareDownload })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
@@ -424,12 +465,24 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
     expect(previewInstall).toHaveBeenCalledWith('acme/helper', 'v1.0.0', 'tag')
     await click(host.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0', 'tag')
-    const error = host.querySelector('[data-install-error]')
+    expect(prepareDownload).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'v1.0.0', 'tag')
+
+    // The clone row failed with the host code; the later phases never started.
+    const installDialog = host.querySelector('[data-dialog="install"]')
+    const error = installDialog?.querySelector('[data-stage-error]')
     expect(error).not.toBeNull()
     expect(error?.getAttribute('data-error-code')).toBe('market/confirm-expired')
     expect(error?.textContent).toContain(zh.confirmExpired)
-    expect(host.querySelector('[data-repreview]')).not.toBeNull()
+    expect(installDialog?.querySelector('[data-download-stage="clone"]')?.getAttribute('data-stage-state'))
+      .toBe('failed')
+    expect(installDialog?.querySelector('[data-download-stage="classify"]')?.getAttribute('data-stage-state'))
+      .toBe('waiting')
+    expect(installDialog?.querySelector('[data-download-stage="commit"]')?.getAttribute('data-stage-state'))
+      .toBe('waiting')
+    expect(installDialog?.querySelector('[data-stage-retry]')).not.toBeNull()
+    // Nothing was classified or committed.
+    expect(mocks.classifyDownload).not.toHaveBeenCalled()
+    expect(mocks.commitDownload).not.toHaveBeenCalled()
   })
 
   it('ignores a late search result after the page unmounts', async () => {
@@ -1226,11 +1279,17 @@ describe('ManagePluginsTab download classification', () => {
 
   /** One-repository harness whose review result is fully under test control.
    *  The download itself resolves, so every state below can be driven to its
-   *  confirmation and past it: nothing about a classification blocks it. */
-  function classificationHarness(preview: ManagePluginsTabInjected['previewInstall']): {
+   *  confirmation and past it: nothing about a classification blocks it. The
+   *  classifier's verdict is overridable, because the degraded outcomes
+   *  (`unclassified`/`failed`) and their conservative `other` label are values
+   *  the dialog must render without blocking. */
+  function classificationHarness(
+    preview: ManagePluginsTabInjected['previewInstall'],
+    verdict = makeVerdict({ outcome: 'classified', classification: 'plugin' }),
+  ): {
     props: ManagePluginsTabProps
     previewInstall: ManagePluginsTabInjected['previewInstall']
-    install: ManagePluginsTabInjected['install']
+    commitDownload: ManagePluginsTabInjected['commitDownload']
   } {
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository,
@@ -1240,11 +1299,14 @@ describe('ManagePluginsTab download classification', () => {
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const install = vi.fn(async (repository: string, _token: string, version: string | null = null) =>
-      makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    const commitDownload = vi.fn<ManagePluginsTabInjected['commitDownload']>(
+      async (_token, classification) =>
+        makeCommit({ repository: 'acme/helper', version: 'main', classification }),
+    )
+    const classifyDownload = vi.fn<ManagePluginsTabInjected['classifyDownload']>(async () => verdict)
     const previewInstall = vi.fn<ManagePluginsTabInjected['previewInstall']>(preview)
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
-    return { props, previewInstall, install }
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, classifyDownload, commitDownload })
+    return { props, previewInstall, commitDownload }
   }
 
   it.each([
@@ -1254,7 +1316,7 @@ describe('ManagePluginsTab download classification', () => {
   ] as const)('names the %s classification in the download confirmation', async (classification, expected) => {
     const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
       makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}), classification }))
-    const { props, previewInstall: preview, install } = classificationHarness(previewInstall)
+    const { props, previewInstall: preview, commitDownload } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1271,8 +1333,15 @@ describe('ManagePluginsTab download classification', () => {
 
     await click(confirm)
     await flush()
-    expect(install).toHaveBeenCalledWith('acme/helper', 'token-acme/helper', 'main', 'branch')
+    // The commit files the tag the CLASSIFIER answered (the review's prediction
+    // is only a hint on the confirmation screen).
+    expect(commitDownload).toHaveBeenCalledWith('dl-acme-helper', 'plugin')
     expect(installDialog.querySelector('[data-install-done]')).not.toBeNull()
+    // Downloading sources never installs dependencies, and the dialog says so.
+    expect(installDialog.querySelector('[data-no-deps-installed]')?.textContent)
+      .toBe(zh.depsNotInstalledNotice)
+    expect(installDialog.querySelector('[data-verdict-final]')?.textContent)
+      .toBe(zh.verdictFinal.replace('{classification}', zh.classificationPlugin))
   })
 
   it('keeps a non-plugin analysis note informational and still downloads', async () => {
@@ -1286,7 +1355,7 @@ describe('ManagePluginsTab download classification', () => {
         // Debug-only diagnostics MUST never reach the dialog as copy.
         entryNote: reason,
       }))
-    const { props, install } = classificationHarness(previewInstall)
+    const { props, commitDownload } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1305,7 +1374,7 @@ describe('ManagePluginsTab download classification', () => {
 
     await click(installDialog.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledTimes(1)
+    expect(commitDownload).toHaveBeenCalledTimes(1)
   })
 
   it('flags a checkout that needs a build before it can load', async () => {
@@ -1336,7 +1405,7 @@ describe('ManagePluginsTab download classification', () => {
         classification: 'other',
         note: { kind: 'analysis-unavailable' },
       }))
-    const { props, install } = classificationHarness(previewInstall)
+    const { props, commitDownload } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1347,7 +1416,79 @@ describe('ManagePluginsTab download classification', () => {
 
     await click(installDialog.querySelector('[data-install-confirm]'))
     await flush()
-    expect(install).toHaveBeenCalledTimes(1)
+    expect(commitDownload).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not block an unclassified checkout and files it as "other"', async () => {
+    // The model is unavailable: phase 2 answers `unclassified` with the
+    // conservative `other` label. That is a VALUE, not a failure — the download
+    // continues, the dialog says so, and the roster offers the manual fix.
+    const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    // A degraded verdict from phase 2: no model reachable, conservative label.
+    const { props, commitDownload } = classificationHarness(
+      previewInstall,
+      makeVerdict({ outcome: 'unclassified', classification: 'other', errorCode: 'market/llm-unconfigured' }),
+    )
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    await click(installDialog.querySelector('[data-install-confirm]'))
+    await flush()
+    // The classify phase completed (with a degraded verdict) and the commit
+    // filed the conservative label.
+    expect(commitDownload).toHaveBeenCalledWith('dl-acme-helper', 'other')
+    const done = host.querySelectorAll('[data-dialog="install"]')
+    expect(done).toHaveLength(1)
+    const dialog = done[0]!
+    expect(dialog.querySelector('[data-install-done]')).not.toBeNull()
+    expect(dialog.querySelector('[data-verdict-final]')?.textContent)
+      .toBe(zh.verdictFinal.replace('{classification}', zh.classificationOther))
+    // Sources only: the UI states that no dependency was installed.
+    expect(dialog.querySelector('[data-no-deps-installed]')).not.toBeNull()
+  })
+
+  it('cancels a running download through the host so the staging area is cleaned', async () => {
+    const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    // Hold the clone phase open so the cancel finds a live download handle.
+    let releaseClone: () => void = () => {}
+    const prepareDownload = vi.fn(async (repository: string) => {
+      await new Promise<void>(resolve => { releaseClone = resolve })
+      return makePreparation({ repository, token: 'dl-acme-helper' })
+    })
+    const cancelDownload = vi.fn(async () => true)
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const { props, mocks } = managePageHarness({ search, repositoryDetail, previewInstall, prepareDownload, cancelDownload })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+
+    await click(installDialog.querySelector('[data-install-confirm]'))
+    await flush()
+    // The clone row is running and the footer offers the cancel instead of a
+    // second confirm.
+    expect(host.querySelector('[data-download-stage="clone"]')?.getAttribute('data-stage-state')).toBe('running')
+    await click(host.querySelector('[data-dialog="install"] [data-dialog-cancel]'))
+    await flush()
+    expect(host.querySelector('[data-dialog="install"]')).toBeNull()
+
+    // The clone answers AFTER the user left: its fresh handle must not leak, so
+    // it is handed to the host's cancel instead of driving the pipeline on.
+    await act(async () => { releaseClone() })
+    await flush()
+    expect(cancelDownload).toHaveBeenCalledWith('dl-acme-helper')
+    expect(mocks.classifyDownload).not.toHaveBeenCalled()
+    expect(mocks.commitDownload).not.toHaveBeenCalled()
   })
 
   it('renders the entry-missing line for a checkout without a runnable entry', async () => {
@@ -1416,7 +1557,7 @@ describe('ManagePluginsTab download classification', () => {
     const previewInstall = vi.fn(async () => {
       throw new MarketCallFailure({ code: 'market/llm-unconfigured', message: 'no llm endpoint', details: {} })
     })
-    const { props, install } = classificationHarness(previewInstall)
+    const { props, commitDownload } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1430,7 +1571,7 @@ describe('ManagePluginsTab download classification', () => {
     // A missing config cannot be fixed by retrying here: close-only, no confirm.
     expect(installDialog.querySelector('[data-preview-retry]')).toBeNull()
     expect(installDialog.querySelector('[data-install-confirm]')).toBeNull()
-    expect(install).not.toHaveBeenCalled()
+    expect(commitDownload).not.toHaveBeenCalled()
     await click(installDialog.querySelector('[data-analysis-close]'))
     expect(host.querySelector('[data-dialog="install"]')).toBeNull()
   })
@@ -1442,7 +1583,7 @@ describe('ManagePluginsTab download classification', () => {
     const previewInstall = vi.fn()
       .mockRejectedValueOnce(new MarketCallFailure({ code, message: 'model trouble', details: {} }))
       .mockResolvedValueOnce(makeInstallReview({ repository: 'acme/helper', version: 'main' }))
-    const { props, previewInstall: preview, install } = classificationHarness(previewInstall)
+    const { props, previewInstall: preview, commitDownload } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
@@ -1458,13 +1599,13 @@ describe('ManagePluginsTab download classification', () => {
     const retry = installDialog.querySelector('[data-preview-retry]') as HTMLButtonElement
     expect(retry).not.toBeNull()
     expect(installDialog.querySelector('[data-analysis-close]')).not.toBeNull()
-    expect(install).not.toHaveBeenCalled()
+    expect(commitDownload).not.toHaveBeenCalled()
     await click(retry)
     await flush()
     expect(preview).toHaveBeenCalledTimes(2)
     expect(installDialog.querySelector('[data-preview-error]')).toBeNull()
     expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
-    expect(install).not.toHaveBeenCalled()
+    expect(commitDownload).not.toHaveBeenCalled()
   })
 })
 
@@ -1629,14 +1770,18 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     expect(panelOf(host).querySelector('[data-detail-view]')).not.toBeNull()
   })
 
-  it('recovers any non-expired install failure through re-preview', async () => {
+  it('retries the classify phase after a model-call failure without re-cloning', async () => {
     const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
       makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
-    const install = vi.fn(async () => {
-      throw new MarketCallFailure({ code: 'install/git-failed', message: 'git failed', details: {} })
-    })
+    // Phase 2 fails once (a genuine transport failure of the classify call —
+    // model problems themselves come back as an `unclassified` VALUE), then
+    // answers on the retry.
+    const classifyDownload = vi.fn()
+      .mockRejectedValueOnce(new MarketCallFailure({ code: 'install/git-failed', message: 'boom', details: {} }))
+      .mockResolvedValueOnce(makeVerdict({ classification: 'plugin' }))
+    const prepareDownload = vi.fn(async (repository: string) => makePreparation({ repository, token: 'dl-acme-helper' }))
     const { repositoryDetail, search } = oneRepoHarness()
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, prepareDownload, classifyDownload })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
 
@@ -1644,18 +1789,22 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     expect(installDialog.querySelector('[data-preview-error]')).toBeNull()
     await click(installDialog.querySelector('[data-install-confirm]'))
     await flush()
-    const installError = installDialog.querySelector('[data-install-error]')
-    expect(installError?.getAttribute('data-error-code')).toBe('install/git-failed')
-    const rePreview = installDialog.querySelector('[data-repreview]') as HTMLButtonElement
-    expect(rePreview).not.toBeNull()
-    expect(rePreview.textContent).toContain(zh.repreviewButton)
-    expect(install).toHaveBeenCalledTimes(1)
-    // Re-preview re-runs the review and returns to the confirmation flow.
-    await click(rePreview)
+    const stageError = installDialog.querySelector('[data-stage-error]')
+    expect(stageError?.getAttribute('data-error-code')).toBe('install/git-failed')
+    expect(installDialog.querySelector('[data-download-stage="classify"]')?.getAttribute('data-stage-state'))
+      .toBe('failed')
+    // The clone already succeeded: retrying only re-runs the failed phase.
+    expect(installDialog.querySelector('[data-download-stage="clone"]')?.getAttribute('data-stage-state'))
+      .toBe('done')
+    const retry = installDialog.querySelector('[data-stage-retry]') as HTMLButtonElement
+    expect(retry).not.toBeNull()
+    expect(retry.textContent).toContain(zh.stageRetry)
+    await click(retry)
     await flush()
-    expect(previewInstall).toHaveBeenCalledTimes(2)
-    expect(installDialog.querySelector('[data-install-error]')).toBeNull()
-    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
+    expect(prepareDownload).toHaveBeenCalledTimes(1)
+    expect(classifyDownload).toHaveBeenCalledTimes(2)
+    expect(installDialog.querySelector('[data-stage-error]')).toBeNull()
+    expect(installDialog.querySelector('[data-install-done]')).not.toBeNull()
   })
 
   it('labels a missing repository with its own not-found copy', async () => {

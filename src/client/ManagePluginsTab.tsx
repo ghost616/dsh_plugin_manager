@@ -17,7 +17,6 @@ import type {
   ManagedPluginView,
   MarketInstallNote,
   MarketStatus,
-  PluginInstallOutcome,
   PluginInstallReview,
   PluginMarketClassification,
   PluginMarketKey,
@@ -33,6 +32,11 @@ import {
   DEFAULT_PLUGIN_MARKET_CLASSIFICATION,
   recordNotLoadableReason,
 } from '../types.ts'
+import type {
+  DownloadClassification,
+  DownloadCommit,
+  DownloadPreparation,
+} from './channel.ts'
 import { renderReadmeHtml } from './readme.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
@@ -48,6 +52,14 @@ export interface ManagePluginsTabInjected {
   list: () => Promise<ManagedPluginList>
   /** Persist and apply one record's enablement. */
   setEnabled: (key: PluginMarketKey, enabled: boolean) => Promise<PluginMarketRecord>
+  /**
+   * Re-file one managed record under another classification (the manual
+   * correction of a verdict the analyzer got wrong or could not reach).
+   */
+  setClassification: (
+    key: PluginMarketKey,
+    classification: PluginMarketClassification,
+  ) => Promise<PluginMarketRecord>
   /** Removal step 1: mint a single-use confirmation token. */
   requestRemove: (key: PluginMarketKey) => Promise<RemoveRequest>
   /** Removal step 2: confirm and run the removal. */
@@ -64,14 +76,28 @@ export interface ManagePluginsTabInjected {
     version?: string | null,
     refKind?: GithubRefKind,
   ) => Promise<PluginInstallReview>
-  /** Run the double-confirmed download for a reviewed repository ref; the
-   *  optional `refKind`/`version` pair must reproduce the reviewed tuple. */
-  install: (
+  /**
+   * Download phase 1 — clone the reviewed ref into the host's staging area and
+   * answer the process-local download handle. Nothing is filed yet.
+   */
+  prepareDownload: (
     repository: string,
     confirmToken: string,
     version?: string | null,
     refKind?: GithubRefKind,
-  ) => Promise<PluginInstallOutcome>
+  ) => Promise<DownloadPreparation>
+  /**
+   * Download phase 2 — classify the staged checkout. A model problem is a
+   * VALUE here (`unclassified`/`failed` + `errorCode`), never a rejection.
+   */
+  classifyDownload: (token: string) => Promise<DownloadClassification>
+  /** Download phase 3 — swap the staged checkout in and file it. */
+  commitDownload: (
+    token: string,
+    classification: PluginMarketClassification,
+  ) => Promise<DownloadCommit>
+  /** Cancel a staged download and delete its staging directory (idempotent). */
+  cancelDownload: (token: string) => Promise<boolean>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -210,8 +236,8 @@ function rowFailed(view: ManagedPluginView): boolean {
     && (view.runtime.phase === 'failed' || view.runtime.lastError !== null)
 }
 
-/** Localized tag key of one persisted record classification. */
-const CLASSIFICATION_KEYS = {
+/** Localized tag key of one record classification (shared by rows and verdicts). */
+export const CLASSIFICATION_KEYS = {
   plugin: 'classificationPlugin',
   skills: 'classificationSkills',
   other: 'classificationOther',
@@ -317,7 +343,7 @@ function StatusHeader({ state, t, onRetry }: {
 /* Managed roster section                                                   */
 /* ------------------------------------------------------------------------ */
 
-function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onToggle, onRemove }: {
+function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onToggle, onRemove, onFixClassification }: {
   readonly snapshot: ManagedPluginList | undefined
   readonly busyKeys: ReadonlySet<string>
   readonly rowFailures: ReadonlyMap<string, ManageUiFailure>
@@ -326,6 +352,8 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
   readonly onQuery: (query: string) => void
   readonly onToggle: (view: ManagedPluginView) => void
   readonly onRemove: (view: ManagedPluginView) => void
+  /** Open the manual classification picker for one record. */
+  readonly onFixClassification: (view: ManagedPluginView) => void
 }): ReactNode {
   const normalized = query.trim().toLocaleLowerCase()
   const searching = normalized.length > 0
@@ -396,13 +424,23 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
                 <div className={css.rowMain}>
                   <strong className={css.rowName}>{name}</strong>
                   <span className={css.rowMeta}>
-                    <span
+                    {/*
+                      The classification tag doubles as the manual-correction
+                      entry: the analyzer's verdict (or the unclassified
+                      fallback) is a tag the user owns, so clicking it opens the
+                      picker that re-files the record through setClassification.
+                    */}
+                    <button
+                      type="button"
                       className={css.classificationTag}
                       data-classification-tag
                       data-kind={classification}
+                      aria-label={t('classificationFix', { name })}
+                      title={t('classificationFix', { name })}
+                      onClick={() => { onFixClassification(view) }}
                     >
                       {t(CLASSIFICATION_KEYS[classification])}
-                    </span>
+                    </button>
                     <span data-source-kind>{view.record.source.kind === 'github' ? t('kindGithub') : view.record.source.kind}</span>
                     <code data-plugin-key-value>{view.key}</code>
                   </span>
@@ -468,22 +506,94 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
 /* Download confirmation dialog (shared by the GitHub tab)                  */
 /* ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ */
+/* Staged download: the three host phases                                   */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * The download is no longer one opaque call: the host exposes it as three
+ * phases the dialog shows as progress rows — clone the sources, classify the
+ * checkout with the model, write the configuration. Each phase has its own
+ * waiting / running / done / failed state, failures offer a retry of THAT
+ * phase, and cancelling cleans the staging area up through the host.
+ */
+type DownloadStageId = 'clone' | 'classify' | 'commit'
+
+/** Visual/state contract of one phase row. */
+type DownloadStageState = 'waiting' | 'running' | 'done' | 'failed'
+
 type InstallPhase =
   | { readonly phase: 'preview' }
   | { readonly phase: 'preview-error'; readonly failure: ManageUiFailure }
   | { readonly phase: 'review'; readonly review: PluginInstallReview }
-  | { readonly phase: 'installing'; readonly review: PluginInstallReview }
-  | { readonly phase: 'install-error'; readonly review: PluginInstallReview; readonly failure: ManageUiFailure }
-  | { readonly phase: 'done'; readonly outcome: PluginInstallOutcome }
+  /** One of the three phases is in flight (`running` names which one). */
+  | {
+    readonly phase: 'running'
+    readonly review: PluginInstallReview
+    /** Download handle once phase 1 answered it; process-local, never persisted. */
+    readonly token: string | null
+    readonly stages: Readonly<Record<DownloadStageId, DownloadStageState>>
+    readonly running: DownloadStageId
+    /** Verdict of phase 2, absent while it has not answered yet. */
+    readonly verdict?: DownloadClassification
+  }
+  /** A phase failed: per-phase retry or cancel (cancel cleans the staging area). */
+  | {
+    readonly phase: 'failed'
+    readonly review: PluginInstallReview
+    readonly token: string | null
+    readonly stages: Readonly<Record<DownloadStageId, DownloadStageState>>
+    readonly failed: DownloadStageId
+    /** Verdict of phase 2 when it already answered (kept for a commit retry). */
+    readonly verdict?: DownloadClassification
+    readonly failure: ManageUiFailure
+  }
+  | { readonly phase: 'done'; readonly outcome: DownloadCommit }
 
-/**
- * Localized classification tag of one review: the label the confirmed download
- * will file the checkout under (see {@link PluginMarketClassification}). The
- * tag never blocks the download — a skills/other checkout is fetched and filed
- * as-is, only its loader registration is withheld.
- */
+/** Fresh per-stage state map: everything waiting, one phase running. */
+function stageMap(
+  running: DownloadStageId | null,
+  done: readonly DownloadStageId[] = [],
+  failed: DownloadStageId | null = null,
+): Record<DownloadStageId, DownloadStageState> {
+  const state = (id: DownloadStageId): DownloadStageState => {
+    if (failed === id) return 'failed'
+    if (running === id) return 'running'
+    if (done.includes(id)) return 'done'
+    return 'waiting'
+  }
+  return { clone: state('clone'), classify: state('classify'), commit: state('commit') }
+}
+
+/** Dictionary key of one stage's label. */
+const STAGE_LABEL_KEYS = {
+  clone: 'stageClone',
+  classify: 'stageClassify',
+  commit: 'stageCommit',
+} satisfies Record<DownloadStageId, MarketManageLocaleKey>
+
+/** Dictionary key of one stage's state text. */
+const STAGE_STATE_KEYS = {
+  waiting: 'stageWaiting',
+  running: 'stageRunning',
+  done: 'stageDone',
+  failed: 'stageFailed',
+} satisfies Record<DownloadStageState, MarketManageLocaleKey>
+
+/** Localized classification tag of one review: the label the tag carries. */
 function reviewClassificationText(review: PluginInstallReview, t: Translate): string {
   return t(CLASSIFICATION_KEYS[review.classification ?? DEFAULT_PLUGIN_MARKET_CLASSIFICATION])
+}
+
+/**
+ * Localized copy of one classification verdict, or null when the analyzer
+ * reached a verdict (`classified`). The two degraded outcomes are NOT failures
+ * — the download continues either way — so they read as "not classified, fix
+ * it by hand if you care": the model was unavailable, or its call failed.
+ */
+function verdictNoticeText(verdict: DownloadClassification, t: Translate): string | null {
+  if (verdict.outcome === 'classified') return null
+  return verdict.outcome === 'unclassified' ? t('verdictUnclassified') : t('verdictFailed')
 }
 
 /**
@@ -510,14 +620,38 @@ function reviewNoteText(note: MarketInstallNote | undefined, t: Translate): stri
   return `${primary} ${t('expectedEntryNote', { entry: note.entry })}`
 }
 
-function InstallDialog({ repository, version, refKind, previewInstall, install, t, onClose, onInstalled }: {
+/**
+ * Download dialog — the staged pipeline, in three visible phases.
+ *
+ * Phase 1 `prepareDownload` clones the reviewed ref into the host's staging
+ * area (nothing filed yet, no dependencies installed: "downloading" only ever
+ * means "fetch the sources into the repository"). Phase 2 `classifyDownload`
+ * asks the model what the checkout IS; a model problem is NOT a rejection —
+ * the host answers `unclassified`/`failed` and the dialog keeps going. Phase 3
+ * `commitDownload` swaps the checkout in and writes the record under the
+ * chosen tag.
+ *
+ * Cancel (and closing while a phase is in flight) routes through
+ * `cancelDownload` so the host deletes the staging directory — a cancelled
+ * download leaves zero residue behind and the next download starts clean.
+ * The download handle lives in this dialog's state ONLY: it is process-local
+ * and must never be persisted.
+ */
+function InstallDialog({
+  repository, version, refKind,
+  previewInstall, prepareDownload, classifyDownload, commitDownload, cancelDownload,
+  t, onClose, onInstalled,
+}: {
   readonly repository: string
   /** Branch/tag ref name being downloaded; null = the legacy default branch. */
   readonly version?: string | null
   /** V2 ref kind of the pinned branch/tag (omitted on legacy reviews). */
   readonly refKind?: GithubRefKind
   readonly previewInstall: ManagePluginsTabInjected['previewInstall']
-  readonly install: ManagePluginsTabInjected['install']
+  readonly prepareDownload: ManagePluginsTabInjected['prepareDownload']
+  readonly classifyDownload: ManagePluginsTabInjected['classifyDownload']
+  readonly commitDownload: ManagePluginsTabInjected['commitDownload']
+  readonly cancelDownload: ManagePluginsTabInjected['cancelDownload']
   readonly t: Translate
   readonly onClose: () => void
   readonly onInstalled: (repository: string) => void
@@ -532,9 +666,37 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
     return () => { mounted.current = false }
   }, [])
 
-  // Esc closes the review dialog whenever no download is in flight; the focus
-  // is moved onto the dialog on mount and Tab never leaves it.
-  useDialogA11y(dialogRef, phase.phase !== 'installing', onClose)
+  /** True while a host phase is in flight: Esc and close must not race it. */
+  const inFlight = phase.phase === 'running'
+  /**
+   * Whether the user already left the dialog. A phase that answers AFTER that
+   * still holds a live staging handle, so it must hand it back to the host's
+   * cancel instead of writing a record behind the user's back.
+   */
+  const left = useRef(false)
+  // The download handle of the current attempt, when one exists: the dialog
+  // state is the ONLY home of this process-local value (never persisted).
+  const activeToken = phase.phase === 'running' || phase.phase === 'failed' ? phase.token : null
+
+  /**
+   * Leave the dialog. A staged-but-uncommitted download is cancelled first so
+   * the host can delete its staging directory; the call is idempotent and its
+   * outcome is deliberately ignored — the user asked to leave, and a lingering
+   * staging root is the host's stale-cleanup job, not a reason to block the UI.
+   */
+  const leave = (): void => {
+    left.current = true
+    if (activeToken !== null) {
+      void Promise.resolve()
+        .then(() => cancelDownload(activeToken))
+        .catch(() => { /* best-effort: the host sweeps stale staging roots */ })
+    }
+    onClose()
+  }
+
+  // Esc closes the dialog whenever nothing is in flight (a running phase must
+  // be cancelled explicitly so its staging directory is cleaned up).
+  useDialogA11y(dialogRef, !inFlight, leave)
 
   useEffect(() => {
     let current = true
@@ -548,10 +710,73 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
     return () => { current = false }
   }, [previewInstall, previewTick, repository, version, refKind])
 
-  const confirm = (review: PluginInstallReview): void => {
-    if (phase.phase === 'installing') return
-    setPhase({ phase: 'installing', review })
-    void install(repository, review.confirmToken, version ?? null, refKind)
+  /** Phase 1 — clone; on success chain into phase 2 automatically. */
+  const runClone = (review: PluginInstallReview, token: string | null): void => {
+    setPhase({
+      phase: 'running',
+      review,
+      token,
+      stages: stageMap('clone'),
+      running: 'clone',
+    })
+    void Promise.resolve()
+      .then(() => prepareDownload(repository, review.confirmToken, version ?? null, refKind))
+      .then(
+        (prepared) => {
+          // The user left while this phase ran: the fresh handle must not leak,
+          // so it is handed to the host's cancel (idempotent, deletes staging).
+          if (left.current) {
+            void Promise.resolve().then(() => cancelDownload(prepared.token)).catch(() => {})
+            return
+          }
+          if (!mounted.current) return
+          runClassify(review, prepared.token)
+        },
+        (error: unknown) => {
+          if (!mounted.current) return
+          failStage(review, token, 'clone', toUiFailure(error))
+        },
+      )
+  }
+
+  /** Phase 2 — classify; a model problem is a VALUE, not a thrown failure. */
+  const runClassify = (review: PluginInstallReview, token: string): void => {
+    setPhase({
+      phase: 'running',
+      review,
+      token,
+      stages: stageMap('classify', ['clone']),
+      running: 'classify',
+    })
+    void Promise.resolve()
+      .then(() => classifyDownload(token))
+      .then(
+        (verdict) => {
+          if (!mounted.current) return
+          // The verdict is shown and used as the default tag, but the last
+          // word stays with the user: an unclassified checkout is NOT blocked
+          // (the conservative `other` label is pre-selected).
+          setPhase({
+            phase: 'running',
+            review,
+            token,
+            stages: stageMap('commit', ['clone', 'classify']),
+            running: 'commit',
+            verdict,
+          })
+          runCommit(token, verdict.classification)
+        },
+        (error: unknown) => {
+          if (!mounted.current) return
+          failStage(review, token, 'classify', toUiFailure(error))
+        },
+      )
+  }
+
+  /** Phase 3 — swap in + write the record; the download handle dies here. */
+  const runCommit = (token: string, classification: PluginMarketClassification): void => {
+    void Promise.resolve()
+      .then(() => commitDownload(token, classification))
       .then(
         (outcome) => {
           if (!mounted.current) return
@@ -560,15 +785,67 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
         },
         (error: unknown) => {
           if (!mounted.current) return
-          setPhase({ phase: 'install-error', review, failure: toUiFailure(error) })
+          setPhase(current => current.phase === 'running' || current.phase === 'failed'
+            ? {
+              phase: 'failed',
+              review: current.review,
+              token: current.token,
+              stages: stageMap(null, ['clone', 'classify'], 'commit'),
+              failed: 'commit',
+              failure: toUiFailure(error),
+            }
+            : current)
         },
       )
   }
 
-  const review = phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error'
+  /** Record one phase failure and keep the handle for a retry or a cancel. */
+  const failStage = (
+    review: PluginInstallReview,
+    token: string | null,
+    failed: DownloadStageId,
+    failure: ManageUiFailure,
+  ): void => {
+    const done: DownloadStageId[] = failed === 'clone' ? [] : failed === 'classify' ? ['clone'] : ['clone', 'classify']
+    setPhase(current => ({
+      phase: 'failed',
+      review,
+      token,
+      stages: stageMap(null, done, failed),
+      failed,
+      ...(current.phase === 'running' && current.verdict !== undefined ? { verdict: current.verdict } : {}),
+      failure,
+    }))
+  }
+
+  /** Retry the phase that failed (later phases are not re-run). */
+  const retryStage = (): void => {
+    if (phase.phase !== 'failed') return
+    const { review: failedReview, token, failed } = phase
+    if (failed === 'clone') {
+      runClone(failedReview, null)
+      return
+    }
+    if (token === null) return
+    if (failed === 'classify') {
+      runClassify(failedReview, token)
+      return
+    }
+    // The commit retry keeps the verdict's label: the user has not corrected
+    // anything yet, and correcting is what the roster picker is for.
+    runCommit(token, phase.verdict?.classification ?? failedReview.classification)
+  }
+
+  const review = phase.phase === 'review' || phase.phase === 'running' || phase.phase === 'failed'
     ? phase.review
     : undefined
-  const busy = phase.phase === 'installing' || phase.phase === 'preview'
+  const stages = phase.phase === 'running' || phase.phase === 'failed' ? phase.stages : undefined
+  /**
+   * The confirmation button is live exactly while the dialog shows the review:
+   * once a phase is in flight the staged rows own the progress display (and the
+   * footer only offers the cancel).
+   */
+  const busy = inFlight
 
   return (
     <div className={css.backdrop}>
@@ -669,15 +946,67 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
           </>
         ) : null}
 
-        {phase.phase === 'install-error' ? (
-          <p className={css.dialogError} role="alert" data-install-error data-error-code={phase.failure.code}>
-            {t('downloadFailed')} {failureText(phase.failure, t)}
+        {/*
+          Stage progress. The three rows are the canonical rendering of where a
+          download currently is: each one carries its state as a data attribute
+          so the copy stays in the dictionary while the structure stays stable.
+        */}
+        {stages === undefined ? null : (
+          <ul className={css.stageList} data-download-stages aria-busy={inFlight}>
+            {(Object.keys(STAGE_LABEL_KEYS) as DownloadStageId[]).map(stageId => (
+              <li
+                key={stageId}
+                className={css.stageRow}
+                data-download-stage={stageId}
+                data-stage-state={stages[stageId]}
+              >
+                <span className={css.stageDot} aria-hidden="true" />
+                <span className={css.stageName}>{t(STAGE_LABEL_KEYS[stageId])}</span>
+                <span className={css.stageState} data-stage-state-text>
+                  {t(STAGE_STATE_KEYS[stages[stageId]])}
+                </span>
+                {phase.phase === 'failed' && phase.failed === stageId ? (
+                  <span
+                    className={css.stageError}
+                    data-stage-error
+                    data-error-code={phase.failure.code}
+                  >
+                    {failureText(phase.failure, t)}
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/*
+          The classifier could not reach a verdict (no model configured, or the
+          call failed). This is INFORMATIONAL: the sources are already cloned
+          and the download continues with the conservative `other` label — the
+          user may fix the tag by hand from the roster afterwards.
+        */}
+        {phase.phase === 'running' && phase.verdict !== undefined && verdictNoticeText(phase.verdict, t) !== null ? (
+          <p className={css.verdictNotice} data-verdict-notice data-verdict-outcome={phase.verdict.outcome}>
+            {verdictNoticeText(phase.verdict, t)}
           </p>
         ) : null}
+
         {phase.phase === 'done' ? (
-          <p className={css.dialogOk} role="status" data-install-done>
-            {t('downloadDone')}
-          </p>
+          <>
+            <p className={css.dialogOk} role="status" data-install-done>
+              {t('downloadDone')}
+            </p>
+            {/* The verdict the download was actually filed under. */}
+            <p className={css.verdictNotice} data-verdict-final>
+              {t('verdictFinal', {
+                classification: t(CLASSIFICATION_KEYS[phase.outcome.classification]),
+              })}
+            </p>
+            {/* Downloading sources never installs dependencies: say so plainly. */}
+            {phase.outcome.dependenciesInstalled ? null : (
+              <p className={css.analysisGuide} data-no-deps-installed>{t('depsNotInstalledNotice')}</p>
+            )}
+          </>
         ) : null}
 
         <footer className={css.dialogActions}>
@@ -689,11 +1018,11 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
                 </button>
               )}
               {isAnalysisFailureCode(phase.failure.code) ? (
-                <button type="button" className={css.textButton} data-analysis-close onClick={onClose}>
+                <button type="button" className={css.textButton} data-analysis-close onClick={leave}>
                   {t('closeButton')}
                 </button>
               ) : (
-                <button type="button" className={css.textButton} data-dialog-cancel onClick={onClose}>
+                <button type="button" className={css.textButton} data-dialog-cancel onClick={leave}>
                   {t('cancelButton')}
                 </button>
               )}
@@ -704,19 +1033,36 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
               {t('doneButton')}
             </button>
           ) : null}
-          {phase.phase === 'review' || phase.phase === 'installing' || phase.phase === 'install-error' ? (
+          {phase.phase === 'review' ? (
             <>
-              <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
+              <button
+                type="button"
+                className={css.primaryButton}
+                data-install-confirm
+                disabled={busy}
+                onClick={() => { if (review !== undefined) runClone(review, null) }}
+              >
                 {busy ? t('downloading') : t('downloadButton')}
               </button>
-              {phase.phase === 'install-error' ? (
-                // Every download failure (not only a consumed confirmation)
-                // offers a fresh review: the old token may be spent already.
-                <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
-                  {t('repreviewButton')}
-                </button>
-              ) : null}
-              <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={onClose}>
+              <button type="button" className={css.textButton} data-dialog-cancel disabled={busy} onClick={leave}>
+                {t('cancelButton')}
+              </button>
+            </>
+          ) : null}
+          {phase.phase === 'running' ? (
+            // Cancel is available while a phase runs: it cleans the staging area
+            // and returns the dialog to its review state (the preview token is
+            // already spent, so the only way back is a fresh review).
+            <button type="button" className={css.textButton} data-dialog-cancel onClick={leave}>
+              {t('cancelButton')}
+            </button>
+          ) : null}
+          {phase.phase === 'failed' ? (
+            <>
+              <button type="button" className={css.primaryButton} data-stage-retry onClick={retryStage}>
+                {t('stageRetry')}
+              </button>
+              <button type="button" className={css.textButton} data-dialog-cancel onClick={leave}>
                 {t('cancelButton')}
               </button>
             </>
@@ -827,6 +1173,120 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
     </div>
   )
 }
+
+/* ------------------------------------------------------------------------ */
+/* Classification picker (manual correction of one record's tag)            */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Manual correction of one record's classification: the analyzer can be wrong
+ * (or unable to answer at all — an unclassified download is filed as `other`),
+ * so the tag on a roster row is not final. The picker re-files the record
+ * through `setClassification`, and a refused label (`market/bad-request`,
+ * e.g. an unknown tag) keeps the dialog open with the stable code shown.
+ */
+function ClassificationDialog({ view, current, setClassification: apply, t, onClose, onFixed }: {
+  readonly view: ManagedPluginView
+  readonly current: PluginMarketClassification
+  readonly setClassification: ManagePluginsTabInjected['setClassification']
+  readonly t: Translate
+  readonly onClose: () => void
+  readonly onFixed: (record: PluginMarketRecord) => void
+}): ReactNode {
+  const dialogRef = useRef<HTMLElement | null>(null)
+  const mounted = useRef(true)
+  const [chosen, setChosen] = useState<PluginMarketClassification>(current)
+  const [failure, setFailure] = useState<ManageUiFailure | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const name = displayName(view)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  useDialogA11y(dialogRef, !busy, onClose)
+
+  const confirm = (): void => {
+    if (busy) return
+    setFailure(undefined)
+    setBusy(true)
+    void Promise.resolve()
+      .then(() => apply(view.key, chosen))
+      .then(
+        (record) => {
+          if (!mounted.current) return
+          setBusy(false)
+          onFixed(record)
+        },
+        (error: unknown) => {
+          if (!mounted.current) return
+          setBusy(false)
+          setFailure(toUiFailure(error))
+        },
+      )
+  }
+
+  return (
+    <div className={css.backdrop}>
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className={css.dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('classificationDialogTitle')}
+        data-dialog="classification"
+        data-classification-key={view.key}
+      >
+        <header className={css.dialogHeader}>
+          <strong>{t('classificationDialogTitle')}</strong>
+          <code>{name}</code>
+        </header>
+
+        <p className={css.dialogBody}>{t('classificationDialogBody', { name })}</p>
+
+        {/* One radio per tag: the current one is pre-selected, not locked. */}
+        <div className={css.classificationOptions} role="radiogroup" aria-label={t('classificationDialogTitle')}>
+          {(Object.keys(CLASSIFICATION_KEYS) as PluginMarketClassification[]).map(option => (
+            <label
+              key={option}
+              className={css.classificationOption}
+              data-classification-option={option}
+              data-selected={option === chosen ? 'true' : undefined}
+            >
+              <input
+                type="radio"
+                name={`classification-${view.key}`}
+                value={option}
+                checked={option === chosen}
+                disabled={busy}
+                onChange={() => { setChosen(option) }}
+              />
+              <span>{t(CLASSIFICATION_KEYS[option])}</span>
+            </label>
+          ))}
+        </div>
+
+        {failure === undefined ? null : (
+          <p className={css.dialogError} role="alert" data-classification-error data-error-code={failure.code}>
+            {failureText(failure, t)}
+          </p>
+        )}
+
+        <footer className={css.dialogActions}>
+          <button type="button" className={css.primaryButton} data-classification-confirm disabled={busy} onClick={confirm}>
+            {busy ? t('classificationSaving') : t('classificationConfirm')}
+          </button>
+          <button type="button" className={css.textButton} data-classification-cancel disabled={busy} onClick={onClose}>
+            {t('cancelButton')}
+          </button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
 /* ------------------------------------------------------------------------ */
 /* GitHub tab (search + pagination + repository detail)                     */
 /* ------------------------------------------------------------------------ */
@@ -1442,8 +1902,9 @@ const PAGE_TAB_KEYS = {
 /** Render the full GitHub-plugin settings page. */
 export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const {
-    status: readStatus, list, setEnabled, requestRemove, confirmRemove,
-    search, repositoryDetail, previewInstall, install, t,
+    status: readStatus, list, setEnabled, setClassification, requestRemove, confirmRemove,
+    search, repositoryDetail, previewInstall,
+    prepareDownload, classifyDownload, commitDownload, cancelDownload, t,
   } = props
   const tabsId = useId()
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
@@ -1458,6 +1919,8 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
   const [rowFailures, setRowFailures] = useState<ReadonlyMap<string, ManageUiFailure>>(() => new Map())
   const [removeTarget, setRemoveTarget] = useState<ManagedPluginView | null>(null)
+  /** Record whose classification tag is being corrected by hand. */
+  const [classificationTarget, setClassificationTarget] = useState<ManagedPluginView | null>(null)
   /** Pending download review, opened from the GitHub tab's detail view. */
   const [installTarget, setInstallTarget] = useState<MarketInstallTarget | null>(null)
 
@@ -1642,6 +2105,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
                 onQuery={setQuery}
                 onToggle={toggle}
                 onRemove={(view) => { setRemoveTarget(view) }}
+                onFixClassification={(view) => { setClassificationTarget(view) }}
               />
             </>
           ) : null}
@@ -1682,10 +2146,42 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
           version={installTarget.version}
           refKind={installTarget.refKind}
           previewInstall={previewInstall}
-          install={install}
+          prepareDownload={prepareDownload}
+          classifyDownload={classifyDownload}
+          commitDownload={commitDownload}
+          cancelDownload={cancelDownload}
           t={t}
           onClose={() => { setInstallTarget(null) }}
           onInstalled={() => { reloadList() }}
+        />
+      ) : null}
+
+      {/*
+        Manual classification correction. Also at page level: the tag lives on a
+        roster row inside the local panel, and the panel is hidden (not
+        unmounted) while the GitHub tab is up.
+      */}
+      {classificationTarget !== null ? (
+        <ClassificationDialog
+          key={classificationTarget.key}
+          view={classificationTarget}
+          current={classificationOf(classificationTarget.record)}
+          setClassification={setClassification}
+          t={t}
+          onClose={() => { setClassificationTarget(null) }}
+          onFixed={(record) => {
+            setClassificationTarget(null)
+            setListState(current => current.status === 'ready'
+              ? {
+                status: 'ready',
+                snapshot: {
+                  entries: current.snapshot.entries.map(entry =>
+                    entry.key === record.key ? { ...entry, record } : entry),
+                },
+              }
+              : current)
+            reloadList()
+          }}
         />
       ) : null}
 

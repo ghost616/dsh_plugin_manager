@@ -570,12 +570,98 @@ export function makeInstallOutcome(seed: { repository: string; overwritten?: boo
   }
 }
 
+/** Build a DownloadClassification verdict fixture (phase 2 answer). */
+export function makeVerdict(seed: {
+  classification?: PluginMarketClassification
+  outcome?: 'classified' | 'unclassified' | 'failed'
+  reason?: string
+  errorCode?: string
+  entryPresent?: boolean | null
+  entryHint?: string | null
+} = {}) {
+  const outcome = seed.outcome ?? 'classified'
+  const classification = seed.classification
+    ?? (outcome === 'classified' ? 'plugin' : 'other')
+  return {
+    outcome,
+    classification,
+    reason: seed.reason ?? `model says ${classification}`,
+    unclassified: outcome !== 'classified',
+    entryPresent: seed.entryPresent === undefined ? null : seed.entryPresent,
+    entryHint: seed.entryHint === undefined ? null : seed.entryHint,
+    ...(seed.errorCode === undefined ? {} : { errorCode: seed.errorCode }),
+  }
+}
+
+/** Build the DownloadPreparation answer of phase 1 (sources cloned). */
+export function makePreparation(seed: {
+  repository: string
+  token?: string
+  version?: string | null
+  refKind?: GithubRefKind
+  overwrite?: boolean
+} = { repository: 'acme/helper' }) {
+  const token = seed.token ?? `dl-${seed.repository.replace('/', '-')}`
+  return {
+    token,
+    key: `gh-${seed.repository.replace('/', '-')}` as PluginMarketKey,
+    repository: seed.repository,
+    ...(seed.refKind === undefined ? {} : { refKind: seed.refKind }),
+    ref: seed.version === undefined ? 'v1.0.0' : seed.version,
+    localDirName: `gh-${seed.repository.replace('/', '-')}`,
+    commit: '0123456789abcdef0123456789abcdef01234567',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    state: 'prepared' as const,
+    overwrite: seed.overwrite === true,
+  }
+}
+
+/** Build the DownloadCommit answer of phase 3 (swapped in + filed). */
+export function makeCommit(seed: {
+  repository: string
+  token?: string
+  classification?: PluginMarketClassification
+  version?: string | null
+  refKind?: GithubRefKind
+  overwritten?: boolean
+  entry?: string | null
+} = { repository: 'acme/helper' }) {
+  const key = `gh-${seed.repository.replace('/', '-')}`
+  const record = makeView({
+    key,
+    repository: seed.repository,
+    version: seed.version === undefined ? 'v1.0.0' : seed.version,
+    ...(seed.refKind === undefined ? {} : { refKind: seed.refKind }),
+    ...(seed.classification === undefined ? {} : { classification: seed.classification }),
+    entry: seed.entry === undefined ? null : seed.entry,
+  }).record
+  return {
+    key: key as PluginMarketKey,
+    overwritten: seed.overwritten === true,
+    record,
+    checkoutDir: `/repo/${key}`,
+    classification: seed.classification ?? 'plugin',
+    entry: seed.entry === undefined ? null : seed.entry,
+    // The download path NEVER installs dependencies.
+    dependenciesInstalled: false as const,
+    note: null,
+  }
+}
+
 /** Build a removal request fixture. */
 export function makeRemoveRequest(key: string, token = 'rm-token') {
   return { key, token, expiresAt: '2026-01-02T00:00:00.000Z' }
 }
 
-/** Default prop mocks for the full settings page (each override-able). */
+/**
+ * Default prop mocks for the full settings page (each override-able).
+ *
+ * The download defaults model the STAGED host contract, and they answer
+ * immediately so a test that just confirms the dialog walks clone → classify →
+ * commit without extra plumbing: phase 1 answers the handle of `repository`,
+ * phase 2 answers a `plugin` verdict, phase 3 files it. Tests that exercise one
+ * phase override that single method.
+ */
 export function managePageHarness(overrides: Partial<ManagePluginsTabInjected> = {}): {
   /** Props accepted by the component under test (injected face + shell seats). */
   props: ManagePluginsTabProps
@@ -589,12 +675,16 @@ export function managePageHarness(overrides: Partial<ManagePluginsTabInjected> =
     status: vi.fn(async () => makeStatus(true)),
     list: vi.fn(async () => makeList([])),
     setEnabled: vi.fn(async () => { throw new Error('unused default setEnabled') }),
+    setClassification: vi.fn(async () => { throw new Error('unused default setClassification') }),
     requestRemove: vi.fn(async () => { throw new Error('unused default requestRemove') }),
     confirmRemove: vi.fn(async () => { throw new Error('unused default confirmRemove') }),
     search: vi.fn(async () => makeSearchPage([])),
     repositoryDetail: vi.fn(async () => { throw new Error('unused default repositoryDetail') }),
     previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
-    install: vi.fn(async () => { throw new Error('unused default install') }),
+    prepareDownload: vi.fn(async (repository: string) => makePreparation({ repository })),
+    classifyDownload: vi.fn(async () => makeVerdict({ outcome: 'classified', classification: 'plugin' })),
+    commitDownload: vi.fn(async () => makeCommit({ repository: 'acme/helper' })),
+    cancelDownload: vi.fn(async () => true),
   } satisfies ManagePluginsTabInjected & Pick<ManagePluginsTabProps, 't' | 'close'>
   const props: ManagePluginsTabProps = { ...mocks, ...overrides }
   return { props, mocks }
