@@ -60,8 +60,9 @@
     "clean": "node scripts/clean.mjs",
     "prepare": "tsdown --config tsdown.prepare.config.ts",
     "verify": "node scripts/verify-load.mjs",
+    "check:encoding": "node scripts/check-encoding.mjs",
     "install-profile": "node scripts/install-profile.mjs",
-    "test": "tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run",
+    "test": "node scripts/check-encoding.mjs && tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run",
     "test:watch": "vitest"
   },
   "peerDependencies": {

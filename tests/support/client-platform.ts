@@ -599,4 +599,3 @@ export function managePageHarness(overrides: Partial<ManagePluginsTabInjected> =
   const props: ManagePluginsTabProps = { ...mocks, ...overrides }
   return { props, mocks }
 }
-

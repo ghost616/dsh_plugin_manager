@@ -678,26 +678,59 @@ function compact(text: string): string {
   return text.replace(/\s+/g, ' ')
 }
 
+/**
+ * 收集一处 spec 文本里的**全部** `it` 声明行并返回不合规者（声明行未以 `{`
+ * 收尾，说明语句被塞进了签名行）。
+ *
+ * 词法刻意放宽为「行首 `it` + 词边界」，`it` 之后允许任意可行字符，因此
+ * `it('…', () => {`、`it.each([[1], [2]])('…', () => {`、
+ * `it.skip('…', () => {`、`it.only(…)`、多行参数的起始行等形态都会被纳入检查
+ * ——不再依赖「`it.each(<无嵌套括号>)`」这种更窄的猜测，避免静默漏检。
+ */
+function strayStatementsOnItDeclarations(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /^\s*it\b/.test(line) && /[([`'"]/.test(line.slice(line.indexOf('it') + 2)))
+    .filter(({ line }) => !line.trim().endsWith('{'))
+    .map(({ line, index }) => `${index + 1}: ${line.trim()}`)
+}
+
 describe('[挑战] §5 契约检查', () => {
   const root = process.cwd()
 
   it('every it(...) declaration keeps its body off the signature line', async () => {
     // 该断言守护的是「一行式 it(...) { const ... }」这类编辑残留（真实回归过
-    // 一次）。按 `it(` 词法找**每一处**声明（与标题措辞、参数个数无关），断言
-    // 声明行以 `{` 收尾——即语句没有被塞进签名行。
+    // 一次）。按放宽后的词法找**每一处**声明（与标题措辞、参数个数、修饰符、
+    // 参数嵌套深度无关），断言声明行以 `{` 收尾——即语句没有被塞进签名行。
     const text = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
-    const lines = text.split(/\r?\n/)
-    const declarations = lines
-      .map((line, index) => ({ line, index }))
-      .filter(({ line }) => /^\s*it(\.each\([^)]*\))?\(/.test(line))
-    expect(declarations.length).toBeGreaterThan(0)
-    const offenders = declarations
-      .filter(({ line }) => !line.trim().endsWith('{'))
-      .map(({ line, index }) => `${index + 1}: ${line.trim()}`)
+    const offenders = strayStatementsOnItDeclarations(text)
     expect(offenders).toEqual([])
     // 反向守卫：本次关注的用例确实存在，避免断言因改名而空转。
     expect(compact(text)).toContain('reports deps-failed and rolls back on a pnpm failure')
+    // 且收集词法确实在这份文本里命中了声明（防止词法写错导致零命中）。
+    expect(text.split(/\r?\n/).filter((line) => /^\s*it\b/.test(line)).length).toBeGreaterThan(0)
   })
+
+  it.each([
+    ["it('x', async () => { const y = 1", 'plain it with a trailing statement'],
+    ["it.skip('x', () => { const y = 1", 'it.skip with a trailing statement'],
+    ["it.only('x', () => { const y = 1", 'it.only with a trailing statement'],
+    ["it.each([[1], [2]])('x', () => { const y = 1", 'it.each with nested array arguments'],
+    ["it.each([[1], [2]])('x', () => {", 'it.each with nested arguments but a clean body'],
+    ["it('x', () => {", 'plain it with a clean body'],
+  ] as const)(
+    'the it-collection guard handles %s (%s)',
+    (line, _label) => {
+      const offenders = strayStatementsOnItDeclarations(`${line}\n  expect(1).toBe(1)\n})\n`)
+      if (line.trim().endsWith('{')) {
+        expect(offenders).toEqual([])
+      } else {
+        expect(offenders).toHaveLength(1)
+        expect(offenders[0]).toContain('1: ')
+      }
+    },
+  )
 
   it('src/types.ts stays client-safe: no runtime node:* import or require', async () => {
     // 客户端按值导入本文件（分类词表/守卫/默认值），因此这里只校验真正的

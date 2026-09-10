@@ -252,4 +252,3 @@ describe('market control production assembly: install files what the checkout is
     expect(await store.get(parsePluginKey(PLUGIN_KEY))).toBeNull()
   })
 })
-

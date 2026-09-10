@@ -3,30 +3,74 @@
  * (see control-gateway.spec.ts header for why decorator sources run compiled).
  * Covers the original record-control methods plus the extended
  * search / previewInstall / install surface and its failure branches.
+ *
+ * HTTP robustness (this spec used to flake as "fetch failed / bad port" when
+ * several specs bound sockets in parallel): every case serves on an EPHEMERAL
+ * port (listen 0 → read the assigned port), waits until the listener is
+ * actually accepting connections before asserting (`serve()` retries the
+ * connect step), and retries a transient request failure with backoff instead
+ * of depending on a lucky rerun. Teardown destroys idle keep-alive sockets so
+ * `close()` cannot hang.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { Socket } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { MarketError } from '../src/host/market/errors.ts'
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
 import { FakeEngines, fakeAnalysisEngine, fakeDistribution, makeSourceOps, testbed } from './support/control-testbed.ts'
 
+/** Bound of one `serve()` readiness wait (ms). */
+const SERVE_READY_TIMEOUT_MS = 3_000
+/** Attempts of one request (initial try + retries) on a transient failure. */
+const REQUEST_ATTEMPTS = 4
+
 const contexts: Context[] = []
 const servers: Server[] = []
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
-  await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve) => {
-    server.close(() => resolve())
-  })))
+  await Promise.all(servers.splice(0).map(server => closeServer(server)))
 })
+
+/**
+ * Close one test server without ever hanging the suite: destroy the idle
+ * keep-alive sockets a previous request left behind, then wait for `close`
+ * with a short bound.
+ */
+function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (!server.listening) {
+      resolve()
+      return
+    }
+    const done = (): void => { resolve() }
+    const timer = setTimeout(done, 2_000)
+    timer.unref?.()
+    server.close(() => {
+      clearTimeout(timer)
+      done()
+    })
+    server.closeIdleConnections()
+  })
+}
 
 /** Minimal exact-route http server shaped like the dsh WebServer contract. */
 class RouterServer {
   readonly server = createServer((req, res) => this.dispatch(req, res))
   private readonly exact = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>()
+  /** Origin of the running listener; set by {@link serve} once it is ready. */
+  private origin: string | null = null
+  /** Live sockets, tracked so teardown can destroy keep-alive connections. */
+  private readonly sockets = new Set<Socket>()
+
+  constructor() {
+    this.server.on('connection', (socket: Socket) => {
+      this.sockets.add(socket)
+      socket.on('close', () => { this.sockets.delete(socket) })
+    })
+  }
 
   register(route: {
     kind: 'exact'
@@ -38,9 +82,27 @@ class RouterServer {
     return () => { this.exact.delete(route.path) }
   }
 
+  /** Base URL of the listening server; throws while it is not ready. */
   get url(): string {
-    const address = this.server.address() as AddressInfo
-    return `http://127.0.0.1:${address.port}`
+    if (this.origin === null) {
+      throw new Error('the test server is not listening yet — call serve(router) first')
+    }
+    return this.origin
+  }
+
+  /** Record the assigned port once the listener is up. */
+  markReady(): void {
+    const address = this.server.address()
+    if (address === null || typeof address === 'string') {
+      throw new Error('the test server has no bound TCP address')
+    }
+    this.origin = `http://127.0.0.1:${address.port}`
+  }
+
+  /** Drop every tracked socket (teardown must not wait on keep-alive). */
+  destroySockets(): void {
+    for (const socket of this.sockets) socket.destroy()
+    this.sockets.clear()
   }
 
   private dispatch(req: IncomingMessage, res: ServerResponse): void {
@@ -58,22 +120,86 @@ class RouterServer {
   }
 }
 
-async function listen(server: Server): Promise<void> {
-  await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', () => resolve()) })
+/**
+ * Listen on an ephemeral port (0) and resolve only once the server really
+ * accepts connections. A bound listener is not instantly connectable on every
+ * platform, so the readiness step is a real request rather than a callback.
+ */
+async function serve(router: RouterServer): Promise<void> {
+  servers.push(router.server)
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => { reject(error) }
+    router.server.once('error', onError)
+    router.server.listen(0, '127.0.0.1', () => {
+      router.server.off('error', onError)
+      resolve()
+    })
+  })
+  router.markReady()
+  const deadline = Date.now() + SERVE_READY_TIMEOUT_MS
+  for (;;) {
+    try {
+      await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, { method: 'OPTIONS' })
+      return
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw new Error(`the ephemeral test server did not become ready in time: ${String(error)}`)
+      }
+      await delay(20)
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => { setTimeout(resolve, ms) })
+}
+
+/** Whether a thrown fetch error is worth retrying (transient transport). */
+function isRetryableFetchError(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: string } } | null)?.cause
+  const code = typeof cause?.code === 'string' ? cause.code : undefined
+  return code === 'ECONNRESET'
+    || code === 'ECONNREFUSED'
+    || code === 'EPIPE'
+    || code === 'UND_ERR_SOCKET'
+    || code === 'ENOTFOUND'
 }
 
 type WireResult =
   | { ok: true; value: unknown }
   | { ok: false; error: { code: string; message: string; details: object } }
 
+/**
+ * One HTTP round trip with a bounded retry: an ephemeral port avoids conflicts,
+ * and the retry absorbs the residual "socket not reusable yet" window a fast
+ * sequence of local requests can hit under load.
+ */
+async function request(
+  router: RouterServer,
+  init: { method: string; body?: unknown },
+): Promise<{ status: number; text: string }> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < REQUEST_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
+        method: init.method,
+        headers: { 'content-type': 'application/json' },
+        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      })
+      return { status: response.status, text: await response.text() }
+    } catch (error) {
+      lastError = error
+      if (!isRetryableFetchError(error)) throw error
+      await delay(25 * (attempt + 1))
+    }
+  }
+  throw new Error(`the local channel request did not succeed after ${REQUEST_ATTEMPTS} attempts: ${String(lastError)}`)
+}
+
 async function post(router: RouterServer, body: unknown, expectStatus = 200): Promise<{ status: number; body: WireResult }> {
-  const response = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  const response = await request(router, { method: 'POST', body })
   expect(response.status).toBe(expectStatus)
-  return { status: response.status, body: await response.json() as WireResult }
+  return { status: response.status, body: JSON.parse(response.text) as WireResult }
 }
 
 async function call(router: RouterServer, method: string, args: object): Promise<WireResult> {
@@ -112,7 +238,6 @@ function routeFor(options: {
   } as unknown as import('../lib/types/host/control/gateway.js').MarketControllerGatewayDeps
   const gateway = new MarketControllerGateway(ctx, deps)
   const router = new RouterServer()
-  servers.push(router.server)
   const dispose = registerMarketWebChannel(router, gateway)
   return { router, bed, engines, dispose: () => { dispose() } }
 }
@@ -120,20 +245,20 @@ function routeFor(options: {
 describe('market control web channel (M1 source ops round trip)', () => {
   it('serves the activation status over HTTP', async () => {
     const { router, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
     const active = await call(router, 'status', {})
     expect(active).toMatchObject({ ok: true, value: { configured: true, repositoryPath: '/repo' } })
     dispose()
 
     const idleRouter = routeFor({ idle: true }).router
-    await listen(idleRouter.server)
+    await serve(idleRouter)
     const idle = await call(idleRouter, 'status', {})
     expect(idle).toMatchObject({ ok: true, value: { configured: false, repositoryPath: null } })
   })
 
   it('serves listManaged / setEnabled / double-confirmed remove over HTTP', async () => {
     const { router, bed, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
     const record = bed.records.seed('gh-web', { enabled: false, localDirName: 'web', entry: 'plugin.mjs' })
 
     const listed = await call(router, 'listManaged', {})
@@ -164,7 +289,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('serves search and preview/install with the double-confirmed token protocol', async () => {
     const { router, engines, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
     engines.searchResult = {
       totalCount: 1,
       items: [{
@@ -234,7 +359,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('serves v2 refKind preview/install with per-tuple keys over HTTP', async () => {
     const { router, engines, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
 
     // A branch and a tag of the same name preview as two independent plugins.
     const branch = await call(router, 'previewInstall', {
@@ -287,7 +412,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('rejects an invalid refKind value with a 400 transport envelope', async () => {
     const { router, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
     for (const method of ['previewInstall', 'install']) {
       const refused = await post(router, {
         method,
@@ -306,7 +431,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('serves repositoryDetail over HTTP with README-404 tolerance', async () => {
     const { router, engines, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
 
     const detail = await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
     expect(detail.ok).toBe(true)
@@ -339,7 +464,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('surfaces market/idle and bad-argument branches over HTTP', async () => {
     const { router, dispose } = routeFor({ idle: true })
-    await listen(router.server)
+    await serve(router)
 
     const idleSearch = await call(router, 'search', { keywords: 'demo' })
     expect(idleSearch.ok).toBe(false)
@@ -364,9 +489,9 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(missingDetail.body.ok).toBe(false)
     if (!missingDetail.body.ok) expect(missingDetail.body.error.code).toBe('market/bad-request')
 
-    const get = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, { method: 'GET' })
+    const get = await request(router, { method: 'GET' })
     expect(get.status).toBe(405)
-    expect((await get.json() as WireResult).ok).toBe(false)
+    expect((JSON.parse(get.text) as WireResult).ok).toBe(false)
 
     const unknown = await post(router, { method: 'deleteEverything', args: {} }, 400)
     expect(unknown.body.ok).toBe(false)
@@ -388,7 +513,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
     })
     const { router, engines, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
     engines.installedEntry = null
-    await listen(router.server)
+    await serve(router)
 
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
@@ -435,7 +560,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
     })
     const { router, engines, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
     engines.installedEntry = 'index.js'
-    await listen(router.server)
+    await serve(router)
 
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     const token = (review as { ok: true; value: { confirmToken: string; classification: string } }).value
@@ -465,7 +590,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
       code: 'github/not-found',
     }
     const { router, dispose } = routeFor({ previewResult: degradedNoManifest })
-    await listen(router.server)
+    await serve(router)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
     const value = (review as {
@@ -489,7 +614,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
       error: new MarketError('market/llm-bad-output', 'the model returned prose, not JSON'),
     })
     const { router, dispose } = routeFor({ analysis, previewResult: degradedNoManifest })
-    await listen(router.server)
+    await serve(router)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
     const value = (review as {
@@ -503,7 +628,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('answers market/not-loadable over HTTP when enabling a skills record', async () => {
     const { router, bed, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
     const record = bed.records.seed('gh-skills-pack', {
       enabled: false,
       localDirName: 'skills-pack',
@@ -531,7 +656,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
 
   it('passes an install/entry-missing failure through over HTTP', async () => {
     const { router, engines, dispose } = routeFor()
-    await listen(router.server)
+    await serve(router)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
     const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
@@ -556,7 +681,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
       result: fakeDistribution({ classification: 'other', reason: 'never' }),
     })
     const { router, dispose } = routeFor({ analysis })
-    await listen(router.server)
+    await serve(router)
     const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
     expect(review.ok).toBe(true)
     const value = (review as { ok: true; value: { classification: string; analysis?: unknown } }).value

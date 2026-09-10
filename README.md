@@ -32,9 +32,10 @@ owns exactly one Cordis instance at runtime.
 | `src/types.ts` | Cross-face shared types (`import type` only) | framework |
 | `scripts/install-profile.mjs` | Idempotent profile self-load recipe (junction/copy + the single patch row) | framework |
 | `scripts/verify-load.mjs` | Demo verification: real Loader activation of the single row + artifact checks | framework |
+| `scripts/check-encoding.mjs` | Encoding/whitespace pre-flight over tracked text files (invalid UTF-8, C1, cp1252 mojibake, U+FFFD, `git diff --check`) | framework |
 | `tests/` | Vitest suites for all modules (business tests live with their module owners) | all modules |
 | `vitest.config.ts` + `tsconfig.test.json` | Test gate: vitest keeps its defaults (only `.lizhu_env/**` is excluded from collection) and `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` + the root configs | framework |
-| `.lizhu_env/` | Local Playwright browser-spec environment: **specs + harness config tracked**, only run artifacts ignored (`.gitignore`) | framework |
+| `.lizhu_env/` | Local test environment (Playwright specs + harness config + artifacts): **not committed at all**; vitest excludes it from collection | framework |
 
 ### Row contract (single-row convergence)
 
@@ -59,9 +60,15 @@ Requires Node `^22.19.0 || >=24` and pnpm.
 pnpm install
 pnpm build        # tsc -b (types to lib/types) && tsdown (lib/index.js, lib/client.js)
 pnpm verify       # demo profile + real single-row Loader activation
-pnpm test         # tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
+pnpm test         # check-encoding && tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
+pnpm check:encoding   # the pre-flight alone (also the first step of `test`)
 ```
 
+- `node scripts/check-encoding.mjs` runs first because it is the cheapest gate
+  (a text scan of the tracked corpus) and it catches a defect class no compiler
+  can see: invalid UTF-8, C1 control characters, cp1252 mojibake and `U+FFFD`,
+  plus `git diff --check`-style whitespace. Warnings (UTF-8 BOM, blank line at
+  end of file) are printed but never fail the run.
 - `tsc -b` type-checks both leaves and emits `lib/types`.
 - `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` (which spans both
   faces, so that project has DOM + React JSX and node ambient types at once)
@@ -80,29 +87,51 @@ pnpm test         # tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
 
 ### Local test environment (`.lizhu_env/`)
 
-`.lizhu_env/` is a **local** browser-spec environment (an independent Playwright
-E2E checkout). Its **sources and harness config are version-controlled** — the
-Playwright spec (`e2e/tests/*.spec.ts`), `playwright.config.ts`,
-`vite.config.mts`, `main.tsx`, `index.html` and the package manifests — while
-**only its run artifacts are ignored** (`.gitignore`: `e2e/node_modules/`,
-`e2e/test-results/`, `e2e/shots/`, `e2e/report.json`, `*.log`, `probe.txt`).
-The ignore rules are artifact-level rather than a `.lizhu_env/` blanket, so a
-new spec file shows up in `git status` right away.
+`.lizhu_env/` is a **local test-environment directory that is not committed at
+all** — Playwright specs, harness config (`playwright.config.ts`,
+`vite.config.mts`, `main.tsx`, `index.html`), package manifests and run
+artifacts alike. `.gitignore` ignores the directory wholesale (`.lizhu_env/`),
+so nothing inside it is version-controlled; `git rm -r --cached .lizhu_env` was
+run once to drop the files that had been added, keeping the working tree
+untouched.
 
-`npm test` never collects those specs: `vitest.config.ts` excludes
-`.lizhu_env/**` from collection. Tracking the spec and excluding it from the
-unit run are two independent decisions and do not conflict — version control
-decides what is stored, the vitest `exclude` decides what the unit runner
-collects. The exclusion is required (a collected browser spec fails with
-`Playwright Test did not expect test.beforeEach() to be called here`, because
-its `@playwright/test` copy differs from anything the package itself would
-resolve), and it is also not a substitute for version control: the same file is
-both tracked and uncollected. `tsconfig.test.json` covers `tests/**` and the
-root configs only, so the browser specs are not type-checked either.
+`vitest.config.ts` keeps excluding `.lizhu_env/**` from collection. Being
+ignored by git does not make a directory invisible to the unit runner — vitest
+walks the filesystem, not the index — so without that `exclude` the browser
+specs under `.lizhu_env/e2e/tests/` would be collected and the run would fail
+with `Playwright Test did not expect test.beforeEach() to be called here` (their
+`@playwright/test` copy has nothing to do with anything this package resolves).
+The two settings therefore do different jobs and both stay: `.gitignore` keeps
+the local environment out of the repository, and the vitest `exclude` keeps it
+out of the test run. `tsconfig.test.json` covers `tests/**` and the root configs
+only, so those specs are not type-checked either.
 
 Run them from `.lizhu_env/e2e/` itself (`npm install`,
 `npx playwright install chromium`, then `npx playwright test`); each spec's
-header documents its own setup.
+header documents its own setup. Because the directory is local-only, treat it as
+disposable: nothing in it can be shared through the repository.
+
+## Process conventions
+
+- **A spec file has exactly one writer.** The module that owns a file is the only
+  one that edits it; when a change genuinely spans modules, the owning module
+  executes it or the plan states the ownership explicitly before the work starts.
+  This exists because cross-module edits have already caused real damage here
+  (a module rewrote another module's spec, and a PowerShell round-trip through a
+  spec file silently re-encoded it).
+- **Run the encoding/whitespace gate before committing.** It is the first step of
+  `npm test` (`node scripts/check-encoding.mjs`); run it standalone with
+  `npm run check:encoding`. It scans tracked text files for invalid UTF-8, C1
+  control characters, cp1252 mojibake and the `U+FFFD` replacement character,
+  plus `git diff --check`-style whitespace violations. When it reports a file
+  outside your module, report it — do not fix it.
+- **When editing text files, never let a tool re-encode them.** Write with the
+  editor/file tools, and if a shell is unavoidable read and write raw bytes with
+  an explicit UTF-8 (no BOM) encoding. This is the setup for the accident the
+  gate above exists to catch.
+- **Plans and specs must match the actual delta.** A plan states what will
+  change and the module spec is updated to what did change; a summary that claims
+  more (or less) than the diff is a defect to fix, not a wording detail.
 
 ## Profile self-load (development recipe)
 
