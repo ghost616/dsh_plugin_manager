@@ -9,8 +9,14 @@
 
 /** Simplified Chinese dictionary and key source of truth. */
 export const zh = {
-  /** Plugins-section tab label. */
-  tab: '插件管理',
+  /** Settings-navigation label of the whole GitHub-plugin page. */
+  tab: 'GitHub 插件',
+  /** Accessible name of the page's own tab strip. */
+  tabsLabel: '插件市场视图',
+  /** In-page tab: the local plugin source repository. */
+  tabLocal: '本地仓库',
+  /** In-page tab: GitHub search/download. */
+  tabGithub: 'GitHub',
   /** Whole-page/list loading state. */
   loading: '正在读取已管理插件…',
   /** Whole-list load failure (channel unreachable or a wire failure). */
@@ -68,7 +74,7 @@ export const zh = {
   /** GitHub search submit button. */
   searchButton: '搜索',
   /** Search zone idle hint. */
-  searchIdle: '输入关键词搜索 GitHub 上的 dsh 插件，找到后可直接安装到本地插件源仓库。',
+  searchIdle: '输入关键词搜索 GitHub 上的 dsh 插件，找到后可下载到本地插件源仓库。',
   /** Search in-flight state. */
   searching: '正在搜索…',
   /** Search completed with zero hits. */
@@ -85,11 +91,7 @@ export const zh = {
   githubNotFound: 'GitHub 仓库不存在或已删除。',
   /** Search results heading. */
   searchResults: '搜索结果',
-  /** Top-level button opening the GitHub browse modal. */
-  openMarket: '打开 GitHub',
-  /** GitHub browse modal title. */
-  marketDialogTitle: 'GitHub 插件',
-  /** Detail-view title inside the GitHub browse modal. */
+  /** Detail-view title inside the GitHub tab. */
   detailTitle: '仓库详情',
   /** Back-to-results action of the detail view. */
   detailBack: '返回',
@@ -115,8 +117,8 @@ export const zh = {
   readmeHeading: 'README',
   /** Placeholder when the repository has no README. */
   noReadme: '该仓库没有 README。',
-  /** Badge of an already-installed search result row. */
-  installedBadge: '已安装',
+  /** Badge of an already-downloaded search result row (its record exists). */
+  installedBadge: '已下载',
   /** Previous search page. */
   prevPage: '上一页',
   /** Next search page. */
@@ -133,16 +135,16 @@ export const zh = {
   starsLabel: '{count} 星',
   /** Last-update line of a search result. */
   updatedLabel: '更新于 {date}',
-  /** Install action of an unmanaged result. */
-  installButton: '安装',
+  /** Download action of an unmanaged result. */
+  downloadButton: '下载',
   /** Update action of an already-managed result. */
   updateButton: '更新',
   /** Managed list section heading. */
   managedHeading: '已管理插件',
   /** Row action opening the two-step removal flow. */
   removeButton: '删除',
-  /** Install confirmation dialog title. */
-  installDialogTitle: '安装插件',
+  /** Download confirmation dialog title. */
+  downloadDialogTitle: '下载插件',
   /** Declared-dependency section title. */
   depsTitle: '声明依赖',
   /** dependencies list label. */
@@ -152,17 +154,17 @@ export const zh = {
   /** Empty dependency list placeholder. */
   depsEmpty: '无',
   /** Overwrite notice shown when the reviewed plugin is already managed. */
-  overwriteNotice: '该插件已管理，安装将覆盖其本地源码目录；启停记录保留。',
-  /** Degraded-preview notice (manifest unreadable but install possible). */
-  degradedNotice: '依赖清单不可读（{code}），仍可继续安装。',
+  overwriteNotice: '该插件已管理，下载将覆盖其本地源码目录；启停记录保留。',
+  /** Degraded-preview notice (manifest unreadable but download possible). */
+  degradedNotice: '依赖清单不可读（{code}），仍可继续下载。',
   /** Preview (manifest review) failure. */
   previewFailed: '无法读取该仓库的插件清单。',
-  /** Install in-flight state. */
-  installing: '正在下载并安装…',
-  /** Install success message. */
-  installDone: '安装完成。插件默认停用，可在已管理列表中启用。',
-  /** Install failure heading. */
-  installFailed: '安装失败。',
+  /** Download in-flight state. */
+  downloading: '正在下载…',
+  /** Download success message. */
+  downloadDone: '下载完成。插件默认停用，可在已管理列表中启用。',
+  /** Download failure heading. */
+  downloadFailed: '下载失败。',
   /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: '正在检查该仓库并分析可否安装…',
   /** Analysis refusal of a plugin-shaped checkout that needs a build first. */
@@ -214,7 +216,10 @@ export type MarketManageLocaleKey = keyof typeof zh
 
 /** English dictionary checked against the Chinese key set. */
 export const en: Record<MarketManageLocaleKey, string> = {
-  tab: 'Managed plugins',
+  tab: 'GitHub plugins',
+  tabsLabel: 'Plugin market views',
+  tabLocal: 'Local repository',
+  tabGithub: 'GitHub',
   loading: 'Reading managed plugins…',
   error: 'Plugins are temporarily unavailable.',
   retry: 'Retry',
@@ -243,7 +248,7 @@ export const en: Record<MarketManageLocaleKey, string> = {
   idleBody: 'Add Config.repositoryPath to the plugin-market-host row in the dsh profile cordis.patch.yml, pointing at a local third-party plugin source repository, then restart dsh.',
   githubSearch: 'Search GitHub for dsh plugins',
   searchButton: 'Search',
-  searchIdle: 'Type a keyword to search dsh plugins on GitHub, then install one into the local plugin source repository.',
+  searchIdle: 'Type a keyword to search dsh plugins on GitHub, then download one into the local plugin source repository.',
   searching: 'Searching…',
   searchEmpty: 'No matching plugins found.',
   searchFailed: 'Search failed.',
@@ -252,8 +257,6 @@ export const en: Record<MarketManageLocaleKey, string> = {
   githubAuthError: 'GitHub request rejected (auth problem).',
   githubNotFound: 'The GitHub repository was not found or has been removed.',
   searchResults: 'Search results',
-  openMarket: 'Browse GitHub',
-  marketDialogTitle: 'GitHub plugins',
   detailTitle: 'Repository details',
   detailBack: 'Back',
   detailLoading: 'Loading repository details…',
@@ -267,7 +270,7 @@ export const en: Record<MarketManageLocaleKey, string> = {
   tagsTitle: 'Tags',
   readmeHeading: 'README',
   noReadme: 'This repository has no README.',
-  installedBadge: 'Installed',
+  installedBadge: 'Downloaded',
   prevPage: 'Previous page',
   nextPage: 'Next page',
   pagination: 'Page {current} of {total} · {count} results',
@@ -276,21 +279,21 @@ export const en: Record<MarketManageLocaleKey, string> = {
   repoLinkLabel: 'Open on GitHub',
   starsLabel: '{count} stars',
   updatedLabel: 'Updated {date}',
-  installButton: 'Install',
+  downloadButton: 'Download',
   updateButton: 'Update',
   managedHeading: 'Managed plugins',
   removeButton: 'Remove',
-  installDialogTitle: 'Install plugin',
+  downloadDialogTitle: 'Download plugin',
   depsTitle: 'Declared dependencies',
   depsLabel: 'dependencies',
   peerDepsLabel: 'peerDependencies',
   depsEmpty: 'None',
-  overwriteNotice: 'This plugin is already managed; installing overwrites its local sources and keeps its enablement.',
-  degradedNotice: 'Dependency list unreadable ({code}); you can still install.',
+  overwriteNotice: 'This plugin is already managed; downloading overwrites its local sources and keeps its enablement.',
+  degradedNotice: 'Dependency list unreadable ({code}); you can still download.',
   previewFailed: 'Could not read the plugin manifest.',
-  installing: 'Downloading and installing…',
-  installDone: 'Installed. The plugin is disabled by default; enable it from the managed list.',
-  installFailed: 'Install failed.',
+  downloading: 'Downloading…',
+  downloadDone: 'Downloaded. The plugin is disabled by default; enable it from the managed list.',
+  downloadFailed: 'Download failed.',
   previewing: 'Inspecting the repository and analyzing whether it can be installed…',
   analysisKindBuild: 'This repository looks like a dsh plugin, but has no ready-to-load entry; build it before installing.',
   analysisKindSkills: 'This repository is a skills/instructions pack, not an installable dsh plugin.',

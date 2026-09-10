@@ -1,15 +1,18 @@
 /**
  * dsh-plugin-market browser half: the localized plugin-market settings page
- * (M1: repository status, GitHub search/install, managed roster).
+ * (repository status, GitHub search/download, managed roster).
  *
  * Activation contract:
  * - Requires the browser platform services `slots` (SlotRegistry) and
  *   `locale` (LocaleRuntime); the row loads only while both are live.
  * - Registers its dictionaries under one namespace, then contributes one
- *   `settings.plugins.tab` list entry (id `market`) behind the slot's
- *   declaration. Registration and unload are effects: the dictionaries are
- *   bound to this fiber and the tab rides `ctx.slots.inject`, so a Plugins
- *   section remount re-registers the tab and an unload removes it.
+ *   top-level `settings.section` page (id `market`) behind the settings
+ *   shell's declaration. The page owns its own two tabs in-page (local
+ *   repository / GitHub), so nothing is contributed to `settings.plugins.tab`
+ *   and no second entry point appears under Plugins. Registration and unload
+ *   are effects: the dictionaries are bound to this fiber and the page rides
+ *   `ctx.slots.inject`, so a settings-shell remount re-registers the page and
+ *   an unload removes it.
  * - The channel is never touched at apply time: only closures are installed
  *   and the tab calls the control service lazily through the web channel
  *   (`src/client/channel.ts`), branching on `ok`/`code` at the call site.
@@ -20,7 +23,9 @@ import type { Context } from '@deepseek-ai/cordis'
 // contract (these imports carry zero runtime bytes across the client edge).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// The settings slot contract: `settings.section` and the owner share a section
+// receives (the shell's `close` affordance).
+import type { SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   GitHubSearchPage,
@@ -57,10 +62,13 @@ import {
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Copy of the plugin-market managed-plugins tab. */
+    /** Copy of the plugin-market settings page. */
     'settings.plugins.market': MarketManageLocaleKey
   }
 }
+
+/** The settings page's owner share (the settings shell supplies `close`). */
+export type MarketSectionOwnerProps = SettingsSectionOwnerProps
 
 /** Dictionary namespace owned by the plugin-market UI. */
 export const NS = 'settings.plugins.market'
@@ -68,7 +76,7 @@ export const NS = 'settings.plugins.market'
 /** Browser platform services required by this contribution. */
 export const inject = ['slots', 'locale']
 
-/** Contribute the lazy managed-plugins tab to the Plugins settings section. */
+/** Contribute the lazy GitHub-plugin page to the settings navigation. */
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-market: dictionaries')
 
@@ -122,10 +130,14 @@ export function apply(ctx: Context): void {
     install: installRecord,
   })
 
-  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab',
+  // One top-level settings page; it is the only entry point of this plugin
+  // (the Plugins section keeps owning its own tabs, so no tab is registered
+  // there). Ordered right after Plugins: both manage the same plugin roster,
+  // this page through the GitHub side of it.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
     id: 'market',
-    order: 20,
+    order: 16,
     label: () => t('tab'),
     locale: NS,
     inject: injected,

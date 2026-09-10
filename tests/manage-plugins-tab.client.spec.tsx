@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Component spec of the managed-roster part of the plugin-market page:
- * status header, enable toggles, roster states, and unmount hygiene.
+ * Component spec of the plugin-market settings page's local-repository tab:
+ * the page-level tab strip, status header, enable toggles, roster states, and
+ * unmount hygiene.
  */
 
 import { act } from 'react'
@@ -14,6 +15,7 @@ import { MarketCallFailure } from '../src/client/channel.ts'
 import { ManagePluginsTab } from '../src/client/ManagePluginsTab.tsx'
 import {
   makeList,
+  makeSearchPage,
   makeTranslator,
   makeView,
   managePageHarness,
@@ -71,6 +73,94 @@ function rows(host: HTMLElement): NodeListOf<HTMLElement> {
 function toggles(host: HTMLElement): NodeListOf<HTMLButtonElement> {
   return host.querySelectorAll<HTMLButtonElement>('[data-plugin-toggle]')
 }
+
+describe('ManagePluginsTab page tabs', () => {
+  it('renders the two localized tabs over the panels, landing on the local repository', async () => {
+    const { props } = managePageHarness({
+      list: vi.fn(async () => makeList([{ key: 'gh-a', repository: 'octocat/demo-plugin', enabled: false }])),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    const tablist = host.querySelector('[role="tablist"]')
+    expect(tablist?.getAttribute('aria-label')).toBe(zh.tabsLabel)
+    const tabs = Array.from(host.querySelectorAll<HTMLButtonElement>('[data-market-tab]'))
+    expect(tabs.map(tab => tab.getAttribute('data-market-tab'))).toEqual(['local', 'github'])
+    expect(tabs.map(tab => tab.textContent)).toEqual([zh.tabLocal, zh.tabGithub])
+    expect(tabs[0]!.getAttribute('aria-selected')).toBe('true')
+    expect(tabs[1]!.getAttribute('aria-selected')).toBe('false')
+    // Only the selected tab is in the tab order (arrow keys move between them).
+    expect(tabs[0]!.tabIndex).toBe(0)
+    expect(tabs[1]!.tabIndex).toBe(-1)
+
+    const panels = Array.from(host.querySelectorAll<HTMLElement>('[data-market-panel]'))
+    expect(panels.map(panel => panel.getAttribute('data-market-panel'))).toEqual(['local', 'github'])
+    expect(panels[0]!.hidden).toBe(false)
+    expect(panels[1]!.hidden).toBe(true)
+    expect(panels[0]!.getAttribute('aria-labelledby')).toBe(tabs[0]!.id)
+    // The local repository owns the landed panel: its roster is up.
+    expect(host.querySelector('[data-manage-tab]')).not.toBeNull()
+    expect(host.querySelector('[data-plugin-row]')).not.toBeNull()
+  })
+
+  it('switches to the GitHub tab, browsing once, and keeps its results while hidden', async () => {
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    // The GitHub panel mounts only when its tab is first selected.
+    expect(search).not.toHaveBeenCalled()
+
+    const tab = (id: string): HTMLButtonElement =>
+      host.querySelector<HTMLButtonElement>(`[data-market-tab="${id}"]`)!
+    await click(tab('github'))
+    await flush()
+
+    expect(search).toHaveBeenCalledTimes(1)
+    expect(search).toHaveBeenCalledWith('', 1)
+    expect(tab('github').getAttribute('aria-selected')).toBe('true')
+    expect(host.querySelector<HTMLElement>('[data-market-panel="github"]')!.hidden).toBe(false)
+    expect(host.querySelector<HTMLElement>('[data-market-panel="local"]')!.hidden).toBe(true)
+    expect(host.querySelector('[data-github-panel] [data-market-card]')?.textContent).toContain('helper')
+
+    // Switching back hides the GitHub panel without unmounting it: the results
+    // (and the auto-browse it already ran) survive the round trip.
+    await click(tab('local'))
+    await flush()
+    expect(host.querySelector<HTMLElement>('[data-market-panel="github"]')!.hidden).toBe(true)
+    expect(host.querySelector('[data-market-panel="github"] [data-market-card]')).not.toBeNull()
+    expect(search).toHaveBeenCalledTimes(1)
+
+    await click(tab('github'))
+    await flush()
+    expect(host.querySelector<HTMLElement>('[data-market-panel="github"]')!.hidden).toBe(false)
+    expect(search).toHaveBeenCalledTimes(1)
+  })
+
+  it('moves between the tabs with the arrow, Home and End keys', async () => {
+    const { props } = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    const local = host.querySelector<HTMLButtonElement>('[data-market-tab="local"]')!
+    const github = host.querySelector<HTMLButtonElement>('[data-market-tab="github"]')!
+    await pressKey(local, 'ArrowRight')
+    expect(github.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(github)
+    await pressKey(github, 'Home')
+    expect(local.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(local)
+    await pressKey(local, 'End')
+    expect(github.getAttribute('aria-selected')).toBe('true')
+    await pressKey(github, 'ArrowLeft')
+    expect(local.getAttribute('aria-selected')).toBe('true')
+    // An unrelated key leaves the selection alone.
+    await pressKey(local, 'a')
+    expect(local.getAttribute('aria-selected')).toBe('true')
+  })
+})
 
 describe('ManagePluginsTab managed roster', () => {
   it('shows the configured repository, then renders the roster with states', async () => {

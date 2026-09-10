@@ -224,7 +224,7 @@
   white-space: nowrap;
   clip-path: inset(50%);
 }
-/* --- full page layout --- */
+/* --- settings page skeleton and its in-page tabs --- */
 
 .page {
   display: flex;
@@ -232,6 +232,112 @@
   gap: 14px;
   width: 100%;
   max-width: 860px;
+}
+
+/* Compact tab strip, mirroring the dsh Plugins section: the active tab is
+   marked by an underline, never by a filled surface. */
+.tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 22px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  margin-top: 2px;
+}
+
+.tab {
+  position: relative;
+  border: 0;
+  padding: 7px 1px 9px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.tab:hover,
+.tab[data-active='true'] {
+  color: var(--dsw-alias-label-primary);
+}
+
+.tab[data-active='true']::after,
+.tab:focus-visible::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--dsw-alias-label-primary);
+  content: '';
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.panel {
+  min-width: 0;
+  padding-top: 2px;
+}
+
+/* Local-repository tab body: status header over the managed roster. */
+.localPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 760px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* GitHub tab body: fixed search/detail header over the scrolling result zone,
+   with the pagination footer below it. */
+.githubPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 760px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Market result zone of the GitHub tab: the search header (above) and the
+   pagination (below) stay put; only this middle zone scrolls, so a long result
+   list never pushes the pagination off the page. */
+.marketScroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Comfortable breathing room between the content and the right-edge
+     scrollbar. The padding sits outside the bar's gutter (never underneath
+     it) for both the default 8px WebKit bar and Firefox's thin bar; the width
+     comes from ui-theme's --dsh-scrollbar-width instead of a hardcoded px. */
+  padding-right: var(--dsh-scrollbar-width, 8px);
+}
+
+/* Detail-view header row: the back control sits before the detail title. */
+.detailToolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.detailToolbar strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
 }
 
 .repoHeader {
@@ -456,12 +562,6 @@
   box-shadow: var(--dsw-elevation-stroke);
 }
 
-/* Market dialog variant: its middle result zone scrolls (three-zone layout),
-   so the dialog shell itself never scrolls as a whole. */
-.marketDialog {
-  overflow: hidden;
-}
-
 .dialogHeader {
   display: flex;
   align-items: baseline;
@@ -477,25 +577,6 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   color: var(--dsw-alias-label-secondary);
-}
-
-/* Three-zone market dialog: the search header (above) and the pagination
-   (below) are fixed; only this middle result zone scrolls, so the dialog
-   itself never scrolls as a whole. */
-.marketScroll {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: 46vh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  /* Comfortable breathing room between the content and the right-edge
-     scrollbar. The padding sits outside the bar's gutter (never underneath
-     it) for both the default 8px WebKit bar and Firefox's thin bar; the width
-     comes from ui-theme's --dsh-scrollbar-width instead of a hardcoded px. */
-  padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
 /* Search error zone inside the scroll body: localized message + retry. */
@@ -673,49 +754,8 @@
   text-align: center;
 }
 
-/* --- draggable GitHub dialog header + dsh settings-modal close button --- */
+/* --- pagination page-jump controls --- */
 
-/* Title row as the drag handle: never start a drag from interactive children
-   (the close button), and skip text selection while grabbing. */
-.dragHandle {
-  align-items: center;
-  cursor: grab;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-/* Active drag: grabbing cursor over the whole dialog. */
-.marketDragging {
-  cursor: grabbing;
-  user-select: none;
-}
-
-/* Close button (dsh ui-primitives Modal .close chrome): 28x28 on a transparent
-   fill with an 8px rounded corner, label-secondary glyph (currentColor) and an
-   interactive hover tint — matches the modal close pattern exactly. */
-.dialogClose {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.dialogClose:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.dialogClose:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 2px;
-}
 .pageJump {
   display: flex;
   align-items: center;
@@ -743,24 +783,9 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
 }
 
-/* --- repository detail view (metadata + branch/tag install + README) --- */
+/* --- repository detail view (metadata + branch/tag download + README) --- */
 
-/* Title bar group of the detail state: the back control sits before the
-   dialog title, both outside the drag-handle's interactive children. */
-.dialogTitleRow {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.dialogTitleRow strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Detail content column inside the modal's scrolling zone. */
+/* Detail content column inside the GitHub tab's scrolling zone. */
 .detailBody {
   display: flex;
   flex-direction: column;

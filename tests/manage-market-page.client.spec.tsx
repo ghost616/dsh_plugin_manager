@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Component spec of the GitHub browse modal and the full managed-plugins
- * page: open button, in-dialog search, pagination, installed markers,
- * install entry, states, and close/unmount hygiene.
+ * Component spec of the GitHub tab of the plugin-market settings page:
+ * the in-page tab switch, in-tab search, pagination, downloaded markers,
+ * the repository detail view, the download review dialogs, states, and
+ * unmount hygiene.
  */
 
 import { act } from 'react'
@@ -85,12 +86,22 @@ function pageOf(page: number, items: SearchItemSeed[], totalCount: number) {
   return { totalCount, items: pageData.items }
 }
 
+/**
+ * Switch to the GitHub tab and return the tab's own panel. Every GitHub-tab
+ * assertion is scoped to this element: the page also carries the local
+ * repository tab, which owns a filter input of its own.
+ */
 async function openMarket(host: HTMLElement): Promise<HTMLElement> {
-  await click(host.querySelector('[data-open-market]'))
+  await click(host.querySelector('[data-market-tab="github"]'))
   await flush()
-  const dialog = host.querySelector('[data-dialog="market"]') as HTMLElement | null
-  if (dialog === null) throw new Error('market dialog did not open')
-  return dialog
+  return panelOf(host)
+}
+
+/** The GitHub tab's own panel (all GitHub-tab assertions stay inside it). */
+function panelOf(host: HTMLElement): HTMLElement {
+  const panel = host.querySelector('[data-github-panel]')
+  if (panel === null) throw new Error('the GitHub panel is not mounted')
+  return panel as HTMLElement
 }
 
 async function searchIn(dialog: HTMLElement, keywords: string): Promise<void> {
@@ -100,33 +111,34 @@ async function searchIn(dialog: HTMLElement, keywords: string): Promise<void> {
   await flush()
 }
 
-describe('ManagePluginsTab GitHub browse modal', () => {
-  it('hides the browse button while the market is idle', async () => {
+describe('ManagePluginsTab GitHub tab', () => {
+  it('keeps the local repository content on its own tab while the market is idle', async () => {
     const { props } = managePageHarness({ status: vi.fn(async () => makeStatus(false)) })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
+    // The landing tab is the local repository, whose idle state guides the
+    // configuration; the GitHub tab is reachable from the strip and carries no
+    // open-market button of its own.
     expect(host.querySelector('[data-open-market]')).toBeNull()
+    expect(host.querySelector('[data-market-tab="github"]')).not.toBeNull()
     expect(host.querySelector('[data-market-status="idle"]')).not.toBeNull()
   })
 
-  it('opens the modal with the browse button, auto-browses once, and closes it again', async () => {
+  it('browses automatically on the first switch to the GitHub tab', async () => {
     const { props, mocks } = managePageHarness()
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
 
-    const dialog = await openMarket(host)
-    expect(dialog.textContent).toContain(zh.marketDialogTitle)
-    // On mount with an empty box the dialog browses all dsh plugins once
-    // (empty keyword); the default mock returns no hits.
+    const panel = await openMarket(host)
+    // On mount with an empty box the tab browses all dsh plugins once (empty
+    // keyword); the default mock returns no hits.
     expect(mocks.search).toHaveBeenCalledTimes(1)
     expect(mocks.search).toHaveBeenCalledWith('', 1)
-    expect(dialog.querySelector('[data-market-empty]')).not.toBeNull()
-
-    await click(dialog.querySelector('[data-market-close]'))
-    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
+    expect(panel.querySelector('[data-market-empty]')).not.toBeNull()
+    expect(panel.querySelector('[data-detail-back]')).toBeNull()
   })
 
-  it('searches inside the dialog and renders result cards', async () => {
+  it('searches inside the tab and renders result cards', async () => {
     const search = vi.fn(async (_keywords: string, page: number) => pageOf(page, [
       {
         repository: 'octocat/demo-plugin',
@@ -220,8 +232,8 @@ describe('ManagePluginsTab GitHub browse modal', () => {
     expect(dialog.querySelector('[data-market-error]')?.textContent).toContain(zh.networkError)
   })
 })
-describe('ManagePluginsTab GitHub browse modal interactions', () => {
-  it('marks installed rows with a badge and keeps a details entry for every row', async () => {
+describe('ManagePluginsTab GitHub tab interactions', () => {
+  it('marks downloaded rows with a badge and keeps a details entry for every row', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-octocat-demo-plugin', repository: 'octocat/demo-plugin', enabled: false },
     ]))
@@ -239,7 +251,8 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     const installed = cards[0]!
     expect(installed.getAttribute('data-repository')).toBe('octocat/demo-plugin')
     expect(installed.querySelector('[data-installed]')?.textContent).toContain(zh.installedBadge)
-    // List rows no longer carry a direct install action: they open the detail
+    expect(zh.installedBadge).toBe('已下载')
+    // List rows never carry a direct download action: they open the detail
     // view, where the exact branch/tag is chosen.
     expect(installed.querySelector('[data-install-trigger]')).toBeNull()
     const details = installed.querySelector('[data-row-details]') as HTMLButtonElement
@@ -251,7 +264,7 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     expect((fresh.querySelector('[data-row-details]') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('installs a branch from the detail view through the versioned preview flow and re-marks it', async () => {
+  it('downloads a branch from the detail view through the versioned preview flow and re-marks it', async () => {
     let snapshot = makeList([])
     const list = vi.fn(async () => snapshot)
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
@@ -285,7 +298,7 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     expect(repositoryDetail).toHaveBeenCalledWith('acme/helper')
 
     // One merged dropdown encodes every ref with its kind; nothing is chosen
-    // on entry, so the single install action below stays disabled.
+    // on entry, so the single download action below stays disabled.
     const select = dialog.querySelector('[data-ref-select]')
     const installAction = dialog.querySelector('[data-ref-install]') as HTMLButtonElement
     expect(select).not.toBeNull()
@@ -295,6 +308,9 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await selectIn(select, 'branch:dev')
     await flush()
     expect(installAction.disabled).toBe(false)
+    // The action is a download: the ref is cloned into the local repository,
+    // never loaded from GitHub directly.
+    expect(installAction.textContent).toContain(zh.downloadButton)
     await click(installAction)
     await flush()
     const installDialog = dialog.querySelector('[data-dialog="install"]')
@@ -308,9 +324,9 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await flush()
     expect(dialog.querySelector('[data-dialog="install"]')).toBeNull()
 
-    // The roster reloaded; the installed dev ref is annotated inside the
-    // dropdown, and the still-selected action turns into an installed state.
-    // Switching to the untouched main branch re-enables a fresh install.
+    // The roster reloaded; the downloaded dev ref is annotated inside the
+    // dropdown, and the still-selected action turns into a downloaded state.
+    // Switching to the untouched main branch re-enables a fresh download.
     const devOption = select?.querySelector('option[data-ref-name="dev"]')
     expect(devOption?.getAttribute('data-ref-installed')).toBe('true')
     expect(devOption?.textContent).toContain(zh.installedBadge)
@@ -319,7 +335,7 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     await selectIn(select, 'branch:main')
     await flush()
     expect(installAction.disabled).toBe(false)
-    expect(installAction.textContent).toContain(zh.installButton)
+    expect(installAction.textContent).toContain(zh.downloadButton)
     expect(list).toHaveBeenCalledTimes(2)
   })
 
@@ -397,7 +413,7 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     expect(dialog.querySelector('[data-repreview]')).not.toBeNull()
   })
 
-  it('ignores a late search result after the modal closes', async () => {
+  it('ignores a late search result after the page unmounts', async () => {
     let settle: (page: unknown) => void = () => {}
     const search = vi.fn(() => new Promise(resolve => { settle = resolve }))
     const { props } = managePageHarness({ search })
@@ -406,13 +422,14 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     const dialog = await openMarket(host)
     await searchIn(dialog, 'agents')
 
-    await click(dialog.querySelector('[data-market-close]'))
+    const root = roots.pop()!
+    await act(async () => { root.unmount() })
     await act(async () => {
       settle(makeSearchPage([{ repository: 'acme/helper', name: 'helper' }]))
     })
     await flush()
-    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
-    expect(host.textContent).not.toContain('helper')
+    expect(host.textContent).toBe('')
+    host.remove()
   })
 
   it('keeps the newest keywords when an older request resolves late', async () => {
@@ -448,124 +465,8 @@ describe('ManagePluginsTab GitHub browse modal interactions', () => {
     expect(after?.getAttribute('data-repository')).toBe('acme/new')
   })
 })
-describe('ManagePluginsTab GitHub modal drag & close affordances', () => {
-  function dragRect(left: number, top: number, width: number, height: number): DOMRect {
-    return {
-      left,
-      top,
-      width,
-      height,
-      right: left + width,
-      bottom: top + height,
-      x: left,
-      y: top,
-      toJSON: () => ({}),
-    } as unknown as DOMRect
-  }
-
-  /** Dispatch one synthetic mouse event on a target inside act(). */
-  async function mouse(where: EventTarget, type: string, x: number, y: number): Promise<void> {
-    await act(async () => {
-      where.dispatchEvent(new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        clientX: x,
-        clientY: y,
-      }))
-    })
-  }
-
-  it('exposes the title bar as a drag handle and moves the dialog with the pointer', async () => {
-    const { props } = managePageHarness()
-    const host = await renderInto(<ManagePluginsTab {...props} />)
-    await flush()
-    const dialog = await openMarket(host)
-
-    const handle = dialog.querySelector('[data-drag-handle]')
-    expect(handle).not.toBeNull()
-
-    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect')
-      .mockReturnValue(dragRect(400, 250, 560, 400))
-    try {
-      await mouse(handle!, 'mousedown', 420, 280)
-      await mouse(window, 'mousemove', 470, 340)
-      expect(dialog.style.position).toBe('fixed')
-      expect(dialog.style.left).toBe('450px')
-      expect(dialog.style.top).toBe('310px')
-
-      // Release keeps the dragged origin (the dialog remembers its spot).
-      await mouse(window, 'mouseup', 470, 340)
-      expect(dialog.style.left).toBe('450px')
-    } finally {
-      spy.mockRestore()
-    }
-  })
-
-  it('clamps the dragged dialog inside the viewport', async () => {
-    const { props } = managePageHarness()
-    const host = await renderInto(<ManagePluginsTab {...props} />)
-    await flush()
-    const dialog = await openMarket(host)
-
-    const handle = dialog.querySelector('[data-drag-handle]')!
-    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect')
-      .mockReturnValue(dragRect(100, 100, 560, 400))
-    try {
-      await mouse(handle, 'mousedown', 120, 120)
-      // Far beyond the bottom-right corner: clamped to the viewport inset.
-      await mouse(window, 'mousemove', window.innerWidth + 10_000, window.innerHeight + 10_000)
-      expect(dialog.style.left).toBe(`${window.innerWidth - 560 - 8}px`)
-      expect(dialog.style.top).toBe(`${window.innerHeight - 400 - 8}px`)
-      // Far beyond the top-left corner: clamped to the minimum edge inset.
-      await mouse(window, 'mousemove', -10_000, -10_000)
-      expect(dialog.style.left).toBe('8px')
-      expect(dialog.style.top).toBe('8px')
-      await mouse(window, 'mouseup', -10_000, -10_000)
-    } finally {
-      spy.mockRestore()
-    }
-  })
-
-  it('never starts a drag from the close button and close still works', async () => {
-    const { props } = managePageHarness()
-    const host = await renderInto(<ManagePluginsTab {...props} />)
-    await flush()
-    const dialog = await openMarket(host)
-
-    const close = dialog.querySelector('[data-market-close]')!
-    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect')
-      .mockReturnValue(dragRect(400, 250, 560, 400))
-    try {
-      await mouse(close, 'mousedown', 400, 250)
-      await mouse(window, 'mousemove', 800, 600)
-      expect(dialog.style.position).toBe('')
-    } finally {
-      spy.mockRestore()
-    }
-
-    await click(dialog.querySelector('[data-market-close]'))
-    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
-  })
-
-  it('renders the dsh-chrome close button with a localized label and × glyph', async () => {
-    const { props } = managePageHarness()
-    const host = await renderInto(<ManagePluginsTab {...props} />)
-    await flush()
-    const dialog = await openMarket(host)
-
-    const close = dialog.querySelector('[data-market-close]')
-    expect(close).not.toBeNull()
-    expect(close?.getAttribute('aria-label')).toBe(zh.closeButton)
-    expect(close?.getAttribute('type')).toBe('button')
-    const glyph = close?.querySelector('svg')
-    expect(glyph).not.toBeNull()
-    expect(glyph?.getAttribute('aria-hidden')).toBe('true')
-    expect(glyph?.getAttribute('viewBox')).toBe('0 0 16 16')
-  })
-})
-describe('ManagePluginsTab GitHub modal auto browse & scroll zones', () => {
-  it('browses once per mount when the search box is empty', async () => {
+describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
+  it('browses once when the GitHub tab first mounts with an empty box', async () => {
     const search = vi.fn(async (_keywords: string, _page: number) => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
@@ -580,11 +481,12 @@ describe('ManagePluginsTab GitHub modal auto browse & scroll zones', () => {
     expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
     expect(dialog.textContent).toContain('helper')
 
-    // Closing and reopening mounts a fresh dialog, which browses once again.
-    await click(dialog.querySelector('[data-market-close]'))
+    // Leaving and re-entering the tab reuses the mounted panel: the search
+    // state (and the one auto-browse) survives instead of repeating.
+    await click(host.querySelector('[data-market-tab="local"]'))
+    await flush()
     dialog = await openMarket(host)
-    expect(search).toHaveBeenCalledTimes(2)
-    expect(search).toHaveBeenLastCalledWith('', 1)
+    expect(search).toHaveBeenCalledTimes(1)
     expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
   })
 
@@ -652,16 +554,19 @@ describe('ManagePluginsTab GitHub modal auto browse & scroll zones', () => {
     const scrollZone = dialog.querySelector('[data-market-scroll]')
     expect(scrollZone).not.toBeNull()
     expect(scrollZone?.querySelector('[data-market-results]')).not.toBeNull()
+    // The search form is a sibling of the scroll zone, never inside it: it
+    // stays visible while the result list scrolls under it.
     expect(scrollZone?.querySelector('[data-market-search-input]')).toBeNull()
     const pagination = dialog.querySelector('[data-pagination]')
     expect(pagination).not.toBeNull()
     expect(scrollZone?.contains(pagination)).toBe(false)
-    const form = dialog.querySelector('form')
+    const form = dialog.querySelector('[data-github-search]')
+    expect(form).not.toBeNull()
     expect(scrollZone?.contains(form)).toBe(false)
   })
 })
 
-describe('ManagePluginsTab GitHub modal page jump', () => {
+describe('ManagePluginsTab GitHub tab page jump', () => {
   const seeded = (page: number): SearchItemSeed[] => Array.from({ length: 10 }, (_, i) => ({
     repository: `acme/plugin-${String((page - 1) * 10 + i + 1)}`,
     name: `plugin-${String((page - 1) * 10 + i + 1)}`,
@@ -900,7 +805,7 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     await selectIn(select, 'tag:v2.0.0')
     await flush()
     expect(installAction.disabled).toBe(false)
-    expect(installAction.textContent).toContain(zh.installButton)
+    expect(installAction.textContent).toContain(zh.downloadButton)
 
     // legacy (version null): the repository is managed but no ref can match.
     await click(dialog.querySelector('[data-detail-back]'))
@@ -948,7 +853,7 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     await selectIn(select, 'branch:v1')
     await flush()
     expect(installAction.disabled).toBe(false)
-    expect(installAction.textContent).toContain(zh.installButton)
+    expect(installAction.textContent).toContain(zh.downloadButton)
     await selectIn(select, 'tag:v1')
     await flush()
     expect(installAction.disabled).toBe(true)
@@ -1388,7 +1293,8 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     expect(cancel).not.toBeNull()
     await click(cancel)
     expect(host.querySelector('[data-dialog="install"]')).toBeNull()
-    expect(host.querySelector('[data-dialog="market"]')).not.toBeNull()
+    // The GitHub tab (and its detail view) stays exactly where it was.
+    expect(panelOf(host).querySelector('[data-detail-view]')).not.toBeNull()
   })
 
   it('recovers any non-expired install failure through re-preview', async () => {
@@ -1436,35 +1342,34 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     expect(error?.textContent).not.toContain(zh.githubAuthError)
   })
 
-  it('focuses the market dialog, closes it on Escape, and wraps Tab inside it', async () => {
+  it('returns to the list from the detail view on Escape', async () => {
     const { repositoryDetail, search } = oneRepoHarness()
     const { props } = managePageHarness({ search, repositoryDetail })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
-
-    // Initial focus lands inside the dialog when it opens.
     const dialog = await openMarket(host)
-    expect(dialog.contains(document.activeElement)).toBe(true)
-
-    // Tab loop: Shift+Tab from the first control wraps to the last; Tab from
-    // the last wraps back to the first (the focus never leaves the dialog).
-    const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled])',
-    ))
-    expect(focusables.length).toBeGreaterThan(1)
-    focusables[0]!.focus()
-    await pressKey(focusables[0], 'Tab', true)
-    expect(document.activeElement).toBe(focusables[focusables.length - 1])
-    await pressKey(document.activeElement as HTMLElement, 'Tab')
-    expect(document.activeElement).toBe(focusables[0])
-
-    // Escape closes the market dialog (always dismissible).
-    await pressKey(dialog.querySelector('[data-market-close]'), 'Escape')
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
     await flush()
-    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
+    expect(dialog.querySelector('[data-detail-view]')).not.toBeNull()
+    const callsBefore = search.mock.calls.length
+
+    // The panel is plain in-page content now (no modal shell): Escape is its
+    // own shortcut back to the result list, leaving keywords and page alone.
+    await pressKey(dialog.querySelector('[data-detail-back]'), 'Escape')
+    await flush()
+    expect(dialog.querySelector('[data-detail-view]')).toBeNull()
+    expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
+    expect(search.mock.calls.length).toBe(callsBefore)
+
+    // Escape outside the detail view is a no-op: the tab stays as it is.
+    await pressKey(dialog.querySelector('[data-market-search-input]'), 'Escape')
+    await flush()
+    expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
+    expect(host.querySelector('[data-market-tab="github"]')?.getAttribute('aria-selected')).toBe('true')
   })
 
-  it('closes the nested install dialog first on Escape and keeps the market open', async () => {
+  it('closes the nested install dialog first on Escape and keeps the tab', async () => {
     const { repositoryDetail, search } = oneRepoHarness()
     const { props } = managePageHarness({ search, repositoryDetail })
     const host = await renderInto(<ManagePluginsTab {...props} />)
@@ -1472,17 +1377,12 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     const installDialog = await openInstallDialog(host)
     expect(installDialog.contains(document.activeElement)).toBe(true)
 
-    // Escape inside the install dialog only dismisses it; the market modal
-    // underneath stays open.
+    // Escape inside the install dialog only dismisses it; the detail view and
+    // the GitHub tab underneath stay as they were.
     await pressKey(installDialog.querySelector('[data-install-confirm]'), 'Escape')
     await flush()
     expect(host.querySelector('[data-dialog="install"]')).toBeNull()
-    expect(host.querySelector('[data-dialog="market"]')).not.toBeNull()
-
-    // A second Escape inside the market dialog closes it as well.
-    const market = host.querySelector('[data-dialog="market"]')!
-    await pressKey(market.querySelector('[data-market-close]'), 'Escape')
-    await flush()
-    expect(host.querySelector('[data-dialog="market"]')).toBeNull()
+    expect(panelOf(host).querySelector('[data-detail-view]')).not.toBeNull()
+    expect(host.querySelector('[data-market-tab="github"]')?.getAttribute('aria-selected')).toBe('true')
   })
 })

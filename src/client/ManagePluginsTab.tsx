@@ -1,10 +1,12 @@
-/** Full plugin-market settings page: repository status, a "Browse GitHub"
- *  modal (paginated plugin search + install), and the managed roster. */
+/** Full plugin-market settings page: one top-level settings section with two
+ *  in-page tabs — the local plugin source repository (status header, managed
+ *  roster, enable switches, two-step removal) and GitHub (paginated search,
+ *  repository detail with a branch/tag picker, README, download review). */
 
 import {
   useEffect, useId, useMemo, useRef, useState,
   type FormEvent, type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject,
+  type ReactNode, type RefObject,
 } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -27,7 +29,7 @@ import { renderReadmeHtml } from './readme.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
 
-/** Fixed page size of the GitHub search dialog (mirrors the wire perPage). */
+/** Fixed page size of the GitHub search view (mirrors the wire perPage). */
 export const SEARCH_PAGE_SIZE = 10
 
 /** Registration-side channel face (lazy closures, wired by apply()). */
@@ -46,7 +48,7 @@ export interface ManagePluginsTabInjected {
   search: (keywords: string, page: number) => Promise<GitHubSearchPage>
   /** Aggregated repository detail (metadata, refs, README). */
   repositoryDetail: (repository: string) => Promise<RepositoryDetail>
-  /** Review one repository ref and mint its single-use install confirmation.
+  /** Review one repository ref and mint its single-use download confirmation.
    *  `version` null/omitted + no `refKind` reviews the default branch the
    *  legacy way; a v2 per-ref review pairs `version` with `refKind`. */
   previewInstall: (
@@ -54,7 +56,7 @@ export interface ManagePluginsTabInjected {
     version?: string | null,
     refKind?: GithubRefKind,
   ) => Promise<PluginInstallReview>
-  /** Run the double-confirmed install for a reviewed repository ref; the
+  /** Run the double-confirmed download for a reviewed repository ref; the
    *  optional `refKind`/`version` pair must reproduce the reviewed tuple. */
   install: (
     repository: string,
@@ -66,7 +68,7 @@ export interface ManagePluginsTabInjected {
 
 /** Full component props assembled by the Settings slot renderer. */
 export type ManagePluginsTabProps =
-  PropsRuntime<'settings.plugins.tab'>
+  PropsRuntime<'settings.section'>
   & PropsLocale<'settings.plugins.market'>
   & InjectFace<ManagePluginsTabInjected>
 
@@ -151,8 +153,7 @@ const FOCUSABLE_SELECTOR = [
  * initial focus onto the dialog, close it on Escape when a dismiss/cancel
  * semantic exists, and keep Tab looping inside the dialog (a simple trap that
  * never lets the focus escape into the page or a sibling dialog). Escape stops
- * propagation so a nested dialog (install on top of market) closes first and
- * never closes its outer owner.
+ * propagation so a nested dialog closes without reaching the page behind it.
  */
 function useDialogA11y(dialogRef: RefObject<HTMLElement | null>, dismissible: boolean, onClose: () => void): void {
   useEffect(() => {
@@ -376,7 +377,7 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
   )
 }
 /* ------------------------------------------------------------------------ */
-/* Install confirmation dialog (shared by the GitHub modal)                 */
+/* Download confirmation dialog (shared by the GitHub tab)                  */
 /* ------------------------------------------------------------------------ */
 
 type InstallPhase =
@@ -404,7 +405,7 @@ function analysisKindText(kind: MarketCheckoutKind, t: Translate): string {
 
 function InstallDialog({ repository, version, refKind, previewInstall, install, t, onClose, onInstalled }: {
   readonly repository: string
-  /** Branch/tag ref name being installed; null = the legacy default branch. */
+  /** Branch/tag ref name being downloaded; null = the legacy default branch. */
   readonly version?: string | null
   /** V2 ref kind of the pinned branch/tag (omitted on legacy reviews). */
   readonly refKind?: GithubRefKind
@@ -424,7 +425,7 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
     return () => { mounted.current = false }
   }, [])
 
-  // Esc closes the review dialog whenever no install is in flight; the focus
+  // Esc closes the review dialog whenever no download is in flight; the focus
   // is moved onto the dialog on mount and Tab never leaves it.
   useDialogA11y(dialogRef, phase.phase !== 'installing', onClose)
 
@@ -473,11 +474,11 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
         className={css.dialog}
         role="dialog"
         aria-modal="true"
-        aria-label={t('installDialogTitle')}
+        aria-label={t('downloadDialogTitle')}
         data-dialog="install"
       >
         <header className={css.dialogHeader}>
-          <strong>{t('installDialogTitle')}</strong>
+          <strong>{t('downloadDialogTitle')}</strong>
           {version === undefined || version === null ? (
             <code data-dialog-repository>{repository}</code>
           ) : (
@@ -554,12 +555,12 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
 
         {phase.phase === 'install-error' ? (
           <p className={css.dialogError} role="alert" data-install-error data-error-code={phase.failure.code}>
-            {t('installFailed')} {failureText(phase.failure, t)}
+            {t('downloadFailed')} {failureText(phase.failure, t)}
           </p>
         ) : null}
         {phase.phase === 'done' ? (
           <p className={css.dialogOk} role="status" data-install-done>
-            {t('installDone')}
+            {t('downloadDone')}
           </p>
         ) : null}
 
@@ -596,10 +597,10 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
             refusal === undefined ? (
               <>
                 <button type="button" className={css.primaryButton} data-install-confirm disabled={busy} onClick={() => { confirm(review!) }}>
-                  {busy ? t('installing') : t('installButton')}
+                  {busy ? t('downloading') : t('downloadButton')}
                 </button>
                 {phase.phase === 'install-error' ? (
-                  // Every install failure (not only a consumed confirmation)
+                  // Every download failure (not only a consumed confirmation)
                   // offers a fresh review: the old token may be spent already.
                   <button type="button" data-repreview onClick={() => { setPreviewTick(value => value + 1) }}>
                     {t('repreviewButton')}
@@ -718,51 +719,8 @@ function RemoveDialog({ view, injected, t, onClose, onRemoved }: {
   )
 }
 /* ------------------------------------------------------------------------ */
-/* GitHub browse modal (search + pagination + install entry)                */
+/* GitHub tab (search + pagination + repository detail)                     */
 /* ------------------------------------------------------------------------ */
-
-/** Minimum gap kept between a dragged dialog and the viewport edges. */
-const DRAG_VIEWPORT_EDGE = 8
-
-/** One in-flight pointer drag of the market dialog (desktop title bar). */
-interface MarketDragAnchor {
-  readonly pointerX: number
-  readonly pointerY: number
-  readonly left: number
-  readonly top: number
-  readonly width: number
-  readonly height: number
-}
-
-/** Clamp a dragged dialog origin so the whole box stays inside the viewport. */
-function clampToViewport(
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-): { left: number; top: number } {
-  const edge = DRAG_VIEWPORT_EDGE
-  return {
-    left: Math.min(Math.max(left, edge), Math.max(edge, window.innerWidth - width - edge)),
-    top: Math.min(Math.max(top, edge), Math.max(edge, window.innerHeight - height - edge)),
-  }
-}
-
-/** dsh close glyph (ic_ds_close_outline_16 rendered at 14px, × shape). */
-function CloseGlyph(): ReactNode {
-  return (
-    <svg width={14} height={14} viewBox="0 0 16 16" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-      <path d="M14.1168 13.197L13.197 14.1167L1.8833 2.80303L2.80309 1.88324L14.1168 13.197Z" fill="currentColor" />
-      <path d="M13.197 1.88326L14.1168 2.80305L2.80309 14.1168L1.8833 13.197L13.197 1.88326Z" fill="currentColor" />
-    </svg>
-  )
-}
-
-/** Whether an event target is an interactive child that must not start a drag. */
-function isInteractive(eventTarget: EventTarget): boolean {
-  return eventTarget instanceof Element
-    && eventTarget.closest('button, a, input, textarea, select, [role="switch"], [contenteditable="true"]') !== null
-}
 
 type MarketSearchState =
   | { readonly phase: 'idle' }
@@ -770,10 +728,10 @@ type MarketSearchState =
   | { readonly phase: 'error'; readonly failure: ManageUiFailure; readonly keywords: string; readonly page: number }
   | { readonly phase: 'ready'; readonly pageData: GitHubSearchPage; readonly keywords: string; readonly page: number }
 
-/** One install target selected from the detail view (branch or tag). */
+/** One download target selected from the detail view (branch or tag). */
 interface MarketInstallTarget {
   readonly repository: string
-  /** Branch/tag ref name to install (the picker always supplies one). */
+  /** Branch/tag ref name to download (the picker always supplies one). */
   readonly version: string
   /** Kind of the selected ref: keeps same-name branches and tags apart. */
   readonly refKind: RefKind
@@ -895,15 +853,15 @@ function DetailReadme({ readme, url, defaultBranch, t }: {
 
 /**
  * Ready detail content: repository metadata header, one merged branch/tag
- * dropdown with the single install action below it, and the README block.
- * Rendered inside the modal's scrolling zone so long README documents scroll
- * instead of stretching the dialog shell.
+ * dropdown with the single download action below it, and the README block.
+ * Rendered inside the GitHub tab's own scrolling zone so a long README scrolls
+ * with the page instead of stretching the tab panel.
  */
 function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
   readonly detail: RepositoryDetail
   readonly installedRefs: InstalledRefsByRepository
   readonly t: Translate
-  /** Open the install review for one branch/tag ref of this repository. */
+  /** Open the download review for one branch/tag ref of this repository. */
   readonly onInstall: (choice: RefChoice) => void
 }): ReactNode {
   const selectId = useId()
@@ -995,7 +953,7 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
               disabled={selection === null || selectedInstalled}
               onClick={() => { if (selection !== null) onInstall(selection) }}
             >
-              {selectedInstalled ? t('installedBadge') : t('installButton')}
+              {selectedInstalled ? t('installedBadge') : t('downloadButton')}
             </button>
           </div>
         </section>
@@ -1021,8 +979,9 @@ function RepositoryDetailBody({ detail, installedRefs, t, onInstall }: {
 
 /**
  * Detail view of one repository: localizes the load states and hands the ready
- * detail to {@link RepositoryDetailBody}. Lives inside the shared modal shell
- * and its scrolling zone; the list search/pagination are hidden while it is up.
+ * detail to {@link RepositoryDetailBody}. Lives inside the GitHub tab panel and
+ * its scrolling zone; the list search form and pagination are hidden while it
+ * is up, and the owner's own header offers the way back to the list.
  */
 function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstall }: {
   readonly slug: string
@@ -1057,7 +1016,14 @@ function RepositoryDetailPane({ slug, state, installedRefs, t, onRetry, onInstal
   )
 }
 
-function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, previewInstall, install, onClose, onInstalled }: {
+/**
+ * The GitHub tab's content: a search form over a paginated result list, with
+ * the repository detail view covering that list in place (the header switches
+ * to the detail title plus its back control, and keywords/page survive the
+ * round trip). It is plain in-page content — no modal shell, no drag — and the
+ * download review still opens as its own dialog above it.
+ */
+function GitHubPanel({ t, installed, installedRefs, search, repositoryDetail, previewInstall, install, onInstalled }: {
   readonly t: Translate
   /** Repositories that already own a managed record (row badge markers). */
   readonly installed: ReadonlySet<string>
@@ -1067,12 +1033,10 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
   readonly repositoryDetail: ManagePluginsTabInjected['repositoryDetail']
   readonly previewInstall: ManagePluginsTabInjected['previewInstall']
   readonly install: ManagePluginsTabInjected['install']
-  readonly onClose: () => void
-  /** Notified after a successful install so the page can refresh the roster. */
+  /** Notified after a successful download so the page can refresh the roster. */
   readonly onInstalled: (repository: string) => void
 }): ReactNode {
   const mounted = useRef(true)
-  const dialogRef = useRef<HTMLElement | null>(null)
   const generation = useRef(0)
   const [query, setQuery] = useState('')
   const [searchState, setSearchState] = useState<MarketSearchState>({ phase: 'idle' })
@@ -1082,20 +1046,12 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
   const [detailState, setDetailState] = useState<MarketDetailState>({ status: 'loading' })
   const [installTarget, setInstallTarget] = useState<MarketInstallTarget | null>(null)
   const [jumpValue, setJumpValue] = useState('')
-  const [dragPosition, setDragPosition] = useState<{ left: number; top: number } | null>(null)
-  const [dragging, setDragging] = useState(false)
-  const dragAnchor = useRef<MarketDragAnchor | null>(null)
-  const detachDrag = useRef<(() => void) | null>(null)
-  /** One empty-keyword auto browse per mounted dialog (never on later clears). */
+  /** One empty-keyword auto browse per mounted panel (never on later clears). */
   const autoBrowsed = useRef(false)
 
   useEffect(() => {
     mounted.current = true
-    return () => {
-      mounted.current = false
-      // Never leave move/up listeners behind when the dialog unmounts mid-drag.
-      detachDrag.current?.()
-    }
+    return () => { mounted.current = false }
   }, [])
 
   /**
@@ -1117,64 +1073,17 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
     return () => { current = false }
   }, [detailSlug, detailTick, repositoryDetail])
 
+  const detailInView = detailSlug !== null
+
   /** Back to the list view; the search keywords/page state is untouched. */
   const goBackToList = (): void => {
     setDetailState({ status: 'loading' })
     setDetailSlug(null)
   }
 
-  /** Open the install review for one branch/tag ref of the shown repository. */
+  /** Open the download review for one branch/tag ref of the shown repository. */
   const openRefInstall = (repository: string, choice: RefChoice): void => {
     setInstallTarget({ repository, version: choice.name, refKind: choice.kind })
-  }
-
-  const detailInView = detailSlug !== null
-
-  /**
-   * Begin dragging the dialog from its title bar. Interactive children (the
-   * close button) never start a drag, so close and drag stay conflict-free.
-   */
-  const beginDrag = (event: ReactMouseEvent<HTMLElement>): void => {
-    if (event.button !== 0 || dragAnchor.current !== null || isInteractive(event.target)) return
-    const dialog = event.currentTarget.closest('[data-dialog]')
-    if (!(dialog instanceof HTMLElement)) return
-    event.preventDefault()
-    const rect = dialog.getBoundingClientRect()
-    const anchor: MarketDragAnchor = {
-      pointerX: event.clientX,
-      pointerY: event.clientY,
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height,
-    }
-    dragAnchor.current = anchor
-    setDragging(true)
-    setDragPosition(clampToViewport(anchor.left, anchor.top, anchor.width, anchor.height))
-
-    const onMove = (moveEvent: MouseEvent): void => {
-      const start = dragAnchor.current
-      if (start === null) return
-      setDragPosition(clampToViewport(
-        start.left + moveEvent.clientX - start.pointerX,
-        start.top + moveEvent.clientY - start.pointerY,
-        start.width,
-        start.height,
-      ))
-    }
-    const finish = (): void => {
-      dragAnchor.current = null
-      setDragging(false)
-      detachDrag.current?.()
-    }
-    detachDrag.current = () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', finish)
-      window.removeEventListener('blur', finish)
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', finish)
-    window.addEventListener('blur', finish)
   }
 
   const runSearch = (keywords: string, page: number): void => {
@@ -1201,7 +1110,8 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
     if (autoBrowsed.current) return
     autoBrowsed.current = true
     if (query.trim().length === 0) runSearch('', 1)
-    // Deliberately mount-only; a reopened dialog mounts fresh and browses again.
+    // Deliberately mount-only; the panel mounts when its tab is first selected
+    // and stays mounted afterwards (hidden), so this runs once per page mount.
   }, [])
 
   const submit = (event: FormEvent): void => {
@@ -1239,149 +1149,127 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
     commitJump()
   }
 
-  // The market modal is always dismissible; a nested install dialog handles
-  // its own Escape first and never bubbles into this one.
-  useDialogA11y(dialogRef, true, onClose)
+  /**
+   * There is no modal shell around this panel any more, so Escape is the
+   * panel's own shortcut for leaving the detail view and returning to the
+   * result list (keyword and page untouched). A download dialog opened from
+   * the detail view stops the event at its own shell first.
+   */
+  const onPanelKeyDown = (event: ReactKeyboardEvent<HTMLElement>): void => {
+    if (event.key !== 'Escape' || detailSlug === null) return
+    event.stopPropagation()
+    goBackToList()
+  }
 
   return (
-    <div className={css.backdrop}>
-      <section
-        ref={dialogRef}
-        tabIndex={-1}
-        className={`${css.dialog} ${css.marketDialog}${dragging ? ` ${css.marketDragging}` : ''}`}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('marketDialogTitle')}
-        data-dialog="market"
-        style={dragPosition === null ? undefined : {
-          position: 'fixed',
-          left: `${dragPosition.left}px`,
-          top: `${dragPosition.top}px`,
-        }}
-      >
-        <header
-          className={`${css.dialogHeader} ${css.dragHandle}`}
-          data-drag-handle
-          onMouseDown={beginDrag}
-        >
-          <span className={css.dialogTitleRow}>
-            {detailInView ? (
-              <button
-                type="button"
-                className={css.textButton}
-                data-detail-back
-                onClick={goBackToList}
-              >
-                {t('detailBack')}
-              </button>
-            ) : null}
-            <strong>{detailInView ? t('detailTitle') : t('marketDialogTitle')}</strong>
-          </span>
+    <section className={css.githubPanel} data-github-panel onKeyDown={onPanelKeyDown}>
+      {detailInView ? (
+        <div className={css.detailToolbar} data-github-detail-header>
           <button
             type="button"
-            className={css.dialogClose}
-            data-market-close
-            aria-label={t('closeButton')}
-            onClick={onClose}
+            className={css.textButton}
+            data-detail-back
+            onClick={goBackToList}
           >
-            <CloseGlyph />
+            {t('detailBack')}
           </button>
-        </header>
+          <strong data-detail-title>{t('detailTitle')}</strong>
+        </div>
+      ) : (
+        <form className={css.searchForm} data-github-search onSubmit={submit}>
+          <input
+            type="search"
+            value={query}
+            placeholder={t('githubSearch')}
+            aria-label={t('githubSearch')}
+            data-market-search-input
+            onChange={(event) => { setQuery(event.currentTarget.value) }}
+          />
+          <button
+            type="submit"
+            className={css.primaryButton}
+            data-market-search-submit
+            disabled={query.trim().length === 0 || searchState.phase === 'loading'}
+          >
+            {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
+          </button>
+        </form>
+      )}
 
+      <div className={css.marketScroll} data-market-scroll>
         {detailSlug === null ? (
           <>
-            <form className={css.searchForm} onSubmit={submit}>
-              <input
-                type="search"
-                value={query}
-                placeholder={t('githubSearch')}
-                aria-label={t('githubSearch')}
-                data-market-search-input
-                onChange={(event) => { setQuery(event.currentTarget.value) }}
-              />
-              <button
-                type="submit"
-                className={css.primaryButton}
-                data-market-search-submit
-                disabled={query.trim().length === 0 || searchState.phase === 'loading'}
-              >
-                {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
-              </button>
-            </form>
+            {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
+            {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
+            {searchState.phase === 'error' ? (
+              <div className={css.marketError} role="alert" data-market-error data-error-code={searchState.failure.code}>
+                <p>{failureText(searchState.failure, t)}</p>
+                <button
+                  type="button"
+                  className={css.textButton}
+                  data-market-retry
+                  onClick={() => { runSearch(searchState.keywords, searchState.page) }}
+                >
+                  {t('retry')}
+                </button>
+              </div>
+            ) : null}
+            {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
+              <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
+            ) : null}
 
-            <div className={css.marketScroll} data-market-scroll>
-              {searchState.phase === 'idle' ? <p className={css.hint} data-market-idle>{t('searchIdle')}</p> : null}
-              {searchState.phase === 'loading' ? <p className={css.status} role="status" data-market-loading>{t('searching')}</p> : null}
-              {searchState.phase === 'error' ? (
-                <div className={css.marketError} role="alert" data-market-error data-error-code={searchState.failure.code}>
-                  <p>{failureText(searchState.failure, t)}</p>
-                  <button
-                    type="button"
-                    className={css.textButton}
-                    data-market-retry
-                    onClick={() => { runSearch(searchState.keywords, searchState.page) }}
-                  >
-                    {t('retry')}
-                  </button>
-                </div>
-              ) : null}
-              {searchState.phase === 'ready' && searchState.pageData.items.length === 0 ? (
-                <p className={css.status} role="status" data-market-empty>{t('searchEmpty')}</p>
-              ) : null}
-
-              {ready !== undefined && ready.pageData.items.length > 0 ? (
-                <ul className={css.resultList} data-market-results>
-                  {ready.pageData.items.map(item => {
-                    const managed = installed.has(item.repository)
-                    return (
-                      <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
-                        <div className={css.resultMain}>
-                          <a
-                            className={css.resultName}
-                            href={item.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            data-market-link
-                            title={item.repository}
-                          >
-                            {item.name}
-                          </a>
-                          {item.description === null ? null : (
-                            <p className={css.resultDescription} data-result-description>{item.description}</p>
+            {ready !== undefined && ready.pageData.items.length > 0 ? (
+              <ul className={css.resultList} data-market-results>
+                {ready.pageData.items.map(item => {
+                  const managed = installed.has(item.repository)
+                  return (
+                    <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
+                      <div className={css.resultMain}>
+                        <a
+                          className={css.resultName}
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-market-link
+                          title={item.repository}
+                        >
+                          {item.name}
+                        </a>
+                        {item.description === null ? null : (
+                          <p className={css.resultDescription} data-result-description>{item.description}</p>
+                        )}
+                        <span className={css.resultMeta}>
+                          <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
+                          {item.updatedAt === null ? null : (
+                            <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
                           )}
-                          <span className={css.resultMeta}>
-                            <span data-result-stars>{t('starsLabel', { count: String(item.stars) })}</span>
-                            {item.updatedAt === null ? null : (
-                              <span data-result-updated>{t('updatedLabel', { date: shortDate(item.updatedAt) })}</span>
-                            )}
-                            <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
-                              {t('repoLinkLabel')}
-                            </a>
-                          </span>
-                        </div>
-                        <div className={css.resultActions}>
-                          {managed ? (
-                            <span className={css.installedBadge} data-installed>{t('installedBadge')}</span>
-                          ) : null}
-                          <button
-                            type="button"
-                            className={css.primaryButton}
-                            data-row-details
-                            data-detail-repository={item.repository}
-                            onClick={() => { setDetailSlug(item.repository) }}
-                          >
-                            {t('rowDetails')}
-                          </button>
-                        </div>
-                      </li>
-                    )
-                  })}
-                </ul>
-              ) : null}
-            </div>
+                          <a className={css.externalLink} href={item.url} target="_blank" rel="noreferrer">
+                            {t('repoLinkLabel')}
+                          </a>
+                        </span>
+                      </div>
+                      <div className={css.resultActions}>
+                        {managed ? (
+                          <span className={css.installedBadge} data-installed>{t('installedBadge')}</span>
+                        ) : null}
+                        <button
+                          type="button"
+                          className={css.primaryButton}
+                          data-row-details
+                          data-detail-repository={item.repository}
+                          onClick={() => { setDetailSlug(item.repository) }}
+                        >
+                          {t('rowDetails')}
+                        </button>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : null}
           </>
         ) : (
-          <div className={css.marketScroll} data-market-scroll data-detail-scroll>
+          <div data-detail-scroll>
             <RepositoryDetailPane
               slug={detailSlug}
               state={detailState}
@@ -1392,76 +1280,76 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
             />
           </div>
         )}
+      </div>
 
-        {detailSlug === null && ready !== undefined && ready.pageData.items.length > 0 ? (
-          <footer className={css.pagination} data-pagination>
-            <button
-              type="button"
-              className={css.textButton}
-              data-page-prev
-              disabled={ready.page <= 1 || searchState.phase === 'loading'}
-              onClick={() => { goPage(ready.page - 1) }}
-            >
-              {t('prevPage')}
-            </button>
-            <p className={css.count} data-page-count>
-              {t('pagination', {
-                current: String(ready.page),
-                total: String(Math.max(totalPages, 1)),
-                count: String(ready.pageData.totalCount),
-              })}
-            </p>
-            {totalPages > 1 ? (
-              <span className={css.pageJump}>
-                <input
-                  className={css.pageJumpInput}
-                  type="text"
-                  inputMode="numeric"
-                  value={jumpValue}
-                  placeholder={String(ready.page)}
-                  aria-label={t('jumpToLabel')}
-                  data-page-input
-                  onChange={(event) => { setJumpValue(event.currentTarget.value) }}
-                  onKeyDown={onJumpKey}
-                />
-                <button
-                  type="button"
-                  className={css.textButton}
-                  data-page-go
-                  disabled={searchState.phase === 'loading'}
-                  onClick={commitJump}
-                >
-                  {t('jumpGo')}
-                </button>
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className={css.textButton}
-              data-page-next
-              disabled={totalPages === 0 || ready.page >= totalPages || searchState.phase === 'loading'}
-              onClick={() => { goPage(ready.page + 1) }}
-            >
-              {t('nextPage')}
-            </button>
-          </footer>
-        ) : null}
+      {detailSlug === null && ready !== undefined && ready.pageData.items.length > 0 ? (
+        <footer className={css.pagination} data-pagination>
+          <button
+            type="button"
+            className={css.textButton}
+            data-page-prev
+            disabled={ready.page <= 1 || searchState.phase === 'loading'}
+            onClick={() => { goPage(ready.page - 1) }}
+          >
+            {t('prevPage')}
+          </button>
+          <p className={css.count} data-page-count>
+            {t('pagination', {
+              current: String(ready.page),
+              total: String(Math.max(totalPages, 1)),
+              count: String(ready.pageData.totalCount),
+            })}
+          </p>
+          {totalPages > 1 ? (
+            <span className={css.pageJump}>
+              <input
+                className={css.pageJumpInput}
+                type="text"
+                inputMode="numeric"
+                value={jumpValue}
+                placeholder={String(ready.page)}
+                aria-label={t('jumpToLabel')}
+                data-page-input
+                onChange={(event) => { setJumpValue(event.currentTarget.value) }}
+                onKeyDown={onJumpKey}
+              />
+              <button
+                type="button"
+                className={css.textButton}
+                data-page-go
+                disabled={searchState.phase === 'loading'}
+                onClick={commitJump}
+              >
+                {t('jumpGo')}
+              </button>
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={css.textButton}
+            data-page-next
+            disabled={totalPages === 0 || ready.page >= totalPages || searchState.phase === 'loading'}
+            onClick={() => { goPage(ready.page + 1) }}
+          >
+            {t('nextPage')}
+          </button>
+        </footer>
+      ) : null}
 
-        {installTarget !== null ? (
-          <InstallDialog
-            key={`${installTarget.repository}@${installTarget.refKind}:${installTarget.version}`}
-            repository={installTarget.repository}
-            version={installTarget.version}
-            refKind={installTarget.refKind}
-            previewInstall={previewInstall}
-            install={install}
-            t={t}
-            onClose={() => { setInstallTarget(null) }}
-            onInstalled={(repository) => { onInstalled(repository) }}
-          />
-        ) : null}
-      </section>
-    </div>
+      {installTarget !== null ? (
+        <InstallDialog
+          key={`${installTarget.repository}@${installTarget.refKind}:${installTarget.version}`}
+          repository={installTarget.repository}
+          version={installTarget.version}
+          refKind={installTarget.refKind}
+          previewInstall={previewInstall}
+          install={install}
+          t={t}
+          onClose={() => { setInstallTarget(null) }}
+          onInstalled={(repository) => { onInstalled(repository) }}
+        />
+      ) : null}
+    </section>
   )
 }
 
@@ -1469,12 +1357,29 @@ function GitHubDialog({ t, installed, installedRefs, search, repositoryDetail, p
 /* Page                                                                     */
 /* ------------------------------------------------------------------------ */
 
-/** Render the full managed-plugins settings page. */
+/** The page's own tab ids, in strip order (local repository, then GitHub). */
+const PAGE_TABS = ['local', 'github'] as const
+
+/** One in-page tab of the settings page. */
+type PageTabId = typeof PAGE_TABS[number]
+
+/** Localized label key of one in-page tab. */
+const PAGE_TAB_KEYS = {
+  local: 'tabLocal',
+  github: 'tabGithub',
+} satisfies Record<PageTabId, MarketManageLocaleKey>
+
+/** Render the full GitHub-plugin settings page. */
 export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const {
     status: readStatus, list, setEnabled, requestRemove, confirmRemove,
     search, repositoryDetail, previewInstall, install, t,
   } = props
+  const tabsId = useId()
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
+  /** The local repository owns the first tab, so it is the landing view. */
+  const [activeTab, setActiveTab] = useState<PageTabId>('local')
+  const [visitedTabs, setVisitedTabs] = useState<ReadonlySet<PageTabId>>(() => new Set<PageTabId>(['local']))
   const mounted = useRef(true)
   const [statusState, setStatusState] = useState<StatusState>({ status: 'loading' })
   const [listState, setListState] = useState<ViewState>({ status: 'loading' })
@@ -1482,13 +1387,22 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const [query, setQuery] = useState('')
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
   const [rowFailures, setRowFailures] = useState<ReadonlyMap<string, ManageUiFailure>>(() => new Map())
-  const [marketOpen, setMarketOpen] = useState(false)
   const [removeTarget, setRemoveTarget] = useState<ManagedPluginView | null>(null)
 
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
+
+  // A tab mounts when first selected and stays mounted while hidden, so the
+  // GitHub search results, keywords, page and open detail survive switching
+  // back to the local repository and forth.
+  useEffect(() => {
+    setVisitedTabs((previous) => {
+      if (previous.has(activeTab)) return previous
+      return new Set([...previous, activeTab])
+    })
+  }, [activeTab])
 
   const loadStatus = (): void => {
     setStatusState({ status: 'loading' })
@@ -1578,7 +1492,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     })()
   }
 
-  /** Installed markers: repositories recorded by the market (GitHub only). */
+  /** Downloaded markers: repositories recorded by the market (GitHub only). */
   const installedRepositories = useMemo(() => {
     const found = new Set<string>()
     if (listState.status !== 'ready') return found
@@ -1593,8 +1507,8 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
    *  V2 records tag their ref with a kind (a same-name branch and tag never
    *  cross-mark); legacy records without ref metadata fall back to matching
    *  the ref name alone. Records with `source.version === null`
-   *  (default-branch installs) contribute nothing: their exact ref is unknown,
-   *  so no detail entry is ever wrongly marked as installed for them. */
+   *  (default-branch downloads) contribute nothing: their exact ref is unknown,
+   *  so no detail entry is ever wrongly marked as downloaded for them. */
   const installedRefs = useMemo<InstalledRefsByRepository>(() => {
     const mutable = new Map<string, { legacy: Set<string>; byKind: Record<RefKind, Set<string>> }>()
     if (listState.status !== 'ready') return new Map<string, InstalledRefs>()
@@ -1622,58 +1536,107 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const configured = statusState.status === 'configured'
 
   return (
-    <div className={css.page} data-manage-tab>
-      <StatusHeader state={statusState} t={t} onRetry={loadStatus} />
-
-      {configured ? (
-        <>
-          <div className={css.pageToolbar}>
-            <h3 className={css.heading} data-managed-heading>{t('managedHeading')}</h3>
+    <div className={css.page} data-market-page>
+      <div className={css.tabs} role="tablist" aria-label={t('tabsLabel')}>
+        {PAGE_TABS.map((tab, index) => {
+          const selected = tab === activeTab
+          return (
             <button
+              key={tab}
+              ref={(element) => { tabRefs.current[index] = element }}
+              id={`${tabsId}-tab-${tab}`}
               type="button"
-              className={css.primaryButton}
-              data-open-market
-              onClick={() => { setMarketOpen(true) }}
+              role="tab"
+              className={css.tab}
+              aria-selected={selected}
+              aria-controls={`${tabsId}-panel-${tab}`}
+              data-active={selected ? 'true' : undefined}
+              data-market-tab={tab}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => { setActiveTab(tab) }}
+              onKeyDown={(event) => {
+                let nextIndex: number
+                switch (event.key) {
+                  case 'ArrowRight': nextIndex = (index + 1) % PAGE_TABS.length; break
+                  case 'ArrowLeft': nextIndex = (index - 1 + PAGE_TABS.length) % PAGE_TABS.length; break
+                  case 'Home': nextIndex = 0; break
+                  case 'End': nextIndex = PAGE_TABS.length - 1; break
+                  default: return
+                }
+                event.preventDefault()
+                const nextTab = PAGE_TABS[nextIndex] as PageTabId
+                const nextButton = tabRefs.current[nextIndex] as HTMLButtonElement
+                setActiveTab(nextTab)
+                nextButton.focus()
+              }}
             >
-              {t('openMarket')}
+              {t(PAGE_TAB_KEYS[tab])}
             </button>
-          </div>
-          {listState.status === 'error' ? (
-            <div className={css.failure} data-list-error data-error-code={listState.failure.code}>
-              <p role="alert">{t('error')}</p>
-              <button type="button" onClick={retryList}>{t('retry')}</button>
-            </div>
-          ) : null}
-          {listState.status === 'loading' ? (
-            <p className={css.status} role="status" data-managed-loading>{t('loading')}</p>
-          ) : null}
-          <ManagedList
-            snapshot={listState.status === 'ready' ? listState.snapshot : undefined}
-            busyKeys={busyKeys}
-            rowFailures={rowFailures}
-            query={query}
-            t={t}
-            onQuery={setQuery}
-            onToggle={toggle}
-            onRemove={(view) => { setRemoveTarget(view) }}
-          />
-        </>
-      ) : null}
+          )
+        })}
+      </div>
 
-      {marketOpen ? (
-        <GitHubDialog
-          key="market"
-          t={t}
-          installed={installedRepositories}
-          installedRefs={installedRefs}
-          search={search}
-          repositoryDetail={repositoryDetail}
-          previewInstall={previewInstall}
-          install={install}
-          onClose={() => { setMarketOpen(false) }}
-          onInstalled={(repository) => { reloadList(); void repository }}
-        />
-      ) : null}
+      <div
+        id={`${tabsId}-panel-local`}
+        className={css.panel}
+        role="tabpanel"
+        aria-labelledby={`${tabsId}-tab-local`}
+        hidden={activeTab !== 'local'}
+        data-market-panel="local"
+      >
+        <div className={css.localPanel} data-manage-tab>
+          <StatusHeader state={statusState} t={t} onRetry={loadStatus} />
+
+          {configured ? (
+            <>
+              <div className={css.pageToolbar}>
+                <h3 className={css.heading} data-managed-heading>{t('managedHeading')}</h3>
+              </div>
+              {listState.status === 'error' ? (
+                <div className={css.failure} data-list-error data-error-code={listState.failure.code}>
+                  <p role="alert">{t('error')}</p>
+                  <button type="button" onClick={retryList}>{t('retry')}</button>
+                </div>
+              ) : null}
+              {listState.status === 'loading' ? (
+                <p className={css.status} role="status" data-managed-loading>{t('loading')}</p>
+              ) : null}
+              <ManagedList
+                snapshot={listState.status === 'ready' ? listState.snapshot : undefined}
+                busyKeys={busyKeys}
+                rowFailures={rowFailures}
+                query={query}
+                t={t}
+                onQuery={setQuery}
+                onToggle={toggle}
+                onRemove={(view) => { setRemoveTarget(view) }}
+              />
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      <div
+        id={`${tabsId}-panel-github`}
+        className={css.panel}
+        role="tabpanel"
+        aria-labelledby={`${tabsId}-tab-github`}
+        hidden={activeTab !== 'github'}
+        data-market-panel="github"
+      >
+        {visitedTabs.has('github') ? (
+          <GitHubPanel
+            t={t}
+            installed={installedRepositories}
+            installedRefs={installedRefs}
+            search={search}
+            repositoryDetail={repositoryDetail}
+            previewInstall={previewInstall}
+            install={install}
+            onInstalled={() => { reloadList() }}
+          />
+        ) : null}
+      </div>
 
       {removeTarget !== null ? (
         <RemoveDialog
@@ -1697,4 +1660,3 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
     </div>
   )
 }
-

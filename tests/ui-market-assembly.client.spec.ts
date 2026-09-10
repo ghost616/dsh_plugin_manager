@@ -54,11 +54,11 @@ async function bench(): Promise<Bench> {
   return { ctx, locale, slots, fiber }
 }
 
-/** Declare the tab slot like the Plugins section entry does. */
-function declareTab(slots: FakeSlotRegistry): () => void {
+/** Declare the settings-section slot like the settings shell does. */
+function declareSection(slots: FakeSlotRegistry): () => void {
   return slots.register({
     name: 'root',
-    children: { 'settings.plugins.tab': { kind: 'list', scope: 'root' } },
+    children: { 'settings.section': { kind: 'list', scope: 'root' } },
   }, () => null)
 }
 
@@ -90,9 +90,9 @@ function faceOf(entry: FakeStoredEntry): InjectedFace {
   return (entry.inject as () => InjectedFace)()
 }
 
-function tabEntry(slots: FakeSlotRegistry): FakeStoredEntry {
-  const entry = slots.entries('settings.plugins.tab')[0]
-  if (entry === undefined) throw new Error('no settings.plugins.tab entry')
+function sectionEntry(slots: FakeSlotRegistry): FakeStoredEntry {
+  const entry = slots.entries('settings.section')[0]
+  if (entry === undefined) throw new Error('no settings.section entry')
   return entry
 }
 
@@ -101,19 +101,21 @@ describe('plugin-market browser half assembly', () => {
     expect(inject).toEqual(['slots', 'locale'])
   })
 
-  it('registers the localized tab behind the declaration without touching the channel', async () => {
+  it('registers the page as a localized settings section without touching the channel', async () => {
     const { slots, locale } = await bench()
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: makeList([]) }))
     stubChannel(fetchMock)
 
+    expect(slots.entries('settings.section')).toHaveLength(0)
+    // The Plugins section keeps its own tabs: this plugin contributes none.
     expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
     expect(slots.pendingInjections()).toBe(1)
     expect(fetchMock).not.toHaveBeenCalled()
 
-    const stop = declareTab(slots)
-    const entry = tabEntry(slots)
+    const stop = declareSection(slots)
+    const entry = sectionEntry(slots)
     expect(entry.component).toBe(ManagePluginsTab)
-    expect(entry.options).toMatchObject({ id: 'market', order: 20 })
+    expect(entry.options).toMatchObject({ id: 'market', order: 16 })
     expect(entry.locale).toBe(NS)
     expect(resolveSlotLabel(entry.options.label)).toBe(zh.tab)
     expect(fetchMock).not.toHaveBeenCalled()
@@ -127,15 +129,15 @@ describe('plugin-market browser half assembly', () => {
     }
 
     stop()
-    expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
+    expect(slots.entries('settings.section')).toHaveLength(0)
   })
 
   it('lazily maps every face member to its channel method on demand', async () => {
     const { slots } = await bench()
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: makeList([]) }))
     stubChannel(fetchMock)
-    declareTab(slots)
-    const face = faceOf(tabEntry(slots))
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
 
     const pages = [
       { call: () => face.status(), method: 'status', args: {} },
@@ -174,8 +176,8 @@ describe('plugin-market browser half assembly', () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({ ok: true, value: makeInstallReview({ repository: 'octocat/demo' }) }))
     stubChannel(fetchMock)
-    declareTab(slots)
-    const face = faceOf(tabEntry(slots))
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
 
     await face.previewInstall('octocat/demo', 'v2.0.0')
     await face.install('octocat/demo', 'tok', 'main')
@@ -202,8 +204,8 @@ describe('plugin-market browser half assembly', () => {
       error: { code: 'github/rate-limit', message: 'limited', details: {} },
     }))
     stubChannel(fetchMock)
-    declareTab(slots)
-    const face = faceOf(tabEntry(slots))
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
 
     const error = await face.search('agents').catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
@@ -214,9 +216,9 @@ describe('plugin-market browser half assembly', () => {
     const { slots } = await bench()
     const fetchMock = vi.fn(async () => { throw new TypeError('network down') })
     stubChannel(fetchMock)
-    declareTab(slots)
+    declareSection(slots)
 
-    const face = faceOf(tabEntry(slots))
+    const face = faceOf(sectionEntry(slots))
     const error = await face.install('octocat/demo', 'tok').catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
     expect(error).toMatchObject({ code: 'market/unreachable' })
@@ -233,8 +235,8 @@ describe('plugin-market browser half assembly', () => {
       return jsonResponse({ ok: true, value: makeSearchPage([{ repository: 'octocat/demo', name: 'demo' }]) })
     })
     stubChannel(fetchMock)
-    declareTab(slots)
-    const face = faceOf(tabEntry(slots))
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
 
     await expect(face.status()).resolves.toEqual(makeStatus(false))
     await expect(face.search('demo', 1)).resolves.toMatchObject({ totalCount: 1 })
@@ -251,33 +253,33 @@ describe('plugin-market browser half assembly', () => {
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: makeList([]) }))
     stubChannel(fetchMock)
 
-    expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
-    const stop = declareTab(slots)
-    expect(resolveSlotLabel(tabEntry(slots).options.label)).toBe(zh.tab)
+    expect(slots.entries('settings.section')).toHaveLength(0)
+    const stop = declareSection(slots)
+    expect(resolveSlotLabel(sectionEntry(slots).options.label)).toBe(zh.tab)
 
     locale.setLocale('en')
-    expect(resolveSlotLabel(tabEntry(slots).options.label)).toBe(en.tab)
+    expect(resolveSlotLabel(sectionEntry(slots).options.label)).toBe(en.tab)
 
     stop()
-    expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
-    declareTab(slots)
-    const remounted = tabEntry(slots)
+    expect(slots.entries('settings.section')).toHaveLength(0)
+    declareSection(slots)
+    const remounted = sectionEntry(slots)
     expect(remounted.component).toBe(ManagePluginsTab)
-    expect(remounted.options).toMatchObject({ id: 'market', order: 20 })
+    expect(remounted.options).toMatchObject({ id: 'market', order: 16 })
     expect(resolveSlotLabel(remounted.options.label)).toBe(en.tab)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('tears the contribution down with the fiber and releases its dictionaries', async () => {
     const { slots, locale, ctx, fiber } = await bench()
-    declareTab(slots)
-    expect(slots.entries('settings.plugins.tab')).toHaveLength(1)
+    declareSection(slots)
+    expect(slots.entries('settings.section')).toHaveLength(1)
 
     await fiber.dispose()
     // The fiber unload collects the slots.inject wait; the locale dictionary
     // effect unregisters its namespace (a later registration must not throw).
     slots.disposeInjections()
-    expect(slots.entries('settings.plugins.tab')).toHaveLength(0)
+    expect(slots.entries('settings.section')).toHaveLength(0)
     expect(locale.resolve(NS, 'tab')).toBe('tab')
     expect(() => locale.register(NS, { zh, en })).not.toThrow()
     await ctx.fiber.dispose()

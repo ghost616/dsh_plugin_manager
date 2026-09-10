@@ -540,6 +540,8 @@ export function managePageHarness(overrides: Record<string, unknown> = {}) {
   }
   const props = {
     t: makeTranslator('zh'),
+    // The settings shell's one owner prop (`settings.section` share).
+    close: vi.fn(),
     ...mocks,
     ...overrides,
   }
