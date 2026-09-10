@@ -576,6 +576,10 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     const form = dialog.querySelector('[data-github-search]')
     expect(form).not.toBeNull()
     expect(scrollZone?.contains(form)).toBe(false)
+    // The scrolling row of the list view is the result list itself; the zone
+    // only hosts it (flexible + clipping), so nothing double-scrolls.
+    expect(scrollZone?.querySelector('[data-market-results]')).not.toBeNull()
+    expect(scrollZone?.style.overflowY).toBe('')
   })
 
   it('lets the page, the panels and every inner scroll zone follow the host height', async () => {
@@ -645,6 +649,66 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     const detailHeader = dialog.querySelector<HTMLElement>('[data-github-detail-header]')!
     expect(detailHeader.style.maxHeight).toBe('')
     expect(detailHeader.style.flexGrow).toBe('')
+  })
+
+  it('keeps the detail head fixed and scrolls only the README row', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: ['v1.0.0'],
+    }))
+    const search = vi.fn(async () => makeSearchPage([
+      { repository: 'acme/helper', name: 'helper' },
+    ]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openMarket(host)
+    await searchIn(dialog, 'helper')
+    await click(dialog.querySelector('[data-row-details]'))
+    await flush()
+
+    const readme = dialog.querySelector<HTMLElement>('[data-readme-section]')!
+    expect(readme).not.toBeNull()
+    // The README row is the detail view's one scrolling row: it is the flexible
+    // row (flex:1 + min-height:0) and carries the overflow.
+    expect(readme.style.flexGrow).toBe('1')
+    expect(readme.style.minHeight).toBe('0px')
+    // …but flexible sizing only works inside a flex context: the pane wrapper
+    // and the detail body must each be flex columns (jsdom cannot lay this out,
+    // so the class contract is what pins it for the browser).
+    const pane = dialog.querySelector<HTMLElement>('[data-detail-pane]')!
+    expect(pane.className).not.toBe('')
+    const body = dialog.querySelector<HTMLElement>('[data-detail-view]')!
+    expect(pane.contains(body)).toBe(true)
+    expect(body.contains(readme)).toBe(true)
+
+    // Everything above it is pinned: the detail toolbar, the ref picker with
+    // its download action, and the repository metadata all live OUTSIDE the
+    // scrolling row, so a long document never scrolls them out of view.
+    for (const selector of [
+      '[data-github-detail-header]',
+      '[data-ref-picker]',
+      '[data-ref-install]',
+      '[data-detail-header]',
+    ]) {
+      const pinned = dialog.querySelector<HTMLElement>(selector)
+      expect(pinned).not.toBeNull()
+      expect(readme.contains(pinned)).toBe(false)
+    }
+
+    // Neither the page nor the view wrappers scroll: no outer scrollbar beside
+    // the README's own (their only sizing contract is flexible + shrinkable).
+    const page = host.querySelector<HTMLElement>('[data-market-page]')!
+    expect(page.style.overflowY).toBe('')
+    const githubPanel = dialog.closest<HTMLElement>('[data-market-panel]')!
+    expect(githubPanel.style.overflowY).toBe('')
+    const zone = dialog.querySelector<HTMLElement>('[data-market-scroll]')!
+    expect(zone.style.overflowY).toBe('')
+    const detailScroll = dialog.querySelector<HTMLElement>('[data-detail-scroll]')!
+    expect(detailScroll.style.overflowY).toBe('')
+    const detailView = dialog.querySelector<HTMLElement>('[data-detail-view]')!
+    expect(detailView.style.overflowY).toBe('')
   })
 
   it('keeps the local roster inside the same height-adaptive tab body', async () => {

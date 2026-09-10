@@ -98,9 +98,39 @@ describe('ManagePluginsTab page tabs', () => {
     expect(panels[0]!.hidden).toBe(false)
     expect(panels[1]!.hidden).toBe(true)
     expect(panels[0]!.getAttribute('aria-labelledby')).toBe(tabs[0]!.id)
+    // The inactive panel is a REPLACEMENT, not a stacked sibling: it is taken
+    // out of the layout outright rather than left as an invisible block below
+    // the active one. The rule is pinned inline, so no host stylesheet can
+    // re-introduce a display value for the hidden panel.
+    expect(panels[1]!.style.display).toBe('none')
+    expect(panels[0]!.style.display).toBe('')
+    expect(panels.filter(panel => panel.style.display !== 'none')).toHaveLength(1)
     // The local repository owns the landed panel: its roster is up.
     expect(host.querySelector('[data-manage-tab]')).not.toBeNull()
     expect(host.querySelector('[data-plugin-row]')).not.toBeNull()
+  })
+
+  it('keeps exactly one panel in the layout after switching tabs', async () => {
+    const { props } = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+
+    await click(host.querySelector('[data-market-tab="github"]'))
+    await flush()
+    const local = host.querySelector<HTMLElement>('[data-market-panel="local"]')!
+    const github = host.querySelector<HTMLElement>('[data-market-panel="github"]')!
+    expect(local.hidden).toBe(true)
+    expect(local.style.display).toBe('none')
+    expect(github.hidden).toBe(false)
+    expect(github.style.display).toBe('')
+    // Still exactly one panel occupies layout space in each direction.
+    expect(host.querySelectorAll<HTMLElement>('[data-market-panel]:not([style*="display: none"])')).toHaveLength(1)
+
+    await click(host.querySelector('[data-market-tab="local"]'))
+    await flush()
+    expect(host.querySelector<HTMLElement>('[data-market-panel="local"]')!.style.display).toBe('')
+    expect(host.querySelector<HTMLElement>('[data-market-panel="github"]')!.style.display).toBe('none')
+    expect(host.querySelectorAll<HTMLElement>('[data-market-panel]:not([style*="display: none"])')).toHaveLength(1)
   })
 
   it('switches to the GitHub tab, browsing once, and keeps its results while hidden', async () => {

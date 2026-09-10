@@ -309,6 +309,15 @@
   padding-top: 2px;
 }
 
+/* The inactive tab is OUT OF THE LAYOUT, not merely invisible: this explicit
+   `display:none` beats the browser's default `[hidden]` mapping, which any
+   author rule with a real `display` value (below) would override. Both panels
+   stay mounted so their state survives, but only one ever occupies space —
+   the strip is a replacement, never a stack. */
+.panel[hidden] {
+  display: none;
+}
+
 /* Local-repository tab body: status header over the managed roster. The whole
    body is the tab's own scroll zone, so the header scrolls away with a long
    roster instead of being pinned above a cramped list. */
@@ -326,8 +335,9 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* GitHub tab body: fixed search/detail header over the scrolling result zone,
-   with the pagination footer below it. */
+/* GitHub tab body: fixed search/detail header over the content zone, with the
+   pagination footer below it. Only the zone's own children scroll (the result
+   list, the detail's README); the page and this body never do. */
 .githubPanel {
   display: flex;
   flex-direction: column;
@@ -339,15 +349,30 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* Market result zone of the GitHub tab: the search header (above) and the
-   pagination (below) stay put; only this middle zone scrolls, so a long result
-   list never pushes the pagination off the page. Its height is the panel's
-   leftover space (no viewport-fraction cap), so the zone follows the page. */
+/* Market content zone of the GitHub tab: the search header (above) and the
+   pagination (below) stay put while this zone hosts whichever view is up. It is
+   deliberately NOT a scroll container: the detail view pins its own head
+   (toolbar, metadata, ref picker, download action) and leaves scrolling to the
+   README row, so a single outer scrollbar would scroll the pinned head away.
+   `overflow: hidden` only clips; the list view scrolls its own result list. */
 .marketScroll {
   display: flex;
   flex-direction: column;
   gap: 10px;
   flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Result list of the list view: the one scrolling row of that view. It shrinks
+   with the zone (`flex: 0 1 auto` — no viewport-derived cap, which on a short
+   host would overflow the zone and be clipped unreachable) and scrolls inside
+   whatever height is left under the search form. */
+.marketList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -356,11 +381,15 @@
      it) for both the default 8px WebKit bar and Firefox's thin bar; the width
      comes from ui-theme's --dsh-scrollbar-width instead of a hardcoded px. */
   padding-right: var(--dsh-scrollbar-width, 8px);
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
 }
 
-/* Detail view inside that zone. The scroll bar belongs to .marketScroll (and to
-   an oversized .readmeSection); these two only carry the same flexible,
-   shrink-allowed sizing the component pins inline on them. */
+/* Detail view inside that zone: a fixed head (toolbar, metadata, ref picker,
+   download action) plus one flexible README row. These two wrappers only carry
+   flexible sizing — neither ever scrolls, which is what keeps the head pinned
+   while an oversized document scrolls inside .readmeSection alone. */
 .detailScroll {
   display: flex;
   flex-direction: column;
@@ -368,13 +397,30 @@
   min-height: 0;
 }
 
-.detailBody {
+/* Detail pane wrapper: the flex context of the detail body (and of its load /
+   failure rows). Without a flex parent here the body's `flex: 1 1 auto` does
+   nothing and the README row can never become the scrolling row. */
+.detailPane {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-/* README block: the last row of the detail body and the one flexible row in
-   it, so an oversized document scrolls here instead of stretching the tab. */
+/* Detail body: the column that pins its head rows and leaves the leftover
+   height to the README row, which is why it must be a flex container too. */
+.detailBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* README block: the last row of the detail body and its one scrolling row, so
+   an oversized document scrolls here instead of stretching the tab or pushing
+   the pinned detail head out of view. */
 .readmeSection {
   display: flex;
   flex-direction: column;
@@ -383,6 +429,8 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
 /* Detail-view header row: the back control sits before the detail title. */
@@ -526,15 +574,9 @@
 
 /* --- search results --- */
 
-.resultList {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  flex: none;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
+/* The result list itself is `.marketList` (see the GitHub tab section above):
+   that single class carries the grid, the shrinkable sizing and the scroll, so
+   no second rule can double-declare the same box. */
 
 .resultCard {
   display: flex;

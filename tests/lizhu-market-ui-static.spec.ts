@@ -62,18 +62,34 @@ describe('[离朱] 高度自适应 CSS 契约', () => {
     }
   })
 
-  it('结果区 / README 区是 flex:1 1 auto + min-height:0 的滚动容器', () => {
-    for (const className of ['.marketScroll', '.readmeSection']) {
-      expect(declarationOf(className, 'flex'), className).toBe('1 1 auto')
-      expect(declarationOf(className, 'min-height'), className).toBe('0')
-      expect(declarationOf(className, 'overflow-y'), className).toBe('auto')
-    }
+  it('结果区的裁剪器与 README 的滚动行各自归位（列表视图另有自己的滚动行）', () => {
+    // `.marketScroll` hosts whichever view is up; it CLIPS instead of scrolling,
+    // because the detail view pins its head inside it. The list view scrolls
+    // its own result list (`.marketList`), the detail view its README row.
+    expect(declarationOf('.marketScroll', 'flex')).toBe('1 1 auto')
+    expect(declarationOf('.marketScroll', 'min-height')).toBe('0')
+    expect(declarationOf('.marketScroll', 'overflow')).toBe('hidden')
+
+    expect(declarationOf('.readmeSection', 'flex')).toBe('1 1 auto')
+    expect(declarationOf('.readmeSection', 'min-height')).toBe('0')
+    expect(declarationOf('.readmeSection', 'overflow-y')).toBe('auto')
+
+    expect(declarationOf('.marketList', 'flex')).toBe('0 1 auto')
+    expect(declarationOf('.marketList', 'min-height')).toBe('0')
+    expect(declarationOf('.marketList', 'overflow-y')).toBe('auto')
   })
 
-  it('详情区在 CSS 里保留 min-height:0（flex 由组件内联补齐）', () => {
-    for (const className of ['.detailScroll', '.detailBody']) {
+  it('详情链在 CSS 里自带完整 flex 上下文（pane → body → README 行）', () => {
+    // A missing `display:flex` anywhere on this chain silently kills the
+    // README's flex sizing in a real browser (jsdom cannot see it), so each
+    // link must declare its own flex context instead of relying on a wrapper.
+    for (const className of ['.detailPane', '.detailBody']) {
+      expect(declarationOf(className, 'display'), className).toBe('flex')
+      expect(declarationOf(className, 'flex-direction'), className).toBe('column')
+      expect(declarationOf(className, 'flex'), className).toBe('1 1 auto')
       expect(declarationOf(className, 'min-height'), className).toBe('0')
     }
+    expect(declarationOf('.detailScroll', 'min-height')).toBe('0')
   })
 
   it('tab 链与工具栏显式 flex:none，其余固定行也绝不吸收剩余高度', () => {
@@ -94,8 +110,8 @@ describe('[离朱] 高度自适应 CSS 契约', () => {
   it('结果区 / 详情 / README / 列表体没有任何 vh 高度上限', () => {
     const guarded = [
       '.page', '.panel', '.localPanel', '.githubPanel',
-      '.marketScroll', '.detailScroll', '.detailBody', '.readmeSection',
-      '.resultList', '.list',
+      '.marketScroll', '.detailScroll', '.detailPane', '.detailBody', '.readmeSection',
+      '.marketList', '.list',
     ]
     for (const className of guarded) {
       for (const rule of rulesFor(className)) {
@@ -105,7 +121,7 @@ describe('[离朱] 高度自适应 CSS 契约', () => {
     }
   })
 
-  it('全文件仅弹窗外壳允许 vh 上限（46vh 已彻底消失）', () => {
+  it('全文件仅弹窗外壳允许 vh 上限（结果列表不再借视口定高）', () => {
     const offending = RULES.filter(rule => /\d\s*vh/.test(rule.body))
     expect(offending.map(rule => rule.selector)).toEqual(['.dialog'])
     expect(css).not.toMatch(/46\s*vh/)

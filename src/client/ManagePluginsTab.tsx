@@ -1025,7 +1025,10 @@ function RepositoryDetailPane({ slug, state, t, onRetry, onInstall }: {
   readonly onInstall: (choice: RefChoice) => void
 }): ReactNode {
   return (
-    <div data-detail-pane data-detail-slug={slug}>
+    // The pane is the flex context the detail body needs: without it the body's
+    // `flex: 1 1 auto` has no flex parent, the body grows to its content, and
+    // the README's own scroll row never gets a definite height.
+    <div className={css.detailPane} data-detail-pane data-detail-slug={slug}>
       {state.status === 'loading' ? (
         <p className={css.status} role="status" data-detail-loading>{t('detailLoading')}</p>
       ) : null}
@@ -1245,7 +1248,7 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
             ) : null}
 
             {ready !== undefined && ready.pageData.items.length > 0 ? (
-              <ul className={css.resultList} data-market-results>
+              <ul className={css.marketList} data-market-results>
                 {ready.pageData.items.map(item => (
                   <li key={item.repository} className={css.resultCard} data-market-card data-repository={item.repository}>
                     <div className={css.resultMain}>
@@ -1371,7 +1374,11 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
  * silently break the chain.
  */
 const PAGE_FILL_STYLE = { height: '100%', minHeight: 0 } as const
+/** The active panel fills the page; the inactive one is taken out of the layout
+ *  outright (inline `display: none` rides the `hidden` attribute, so no host or
+ *  reset sheet can re-introduce it), while both stay mounted to keep state. */
 const PANEL_FILL_STYLE = { flex: '1 1 auto', minHeight: 0 } as const
+const PANEL_HIDDEN_STYLE = { ...PANEL_FILL_STYLE, display: 'none' } as const
 
 /** The page's own tab ids, in strip order (local repository, then GitHub). */
 const PAGE_TABS = ['local', 'github'] as const
@@ -1556,7 +1563,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
       <div
         id={`${tabsId}-panel-local`}
         className={css.panel}
-        style={PANEL_FILL_STYLE}
+        style={activeTab === 'local' ? PANEL_FILL_STYLE : PANEL_HIDDEN_STYLE}
         role="tabpanel"
         aria-labelledby={`${tabsId}-tab-local`}
         hidden={activeTab !== 'local'}
@@ -1597,7 +1604,7 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
       <div
         id={`${tabsId}-panel-github`}
         className={css.panel}
-        style={PANEL_FILL_STYLE}
+        style={activeTab === 'github' ? PANEL_FILL_STYLE : PANEL_HIDDEN_STYLE}
         role="tabpanel"
         aria-labelledby={`${tabsId}-tab-github`}
         hidden={activeTab !== 'github'}
