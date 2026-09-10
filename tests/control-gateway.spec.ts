@@ -50,14 +50,21 @@ function gatewayWith(
   const source = makeSourceOps(repository, bed.records, bed.engines, {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
   })
-  // This spec drives the tsc-emitted gateway artifact while the fakes carry
-  // `src/`-derived types; both describe the same classes (the artifact is a
-  // plain emit of those sources), so the boundary needs one explicit cast.
-  const gateway = new MarketControllerGateway(ctx, {
-    controller: () => controller as never,
-    repository: () => repository as never,
-    source: source as never,
-  })
+  // This spec imports the tsc-emitted gateway artifact, so its `.d.ts` names a
+  // second nominal identity for every class-typed dep (`MarketControllerGateway`
+  // itself declares a private `deps` member). The fakes above are REAL
+  // instances of those classes — the artifact is a plain emit of the same
+  // sources — but the two declarations are separate private-member identities,
+  // so the deps object needs one explicit widening here. Everything the fakes
+  // and the source layer share is still checked: the controller is built through
+  // `testbed().deps()` (`MarketControllerDeps`), `makeSourceOps` through
+  // `MarketSourceDeps`, and the assertions below run the real behavior.
+  const deps = {
+    controller: () => controller,
+    repository: () => repository,
+    source,
+  } as unknown as import('../lib/types/host/control/gateway.js').MarketControllerGatewayDeps
+  const gateway = new MarketControllerGateway(ctx, deps)
   return { ctx, gateway, engines: bed.engines, records: bed.records }
 }
 

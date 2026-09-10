@@ -151,26 +151,18 @@ describe('[挑战] record classification —— 输入路径非法标签 record/
     expect(leftovers).toEqual([])
   })
 
-  it('applies the cross-consistent default for an explicit undefined classification', async () => {
+  it('applies the cross-consistent default for an absent classification', async () => {
     const file = join(tmp, 'undefined-input.json')
-    // With an entry the historical `plugin` default applies...
-    const withEntry = await new PluginRecordStore(join(tmp, 'undefined-with-entry.json')).add({
-      key: key('gh-undef'),
-      source: githubSource,
-      localDirName: 'gh-undef',
-      entry: 'index.js',
-      // Deliberate type violation: the store's cross-consistent default is what
-      // this case pins (see the test name).
-      classification: undefined as unknown as PluginMarketClassification,
-    })
-    expect(withEntry.classification).toBe('plugin')
-    // ...while an entry-less record defaults to `other`, never to a
-    // contradictory `plugin` without an entry.
+    // The type-level reading of "an explicit undefined classification": with
+    // `exactOptionalPropertyTypes` the `classification?` field of the store's
+    // input cannot be handed `undefined` at all, so the only reachable shapes
+    // are "the property is absent" (this case) and "the serialized value is
+    // null" (the legacy case below). Both are asserted through the public API
+    // instead of a type-violating call.
     const entryLess = await new PluginRecordStore(file).add({
       key: key('gh-undef-less'),
       source: githubSource,
       localDirName: 'gh-undef-less',
-      classification: undefined as unknown as PluginMarketClassification,
     })
     expect(entryLess.classification).toBe('other')
     const raw = JSON.parse(await readFile(file, 'utf8')) as { records: Record<string, { classification?: string }> }
@@ -830,10 +822,14 @@ describe('[跨层验证] 控制层按 classification/entry 拒绝装载非 plugi
     // 落盘记录（skills、entry=null）仍拿到 loader 行，但行保持停用：控制层不会
     // 导入一个不存在的入口。装载门禁在 setEnabled 处，且投影 loadable=false。
     const record = await store.get(key('gh-skills-pack'))
+    // Narrow once instead of casting at each use: the helpers below take a real
+    // `PluginMarketRecord`, and the store just returned one.
+    expect(record).not.toBeNull()
+    if (record === null) throw new Error('the skills record was not persisted')
     const rows = loader.entries()
     expect(rows).toHaveLength(1)
-    expect(rows[0]?.moduleName).toBe(entryModuleName(root, record as never))
-    expect(resolveEntryPath(root, record as never)).toBe(join(root, 'gh-skills-pack', 'index.js'))
+    expect(rows[0]?.moduleName).toBe(entryModuleName(root, record))
+    expect(resolveEntryPath(root, record)).toBe(join(root, 'gh-skills-pack', 'index.js'))
     expect(rows[0]).toMatchObject({ disabled: true, phase: null })
     expect((await controller.list()).entries[0]).toMatchObject({ key: 'gh-skills-pack', loadable: false })
 

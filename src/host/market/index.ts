@@ -138,7 +138,6 @@ export {
 
 export {
   DEFAULT_CHECKOUT_ENTRY,
-  INSTALL_PACKAGE_INVALID_PRODUCERS,
   PluginInstaller,
   nodeCommandRunner,
   readCheckoutManifest,

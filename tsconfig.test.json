@@ -31,10 +31,25 @@
   // client/host surface are part of this Program. The leaves keep owning the
   // emission of lib/types.
   //
+  // The root configs are listed too: they are plain TypeScript that `npm test`
+  // and `npm run build` execute, and until now nothing type-checked them (a
+  // silent blind spot - a rotted config only surfaces as a build-time crash).
+  // `tsdown.shared.ts` comes in transitively through the `./tsdown.shared.ts`
+  // imports but is named explicitly so it cannot drop out unnoticed.
+  //
   // Ordering: the control specs import the tsc-emitted artifact
   // (`../lib/types/host/control/*.js`, because this environment's vitest/oxc
   // pipeline cannot lower their TC39 decorators), so `tsc -b tsconfig.json`
   // must run before this project - which is exactly how `npm test` chains the
   // two: `tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run`.
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "vitest.config.ts",
+    "tsdown.config.ts",
+    "tsdown.prepare.config.ts",
+    "tsdown.shared.ts"
+  ]
 }

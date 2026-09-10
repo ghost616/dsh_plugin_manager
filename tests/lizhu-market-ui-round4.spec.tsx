@@ -18,7 +18,7 @@ import type { ReactElement } from 'react'
 import type { ManagedPluginList, PluginMarketKey, PluginMarketRecord } from '../src/types.ts'
 import { zh } from '../src/client/locales.ts'
 import { MarketCallFailure } from '../src/client/channel.ts'
-import { ManagePluginsTab } from '../src/client/ManagePluginsTab.tsx'
+import { ManagePluginsTab, type ManagePluginsTabInjected } from '../src/client/ManagePluginsTab.tsx'
 import {
   makeInstallOutcome,
   makeInstallReview,
@@ -287,16 +287,16 @@ describe('[离朱] 2. 下载入口不再检测已下载/已安装', () => {
 /* ------------------------------------------------------------------------ */
 
 describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () => {
-  function harness(previewInstall: ReturnType<typeof vi.fn>) {
+  function harness(previewInstall: ManagePluginsTabInjected['previewInstall']) {
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository, branches: ['main'], tags: [],
     }))
-    const install = vi.fn(async (repository: string, _token: string, version?: string | null) =>
+    const install = vi.fn(async (repository: string, _token: string, version: string | null = null) =>
       makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) }))
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall: previewInstall as never, install })
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
     return { props, install }
   }
 
@@ -382,7 +382,11 @@ describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () =
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openInstall(host)
-    expect(el(host, '[data-classification-note]').textContent).toBe(zh.entryMissingNote)
+    // The note line carries the dictionary copy for the kind plus the
+    // expected-entry template fed by the host's `note.entry`.
+    const noteText = el(host, '[data-classification-note]').textContent ?? ''
+    expect(noteText).toContain(zh.entryMissingNote)
+    expect(noteText).toContain(zh.expectedEntryNote.replace('{entry}', 'dist/index.js'))
     expect(el(host, '[data-classification-detail]').textContent).toBe(detail)
     expect(el(host, '[data-build-required]').textContent).toContain(zh.buildRequiredNotice)
     expect(dialog.querySelector('[data-install-confirm]')).not.toBeNull()

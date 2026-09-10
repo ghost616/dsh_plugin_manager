@@ -521,13 +521,6 @@ export async function readCheckoutManifestState(checkoutDir: string, fs: FsLike 
   return { manifest: value as Record<string, unknown>, note: null }
 }
 
-/**
- * Modules of this package that manufacture `install/package-invalid` (see
- * {@link readCheckoutManifest}). Exported as data so callers/tests can assert
- * the single-producer contract without grepping source text.
- */
-export const INSTALL_PACKAGE_INVALID_PRODUCERS: readonly string[] = ['install.ts']
-
 let nextTempId = 0
 
 /** Tolerant package.json read of one staged checkout (see {@link readCheckoutManifestState}). */

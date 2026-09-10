@@ -5,6 +5,16 @@ lib/
 .demo-profile/
 .dsh-profile-*/
 tests/.tmp/
-# Local test environment (Playwright E2E checkout + run artifacts); never part
-# of the package. It holds its own node_modules, package-lock and screenshots.
-.lizhu_env/
+# Local test environment (.lizhu_env/): TRACK its sources - the Playwright
+# browser specs and the harness config (playwright/vite/package) - but never
+# its dependencies or run artifacts. The blanket `.lizhu_env/` ignore this
+# replaces also hid the round-5 machine spec, which then could not be tracked
+# at all. Patterns below are runtime-artifact patterns, not directory-level
+# ones, so a newly added spec is picked up by `git status` immediately.
+.lizhu_env/node_modules/
+.lizhu_env/e2e/node_modules/
+.lizhu_env/e2e/test-results/
+.lizhu_env/e2e/shots/
+.lizhu_env/e2e/report.json
+.lizhu_env/*.log
+.lizhu_env/probe.txt

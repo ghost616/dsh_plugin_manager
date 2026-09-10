@@ -20,7 +20,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
 import { transform } from 'lightningcss'
-import type { UserConfig } from 'tsdown'
+import type { TsdownPluginOption, UserConfig } from 'tsdown'
 
 /** Loader / plugin identity stamped into the client handoff and style tags. */
 export const PLUGIN_ID = 'dsh-plugin-market'
@@ -156,7 +156,7 @@ function tscSourceMapPlugin() {
 }
 
 /** Pure-CSS + CSS Modules inline pipeline (module, text?inline, global). */
-function cssPlugins(id: string): unknown[] {
+function cssPlugins(id: string): TsdownPluginOption[] {
   return [
     {
       name: 'dsh-plugin-market-css-modules-inline',
@@ -220,7 +220,7 @@ function cssPlugins(id: string): unknown[] {
 }
 
 /** Build-time purity mirror: cross-plugin value imports must be externals. */
-function purityPlugin(id: string, externals: Set<string>): unknown {
+function purityPlugin(id: string, externals: Set<string>): TsdownPluginOption {
   return {
     name: 'dsh-plugin-market-client-purity',
     resolveId(source: string) {

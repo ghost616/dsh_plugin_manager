@@ -637,6 +637,15 @@ export class MarketSourceOperations {
     }
     // A `plugin` judgement without a runnable entry (a checkout that needs its
     // build step first) folds into `other`, exactly as the record store does.
+    //
+    // `note.entry` semantics (contract with the UI): for `kind: 'entry-missing'`
+    // it carries the EXPECTED entry path — the checkout-relative file the
+    // analyzer named as the entry the checkout should produce (its
+    // `entryHint`), i.e. what a build step would generate. It is the only
+    // source of that path on the wire, so a consumer that renders an
+    // "expected entry" hint reads it from here; it stays absent when the
+    // analyzer named no entry (the field is never invented locally, because the
+    // conventional `index.js` fallback is not what the checkout declares).
     return {
       classification: distribution.buildRequired ? 'other' : distribution.classification,
       note: {

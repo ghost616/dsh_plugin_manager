@@ -371,12 +371,14 @@ export interface ManagedPluginView {
   readonly record: PluginMarketRecord
   readonly runtime: ManagedPluginRuntime
   /**
-   * Whether this record may be enabled at all: only a `plugin`-classified
-   * record with a resolved entry is loadable (see
-   * {@link isPluginRecordLoadable}). Consumers use it to disable the enable
-   * switch; the host refuses an enable attempt of a non-loadable record with
-   * the stable `market/not-loadable` code, so the flag and the refusal can
-   * never disagree.
+   * HOST PROJECTION of the enable gate: whether this record may be enabled at
+   * all. Only a `plugin`-classified record with a resolved entry is loadable,
+   * so this flag and the host's `market/not-loadable` refusal share one source
+   * ({@link isPluginRecordLoadable} / {@link recordNotLoadableReason}) and can
+   * never disagree. The shipped UI may read it directly, or recompute the same
+   * verdict from the record with {@link recordNotLoadableReason} (it does the
+   * latter, so it can render the specific reason); either way the host refuses
+   * an enable attempt of a non-loadable record with `market/not-loadable`.
    */
   readonly loadable: boolean
 }
@@ -402,15 +404,27 @@ export interface MarketStatus {
 export type MarketCheckoutKind = 'plugin' | 'skills' | 'preset' | 'tooling' | 'other'
 
 /**
- * Smart-install analysis verdict attached to a review when the candidate
- * checkout is not an installable dsh plugin. `installable` is always false on
- * this shape (an installable plugin carries no analysis field); `kind` tells
- * the UI which refusal copy to show and `reason` is the user-facing model
- * rationale.
+ * LEGACY / WIRE-COMPAT analytical verdict of one review. `kind` is the host
+ * analyzer's own vocabulary (see `MarketCheckoutKind`) and `reason` is the
+ * analyzer's rationale for it.
+ *
+ * NOT A UI CONTRACT, in either direction:
+ *
+ * - the UI must NOT render a refusal from this field (there is no refusal to
+ *   render — a non-plugin checkout stays downloadable); if it wants the
+ *   analyzer's rationale as a secondary detail it takes it from
+ *   {@link MarketInstallNote.text}, the untrusted-prose channel;
+ * - `reason` is analyzer-supplied text (model/third-party), never Host copy and
+ *   never something to render as the primary status line.
+ *
+ * The shape is kept only because it is part of the shipped wire/type surface:
+ * a review may carry it, and consumers predating {@link MarketInstallNote} may
+ * still read it. No source in this package consumes it.
  */
 export interface PluginInstallReviewAnalysis {
   readonly installable: false
   readonly kind: MarketCheckoutKind
+  /** Analyzer rationale for `kind` (model/third-party text; not UI copy). */
   readonly reason: string
 }
 
@@ -539,12 +553,14 @@ export interface PluginInstallReview {
    */
   readonly note?: MarketInstallNote
   /**
-   * Smart-install analysis verdict, present only when the review classified
-   * the candidate as not installable (skills/preset/tooling/other, or a plugin
-   * needing a build first). Kept for consumers that render the richer analyzer
-   * vocabulary; {@link classification} is the persisted tag the install files.
-   * Absent on standard npm plugins (no analysis ran) and on candidates the
-   * analysis considered installable.
+   * LEGACY / WIRE-COMPAT analyzer verdict, present only when an analysis ran
+   * over the candidate. It is kept for the shipped wire surface and for
+   * consumers older than {@link MarketInstallNote}; no source in this package
+   * reads it, and the UI MUST NOT render "not installable" copy from it — the
+   * documented UI channel is {@link note} (stable kind + dictionary lookup),
+   * with {@link classification} as the persisted tag the install files and
+   * {@link buildRequired} as the (test-only) build hint. `reason` inside it is
+   * analyzer text, not Host copy.
    */
   readonly analysis?: PluginInstallReviewAnalysis
 }

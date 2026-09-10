@@ -19,7 +19,6 @@ import type { PluginMarketKey, PluginMarketSource } from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { NodeFs, type FsLike } from '../src/host/market/fs.ts'
 import {
-  INSTALL_PACKAGE_INVALID_PRODUCERS,
   PluginInstaller,
   readCheckoutManifest,
   readCheckoutManifestState,
@@ -682,25 +681,20 @@ function compact(text: string): string {
 describe('[挑战] §5 契约检查', () => {
   const root = process.cwd()
 
-  it('the deps-failed test declaration keeps its body off the signature line', async () => {
+  it('every it(...) declaration keeps its body off the signature line', async () => {
     // 该断言守护的是「一行式 it(...) { const ... }」这类编辑残留（真实回归过
-    // 一次）。按 `it(` 词法找声明（与标题措辞无关），断言声明行以 `{` 收尾、
-    // 且紧随其后的一行是语句而非被塞在同一行的代码。
+    // 一次）。按 `it(` 词法找**每一处**声明（与标题措辞、参数个数无关），断言
+    // 声明行以 `{` 收尾——即语句没有被塞进签名行。
     const text = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
     const lines = text.split(/\r?\n/)
     const declarations = lines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => /^\s*it\(/.test(line))
+      .filter(({ line }) => /^\s*it(\.each\([^)]*\))?\(/.test(line))
     expect(declarations.length).toBeGreaterThan(0)
-    for (const { line, index } of declarations) {
-      if (!line.trim().endsWith('{')) continue
-      const joined = compact(line)
-      const brace = joined.indexOf('{')
-      const afterBrace = brace < 0 ? '' : joined.slice(brace + 1).trim()
-      // 声明行上 `{` 之后不得再有语句（驼峰标识符 + 调用/赋值的形态）。
-      expect(afterBrace).toBe('')
-      expect((lines[index + 1] ?? '').trim().length).toBeGreaterThan(0)
-    }
+    const offenders = declarations
+      .filter(({ line }) => !line.trim().endsWith('{'))
+      .map(({ line, index }) => `${index + 1}: ${line.trim()}`)
+    expect(offenders).toEqual([])
     // 反向守卫：本次关注的用例确实存在，避免断言因改名而空转。
     expect(compact(text)).toContain('reports deps-failed and rolls back on a pnpm failure')
   })
@@ -749,11 +743,17 @@ describe('[挑战] §5 契约检查', () => {
     expect(offenders).toEqual([])
   })
 
-  it('install/package-invalid has exactly one producer module (exported contract)', () => {
-    // 该契约由 install.ts 以数据导出（INSTALL_PACKAGE_INVALID_PRODUCERS），
-    // 断言不再依赖任何注释文本。
-    expect([...INSTALL_PACKAGE_INVALID_PRODUCERS]).toEqual(['install.ts'])
-    expect(INSTALL_PACKAGE_INVALID_PRODUCERS).toContain('install.ts')
+  it('install/package-invalid has exactly one producer module inside src/host/market', async () => {
+    // 真扫描：逐文件读源码找码字面量（排除 errors.ts 的消息字典），与上面
+    // PRODUCER_LESS_CODES 的扫描手法一致。生产代码不为此暴露任何测试专用导出。
+    const dir = join(root, 'src', 'host', 'market')
+    const producers: string[] = []
+    for (const name of await readdir(dir)) {
+      if (!name.endsWith('.ts') || name === 'errors.ts') continue
+      const text = await readFile(join(dir, name), 'utf8')
+      if (text.includes("'install/package-invalid'")) producers.push(name)
+    }
+    expect(producers).toEqual(['install.ts'])
   })
 })
 

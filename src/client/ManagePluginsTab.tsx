@@ -246,6 +246,14 @@ function notLoadableText(
  * registered as a live plugin entry carries the refusal copy of its own reason
  * instead of a toggle verb: its switch is disabled, and the same sentence is the
  * row tooltip and the inline note.
+ *
+ * The gate is RECOMPUTED here with the shared `recordNotLoadableReason` rather
+ * than read from `view.loadable`: the two are the same source (the host computes
+ * `loadable` from that very helper, and refuses an enable with
+ * `market/not-loadable`), but only the helper yields WHICH reason it is — and the
+ * reason drives the per-reason copy (`switchNotLoadable` vs
+ * `switchNotLoadableEntry`). Reading the boolean would collapse the two
+ * situations into one message again.
  */
 function switchLabel(view: ManagedPluginView, name: string, t: Translate): string {
   const reason = recordNotLoadableReason(view.record)
@@ -360,6 +368,9 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
             const runtimeError = view.runtime.lastError
             const name = displayName(view)
             const busy = busyKeys.has(view.key)
+            // Same source as the host's `view.loadable` projection (both call
+            // this helper), recomputed here only because the UI must render the
+            // specific reason; see switchLabel() above.
             /** Why this checkout can never be registered (null = it can). */
             const notLoadable = recordNotLoadableReason(view.record)
             /** Localized reason copy, shared by tooltip, note and switch label. */
@@ -481,14 +492,22 @@ function reviewClassificationText(review: PluginInstallReview, t: Translate): st
  * here comes from this tab's dictionary; `note.text` (analyzer rationale) is a
  * secondary detail shown next to the dictionary copy, never as the sole text.
  * The legacy `review.entryNote` string is debug-only and is never rendered.
+ *
+ * `note.entry` — the entry path the checkout was expected to carry, shipped
+ * with `kind: 'entry-missing'` — is appended to the same line through its own
+ * dictionary template, so the field is consumed instead of travelling unread.
  */
 function reviewNoteText(note: MarketInstallNote | undefined, t: Translate): string | null {
   if (note === undefined) return null
-  switch (note.kind) {
-    case 'analysis-unavailable': return t('analysisConfigGuide')
-    case 'entry-missing': return t('entryMissingNote')
-    case 'classified': return t('classificationNote')
-  }
+  const primary = ((): string => {
+    switch (note.kind) {
+      case 'analysis-unavailable': return t('analysisConfigGuide')
+      case 'entry-missing': return t('entryMissingNote')
+      case 'classified': return t('classificationNote')
+    }
+  })()
+  if (note.entry === undefined || note.entry.length === 0) return primary
+  return `${primary} ${t('expectedEntryNote', { entry: note.entry })}`
 }
 
 function InstallDialog({ repository, version, refKind, previewInstall, install, t, onClose, onInstalled }: {
@@ -590,12 +609,21 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
             <p className={css.classificationNotice} data-download-classification>
               {t('classificationNotice', { classification: reviewClassificationText(review, t) })}
             </p>
-            {reviewNoteText(review.note, t) === null ? null : (
+            {review.note === undefined ? null : (
               <p className={css.classificationNote} data-classification-note>{reviewNoteText(review.note, t)}</p>
             )}
             {review.note?.text === undefined || review.note.text.length === 0 ? null : (
               <p className={css.analysisDetail} data-classification-detail>{review.note.text}</p>
             )}
+            {/*
+              TEST-ONLY SEAM: the production assembly never produces
+              `buildRequired` — it needs an entry probe at review time, and the
+              shipped preview reads only the remote manifest, so nothing can
+              probe a checkout that has not been downloaded yet (see
+              `MarketSourceDeps.analysisEntryProbe` in the shared types). The
+              branch is kept because injected-probe specs do populate it, and it
+              is what renders the "build it first" copy when they do.
+            */}
             {review.buildRequired === true ? (
               <p className={css.warning} data-build-required>{t('buildRequiredNotice')}</p>
             ) : null}

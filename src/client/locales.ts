@@ -180,6 +180,11 @@ export const zh = {
   classificationNote: '该检出不是可加载的插件：下载后会入库并保持停用，不会注册加载条目。',
   /** Note of a review whose checkout carries no runnable entry. */
   entryMissingNote: '该检出没有可直接加载的入口文件：下载后会入库并保持停用。',
+  /**
+   * Expected entry path appended to a note line (host `note.entry`), rendered
+   * through this template so the raw path is never bare user-visible copy.
+   */
+  expectedEntryNote: '期望入口：{entry}',
   /** Extra note when the download will need a build step before it can load. */
   buildRequiredNotice: '该仓库缺少可直接加载的入口，下载后需先构建才能启用。',
   /** Preview failure when no LLM endpoint is configured for smart analysis. */
@@ -312,6 +317,11 @@ export const en: Record<MarketManageLocaleKey, string> = {
   classificationNote: 'This checkout is not a loadable plugin: it is filed as-is and stays disabled, with no loader entry registered.',
   /** Note of a review whose checkout carries no runnable entry. */
   entryMissingNote: 'This checkout carries no ready-to-load entry: it is filed as-is and stays disabled after the download.',
+  /**
+   * Expected entry path appended to a note line (host `note.entry`), rendered
+   * through this template so the raw path is never bare user-visible copy.
+   */
+  expectedEntryNote: 'Expected entry: {entry}',
   /** Extra note when the download will need a build step before it can load. */
   buildRequiredNotice: 'This repository has no ready-to-load entry; build it after downloading before enabling.',
   analysisNotConfigured: 'Smart analysis is not configured.',

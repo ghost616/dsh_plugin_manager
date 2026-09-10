@@ -101,12 +101,16 @@ function routeFor(options: {
   const source = makeSourceOps(repository, bed.records, engines, {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
   })
-  // Compiled-artifact gateway over `src/`-typed fakes (see control-gateway.spec.ts).
-  const gateway = new MarketControllerGateway(ctx, {
-    controller: () => controller as never,
-    repository: () => repository as never,
-    source: source as never,
-  })
+  // Compiled-artifact gateway over `src/`-typed fakes (see control-gateway.spec.ts):
+  // its `.d.ts` names a second nominal identity for every class-typed dep, so
+  // this single widening — the fakes ARE instances of the same classes — is the
+  // one boundary the dual program needs.
+  const deps = {
+    controller: () => controller,
+    repository: () => repository,
+    source,
+  } as unknown as import('../lib/types/host/control/gateway.js').MarketControllerGatewayDeps
+  const gateway = new MarketControllerGateway(ctx, deps)
   const router = new RouterServer()
   servers.push(router.server)
   const dispose = registerMarketWebChannel(router, gateway)

@@ -33,7 +33,8 @@ owns exactly one Cordis instance at runtime.
 | `scripts/install-profile.mjs` | Idempotent profile self-load recipe (junction/copy + the single patch row) | framework |
 | `scripts/verify-load.mjs` | Demo verification: real Loader activation of the single row + artifact checks | framework |
 | `tests/` | Vitest suites for all modules (business tests live with their module owners) | all modules |
-| `vitest.config.ts` + `tsconfig.test.json` | Test gate: vitest keeps its defaults (only `.lizhu_env/**` is excluded) and `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` | framework |
+| `vitest.config.ts` + `tsconfig.test.json` | Test gate: vitest keeps its defaults (only `.lizhu_env/**` is excluded from collection) and `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` + the root configs | framework |
+| `.lizhu_env/` | Local Playwright browser-spec environment: **specs + harness config tracked**, only run artifacts ignored (`.gitignore`) | framework |
 
 ### Row contract (single-row convergence)
 
@@ -63,9 +64,11 @@ pnpm test         # tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
 
 - `tsc -b` type-checks both leaves and emits `lib/types`.
 - `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` (which spans both
-  faces, so that project has DOM + React JSX and node ambient types at once);
-  `vitest` itself never type-checks, so this step is what keeps the specs honest
-  about the wire types (branded keys, `exactOptionalPropertyTypes` shapes).
+  faces, so that project has DOM + React JSX and node ambient types at once)
+  plus the root build/test configs (`vitest.config.ts`, `tsdown*.ts`); `vitest`
+  itself never type-checks, so this step is what keeps the specs honest about
+  the wire types (branded keys, `exactOptionalPropertyTypes` shapes) and keeps
+  the configs from rotting.
 - `tsdown` bundles the tsc emission: the Node half (`lib/index.js`) keeps
   production-section specifiers external; the browser half (`lib/client.js`)
   is the lazy-CJS closure factory whose externals resolve through the loader
@@ -77,16 +80,29 @@ pnpm test         # tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
 
 ### Local test environment (`.lizhu_env/`)
 
-`.lizhu_env/` is a **local, ignored** testing environment (an independent
-Playwright E2E checkout with its own `node_modules`, browser specs and run
-artifacts). It is listed in `.gitignore` and excluded from the unit runner via
-`vitest.config.ts` (`exclude: [..., '.lizhu_env/**']`), because its specs import
-`@playwright/test`, which this package does not depend on. `tsconfig.test.json`
-only covers `tests/**`, so `npm test` never sees it either.
+`.lizhu_env/` is a **local** browser-spec environment (an independent Playwright
+E2E checkout). Its **sources and harness config are version-controlled** — the
+Playwright spec (`e2e/tests/*.spec.ts`), `playwright.config.ts`,
+`vite.config.mts`, `main.tsx`, `index.html` and the package manifests — while
+**only its run artifacts are ignored** (`.gitignore`: `e2e/node_modules/`,
+`e2e/test-results/`, `e2e/shots/`, `e2e/report.json`, `*.log`, `probe.txt`).
+The ignore rules are artifact-level rather than a `.lizhu_env/` blanket, so a
+new spec file shows up in `git status` right away.
 
-Run those browser specs from `.lizhu_env/e2e/` itself (`npm install`,
+`npm test` never collects those specs: `vitest.config.ts` excludes
+`.lizhu_env/**` from collection. Tracking the spec and excluding it from the
+unit run are two independent decisions and do not conflict — version control
+decides what is stored, the vitest `exclude` decides what the unit runner
+collects. The exclusion is required (a collected browser spec fails with
+`Playwright Test did not expect test.beforeEach() to be called here`, because
+its `@playwright/test` copy differs from anything the package itself would
+resolve), and it is also not a substitute for version control: the same file is
+both tracked and uncollected. `tsconfig.test.json` covers `tests/**` and the
+root configs only, so the browser specs are not type-checked either.
+
+Run them from `.lizhu_env/e2e/` itself (`npm install`,
 `npx playwright install chromium`, then `npx playwright test`); each spec's
-header documents its own setup. Keep the directory out of version control.
+header documents its own setup.
 
 ## Profile self-load (development recipe)
 
