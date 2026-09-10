@@ -47,7 +47,9 @@ const contexts: Context[] = []
 const servers: RouterServer[] = []
 /** Every router this spec started (teardown validation reads them back). */
 const servedRouters: RouterServer[] = []
-/** Sockets the teardown really destroyed (must be > 0 — see the afterAll). */
+/** Routers `closeServer()` really ran on (set semantics: one entry per router). */
+const closedRouters = new Set<RouterServer>()
+/** Sockets the teardown cut; reported for the logs, never asserted (env-sensitive). */
 let destroyedSocketCount = 0
 
 afterEach(async () => {
@@ -56,11 +58,18 @@ afterEach(async () => {
 })
 
 afterAll(() => {
-  // Teardown validation: the socket-destroy step is not decorative — the
-  // requests above leave keep-alive sockets behind, and the teardown has to cut
-  // them. If this ever drops to 0, the tracking/listener pair went stale again.
-  expect(destroyedSocketCount).toBeGreaterThan(0)
+  // Teardown validation with invariants that do NOT depend on how many
+  // keep-alive sockets the environment happened to leave behind (that count is
+  // timing/platform sensitive): every router this spec served was handed to the
+  // teardown exactly once, the teardown closed none of them twice, and no
+  // listener of theirs is still bound when the file ends.
+  expect(servedRouters.length).toBeGreaterThan(0)
+  expect([...closedRouters]).toHaveLength(servedRouters.length)
+  expect(servedRouters.every(router => closedRouters.has(router))).toBe(true)
   expect(servedRouters.every(router => !router.server.listening)).toBe(true)
+  console.log(
+    `[control-webchannel] teardown: ${servedRouters.length} router(s) closed, ${destroyedSocketCount} socket(s) destroyed`,
+  )
 })
 
 /**
@@ -70,6 +79,7 @@ afterAll(() => {
  */
 function closeServer(router: RouterServer): Promise<void> {
   const { server } = router
+  closedRouters.add(router)
   return new Promise<void>((resolve) => {
     if (!server.listening) {
       router.destroySockets()

@@ -88,9 +88,7 @@ describe('[挑战] record classification —— 文件路径非法标签 record/
 
   const badValues: readonly unknown[] = ['preset', 'PLUGIN', 'Skills', '', 42, {}, [], true]
 
-  it.each(badValues.map((value, index) => [JSON.stringify(value) ?? String(value), value, index] as const))(
-    'rejects classification %s in the file as record/corrupt and leaves the bytes untouched',
-    async (label, value, index) => {
+  it.each(badValues.map((value, index) => [JSON.stringify(value) ?? String(value), value, index] as const))('rejects classification %s in the file as record/corrupt and leaves the bytes untouched', async (label, value, index) => {
       const file = join(tmp, `bad-file-${index}.json`)
       await writeFile(file, JSON.stringify({
         schemaVersion: 1,

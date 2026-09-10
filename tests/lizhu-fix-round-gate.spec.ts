@@ -165,9 +165,7 @@ describe('[挑战] §1 门禁：无清单 / 坏清单 / 非 plugin 检出时 pnp
     { label: '无可执行入口（hint=skills）', fixture: { manifest: { main: 'lib/missing.js' }, files: ['SKILL.md'] }, extra: { classification: 'skills' }, classification: 'skills', note: 'not a plugin' },
   ] as const
 
-  it.each(gated.map((item, index) => [item.label, index, item] as const))(
-    'skips pnpm entirely and files the checkout: %s',
-    async (_label, index, item) => {
+  it.each(gated.map((item, index) => [item.label, index, item] as const))('skips pnpm entirely and files the checkout: %s', async (_label, index, item) => {
       const root = join(tmp, `gated-${index}`)
       await mkdir(root)
       const name = `gh-gated-${index}`
@@ -362,9 +360,7 @@ describe('[挑战] §2 readCheckoutManifestState / readCheckoutManifest', () => 
     { label: 'boolean', text: 'true', note: 'not a JSON object', slug: 'boolean' },
   ] as const
 
-  it.each(failures.map((item) => [item.label, item] as const))(
-    'tolerates %s as manifest:null with a note',
-    async (_label, item) => {
+  it.each(failures.map((item) => [item.label, item] as const))('tolerates %s as manifest:null with a note', async (_label, item) => {
       const dir = join(tmp, `tolerant-${item.slug}`)
       await mkdir(dir)
       if (item.text !== undefined) await writeFile(join(dir, 'package.json'), item.text, 'utf8')
@@ -374,9 +370,7 @@ describe('[挑战] §2 readCheckoutManifestState / readCheckoutManifest', () => 
     },
   )
 
-  it.each(failures.map((item) => [item.label, item] as const))(
-    'throws install/package-invalid for %s',
-    async (_label, item) => {
+  it.each(failures.map((item) => [item.label, item] as const))('throws install/package-invalid for %s', async (_label, item) => {
       const dir = join(tmp, `strict-${item.slug}`)
       await mkdir(dir)
       if (item.text !== undefined) await writeFile(join(dir, 'package.json'), item.text, 'utf8')
@@ -455,9 +449,7 @@ describe('[挑战] §3 入口探测优先：hint × 入口状态 全组合', () 
 
   const hints = ['skills', 'other', undefined] as const
 
-  it.each(hints.map((hint) => [hint ?? '(none)', hint] as const))(
-    'entry present + hint=%s → always plugin with that entry (and pnpm runs)',
-    async (label, hint) => {
+  it.each(hints.map((hint) => [hint ?? '(none)', hint] as const))('entry present + hint=%s → always plugin with that entry (and pnpm runs)', async (label, hint) => {
       const name = `gh-present-${label.replace(/[^a-z]/gi, '')}`
       const root = join(tmp, `present-${label.replace(/[^a-z]/gi, '')}`)
       await mkdir(root)
@@ -481,9 +473,7 @@ describe('[挑战] §3 入口探测优先：hint × 入口状态 全组合', () 
     { hint: 'plugin', expected: 'other' },
   ] as const
 
-  it.each(noneExpectations.map((item) => [item.hint ?? '(none)', item] as const))(
-    'entry absent + hint=%s → %s with entry null and no pnpm',
-    async (label, item) => {
+  it.each(noneExpectations.map((item) => [item.hint ?? '(none)', item] as const))('entry absent + hint=%s → %s with entry null and no pnpm', async (label, item) => {
       const slug = label.replace(/[^a-z]/gi, '')
       const name = `gh-absent-${slug}`
       const root = join(tmp, `absent-${slug}`)
@@ -673,9 +663,72 @@ const PRODUCER_LESS_CODES = [
   'market/unsupported-other',
 ] as const satisfies readonly PluginMarketErrorCode[]
 
+/**
+ * 仓级守卫的**显式豁免清单**：文件 → 该文件中尚未一行化的 `it` 声明行号。
+ *
+ * 只有确实无法由本模块一行改写的形态才允许登记（当前仅 plugin-market-ui 的
+ * 两个 spec —— 它们属并行模块所有权，本模块不得改动其文件）。豁免不是静默
+ * 放过：守卫会断言每条豁免都**仍然对应**一处真实的非一行式声明，一旦对方把
+ * 文件改成一行式，守卫会因「豁免项过期」而失败，提示从清单中删除该条。
+ * 清单的权威描述同步记录在 `current_spec.md`。
+ */
+const NON_ONE_LINE_IT_EXEMPTIONS: Record<string, readonly number[]> = {
+  'tests/lizhu-market-ui-round4.spec.tsx': [315, 341, 414],
+  'tests/manage-market-page.client.spec.tsx': [1250, 1438],
+}
+
+/**
+ * 该 spec 文本中所有**非一行式**的 `it` 声明行号（1-based）——即
+ * {@link strayStatementsOnItDeclarations} 的判定结果（含跨行起始行）。
+ */
+function nonOneLineItDeclarationLines(text: string): number[] {
+  return itDeclarationStartLines(text)
+    .filter(({ line }) => !bodyOpensOnThisLine(line))
+    .map(({ index }) => index + 1)
+}
+
+/**
+ * 守卫有效性用例表（模块级：`it.each` 的每一行必须是**一行式**声明，因此表格
+ * 数据不写在 `it(` 行上）。每项为 [样本行, 形态说明, 期望违规数]。
+ */
+const IT_GUARD_CASES = [
+  // 一行式违规：语句被塞在签名行上（含带尾注释的形态）。
+  ["it('x', async () => { const y = 1", 'plain it with a trailing statement', 1],
+  ["it.skip('x', () => { const y = 1", 'it.skip with a trailing statement', 1],
+  ["it.only('x', () => { const y = 1", 'it.only with a trailing statement', 1],
+  ["it.each([[1], [2]])('x', () => { const y = 1", 'it.each with nested array arguments', 1],
+  ["it('x (with parens)', () => { const y = 1", 'parens inside the title string (violation)', 1],
+  ["it('x', () => { const y = 1 // trailing comment", 'violation with a trailing comment', 1],
+  // 合规的一行式声明。
+  ["it('x', () => {", 'plain it with a clean body', 0],
+  ["it.each([[1], [2]])('x', () => {", 'it.each with nested arguments but a clean body', 0],
+  ["it.each(items.map((x) => [x]))('x', () => {", 'it.each whose argument contains )', 0],
+  ['it(`template ${name} title`, () => {', 'template literal in the title with a clean body', 0],
+  ["it('x', () => { // trailing ) comment", 'trailing line comment carrying a stray paren', 0],
+  ["it('x (with parens)', () => {", 'parens inside the title string (clean body)', 0],
+] as const
+
 /** 去掉空白，便于在「同一行」问题上与格式无关地做结构断言。 */
 function compact(text: string): string {
   return text.replace(/\s+/g, ' ')
+}
+
+/**
+ * 递归收集 `tests/` 下的全部 spec 文件（`.spec.ts` / `.spec.tsx`），返回相对
+ * 仓库根的 POSIX 路径（稳定排序）—— 仓级守卫按此清单循环执行。
+ */
+async function collectSpecFiles(root: string): Promise<string[]> {
+  const found: string[] = []
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(join(root, dir), { withFileTypes: true })
+    for (const entry of entries) {
+      const rel = `${dir}/${entry.name}`
+      if (entry.isDirectory()) await walk(rel)
+      else if (/\.spec\.tsx?$/.test(entry.name)) found.push(rel)
+    }
+  }
+  await walk('tests')
+  return found.sort()
 }
 
 /** 去掉行尾 `//` 注释（字符串内的 `//` 不视为注释起点）。 */
@@ -796,41 +849,49 @@ function strayStatementsOnItDeclarations(text: string): string[] {
 describe('[挑战] §5 契约检查', () => {
   const root = process.cwd()
 
-  it('every it(...) declaration keeps its body off the signature line', async () => {
-    // 该断言守护的是「一行式 it(...) { const ... }」这类编辑残留（真实回归过
-    // 一次）。按放宽后的词法找**每一处**声明（与标题措辞、参数个数、修饰符、
-    // 参数嵌套深度无关），断言声明行以 `{` 收尾——即语句没有被塞进签名行。
-    const text = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
-    // 约定（方案 b）：本仓库 spec 不使用跨行 it 声明。这里显式断言该前提，
-    // 使下面的严格断言（声明行必须以 `{` 收尾，含 it.each）不存在假阳性面；
-    // 一旦将来出现跨行写法，本断言会先失败并提示改写为一行式。
-    expect(opensCrossLineItCall(text)).toBe(false)
-    const offenders = strayStatementsOnItDeclarations(text)
-    expect(offenders).toEqual([])
-    // 反向守卫：本次关注的用例确实存在，避免断言因改名而空转。
-    expect(compact(text)).toContain('reports deps-failed and rolls back on a pnpm failure')
-    // 且收集词法确实在这份文本里命中了声明（防止词法写错导致零命中）。
-    expect(text.split(/\r?\n/).filter((line) => /^\s*it\b/.test(line)).length).toBeGreaterThan(0)
+  it('every it(...) declaration in every tests/**/*.spec.ts* keeps its body off the signature line', async () => {
+    // 仓级守卫：对 tests/ 下**每一个** spec 文件执行两层检查。
+    //
+    // 约定（方案 b）：本仓库 spec 不使用跨行 it 声明；每一处 it（含 it.each /
+    // it.skip / it.only）必须整体写在一行并以 `{` 收尾。
+    //  - 前置探测：发现跨行声明即失败（这正是本条仓级规则的一部分）；
+    //  - 违规断言：声明行未以 `{` 收尾（语句被塞进签名行）即失败，输出
+    //    「文件: 行号: 内容」。
+    // 自查：本文件自身也在 tests/ 下，因此同一规则也约束本文本。
+    // 例外：{@link NON_ONE_LINE_IT_EXEMPTIONS} 列出的他模块文件（见其文档注释），
+    // 且豁免需逐行号对上，过期即失败。
+    const specs = await collectSpecFiles(root)
+    expect(specs.length).toBeGreaterThan(0)
+    expect(specs).toContain('tests/lizhu-fix-round-gate.spec.ts')
+    expect(specs).toContain('tests/market-install.spec.ts')
+    const unexpectedDeclarations: string[] = []
+    const staleExemptions: string[] = []
+    let declarationCount = 0
+    for (const spec of specs) {
+      const text = await readFile(join(root, spec), 'utf8')
+      declarationCount += itDeclarationStartLines(text).length
+      const nonOneLine = nonOneLineItDeclarationLines(text)
+      const exempt = NON_ONE_LINE_IT_EXEMPTIONS[spec] ?? []
+      const unexpected = nonOneLine.filter((line) => !exempt.includes(line))
+      if (unexpected.length > 0) unexpectedDeclarations.push(`${spec}: ${unexpected.join(', ')}`)
+      // 豁免清单必须与现状一致：还有非一行式声明才允许被豁免（过期项即失败）。
+      const stale = exempt.filter((line) => !nonOneLine.includes(line))
+      if (stale.length > 0) staleExemptions.push(`${spec}: line(s) ${stale.join(', ')} (convert or drop the exemption)`)
+      // 前置探测（跨行起始行）在无豁免的文件里必须为 false。
+      if (exempt.length === 0 && opensCrossLineItCall(text)) {
+        unexpectedDeclarations.push(`${spec}: has a cross-line it declaration start`)
+      }
+    }
+    expect(unexpectedDeclarations).toEqual([])
+    expect(staleExemptions).toEqual([])
+    // 反向守卫：确认词法真的扫到了声明（防止「零命中」掩盖失效）。
+    expect(declarationCount).toBeGreaterThan(100)
+    // 且本次关注的既有用例仍在（避免断言因改名而空转）。
+    const marketInstall = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
+    expect(compact(marketInstall)).toContain('reports deps-failed and rolls back on a pnpm failure')
   })
 
-  it.each([
-    // 一行式违规：语句被塞在签名行上（含带尾注释的形态）。
-    ["it('x', async () => { const y = 1", 'plain it with a trailing statement', 1],
-    ["it.skip('x', () => { const y = 1", 'it.skip with a trailing statement', 1],
-    ["it.only('x', () => { const y = 1", 'it.only with a trailing statement', 1],
-    ["it.each([[1], [2]])('x', () => { const y = 1", 'it.each with nested array arguments', 1],
-    ["it('x (with parens)', () => { const y = 1", 'parens inside the title string (violation)', 1],
-    ["it('x', () => { const y = 1 // trailing comment", 'violation with a trailing comment', 1],
-    // 合规的一行式声明。
-    ["it('x', () => {", 'plain it with a clean body', 0],
-    ["it.each([[1], [2]])('x', () => {", 'it.each with nested arguments but a clean body', 0],
-    ["it.each(items.map((x) => [x]))('x', () => {", 'it.each whose argument contains )', 0],
-    ['it(`template ${name} title`, () => {', 'template literal in the title with a clean body', 0],
-    ["it('x', () => { // trailing ) comment", 'trailing line comment carrying a stray paren', 0],
-    ["it('x (with parens)', () => {", 'parens inside the title string (clean body)', 0],
-  ] as const)(
-    'the it-collection guard handles %s (%s)',
-    (line, _label, expectedOffenders) => {
+  it.each(IT_GUARD_CASES)('the it-collection guard handles %s (%s)', (line, _label, expectedOffenders) => {
       const offenders = strayStatementsOnItDeclarations(`${line}\n  expect(1).toBe(1)\n})\n`)
       expect(offenders).toHaveLength(expectedOffenders)
       if (expectedOffenders === 1) expect(offenders[0]).toContain('1: ')

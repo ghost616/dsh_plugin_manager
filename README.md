@@ -23,6 +23,7 @@ owns exactly one Cordis instance at runtime.
 | --- | --- | --- |
 | `package.json` | ESM-only manifest: `exports` (`.`/`./client`/`./types`/`./control`/`./src/*`/`./package.json`), `dsh.bundle`, `dsh.client`, peer/dev mirror, publish `files` | framework |
 | `cordis.patch.yml` | Bundle patch layer: exactly one loader row, `plugin-market-host` | framework |
+| `.gitattributes` | Line-ending policy: `* text=auto eol=lf` (LF in the index and on checkout, overriding `core.autocrlf`) plus explicit `binary` rules for image/font types | framework |
 | `tsconfig.json` + `tsconfig.base.json` + `tsconfig.host.json` + `tsconfig.client.json` | Solution root with **separate Host and Client leaves** (Cordis `Context` declaration merges never share one Program); tsc emits `lib/types` | framework |
 | `tsdown.config.ts` / `tsdown.prepare.config.ts` / `tsdown.shared.ts` | Self-contained tsdown replication of the dsh artifact contracts (Node ESM externalizing production deps; browser lazy-CJS closure factory with `window.__ModuleLoader__.load`, baked `NODE_ENV`, inlined CSS) | framework |
 | `src/index.ts` | Host package main / single-row composer: normalizes Config, opens the repository (`marketRepository` service), activates the embedded control in the same context | framework |
@@ -32,7 +33,7 @@ owns exactly one Cordis instance at runtime.
 | `src/types.ts` | Cross-face shared types (`import type` only) | framework |
 | `scripts/install-profile.mjs` | Idempotent profile self-load recipe (junction/copy + the single patch row) | framework |
 | `scripts/verify-load.mjs` | Demo verification: real Loader activation of the single row + artifact checks | framework |
-| `scripts/check-encoding.mjs` | Encoding/whitespace pre-flight over tracked text files (invalid UTF-8, C1, cp1252 mojibake, U+FFFD, `git diff --check`) | framework |
+| `scripts/check-encoding.mjs` | Encoding/line-ending/whitespace pre-flight over tracked text files (invalid UTF-8, C1, cp1252 mojibake, U+FFFD, CR, `git diff --check`) | framework |
 | `tests/` | Vitest suites for all modules (business tests live with their module owners) | all modules |
 | `vitest.config.ts` + `tsconfig.test.json` | Test gate: vitest keeps its defaults (only `.lizhu_env/**` is excluded from collection) and `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` + the root configs | framework |
 | `.lizhu_env/` | Local test environment (Playwright specs + harness config + artifacts): **not committed at all**; vitest excludes it from collection | framework |
@@ -67,18 +68,31 @@ pnpm check:encoding:selftest   # fixture-driven self-test of the pre-flight (sec
 
 - `node scripts/check-encoding.mjs` runs first because it is the cheapest gate
   (a text scan of the tracked corpus) and it catches a defect class no compiler
-  can see: invalid UTF-8, C1 control characters, cp1252 mojibake and `U+FFFD`,
-  plus `git diff --check`-style whitespace. Warnings (UTF-8 BOM, blank line at
-  end of file) are printed but never fail the run.
+  can see: invalid UTF-8, C1 control characters, cp1252 mojibake, `U+FFFD`, CR
+  line endings, plus `git diff --check`-style whitespace. Warnings (UTF-8 BOM,
+  blank line at end of file) are printed but never fail the run; a CR in a text
+  file is an ERROR, because the repository pins its line-ending policy in
+  `.gitattributes` (`* text=auto eol=lf`, plus explicit `binary` rules for image
+  and font types). That policy is what makes the rule a defect rather than
+  environment noise: `text=auto` normalizes text to LF in the index, and `eol=lf`
+  wins over `core.autocrlf`, so the working tree is LF on every machine while
+  binary files are never touched. A file that genuinely needs CR (a `.bat`, an
+  intentional CRLF fixture) declares it in `.gitattributes` with `-text` or
+  `eol=crlf`, and the check skips it via `git check-attr` - the rule follows the
+  repository's own declaration instead of second-guessing it.
 - `node scripts/check-encoding.mjs --self-test` (also `pnpm
   check:encoding:selftest`) creates synthetic fixtures in a temp directory and
   asserts every judgement and the exit code: clean UTF-8 with non-ASCII text
-  passes, invalid bytes / C1 / mojibake / `U+FFFD` fail, BOM and blank-at-eof
-  only warn, NUL-bearing and empty files are skipped, and the `git diff --check`
-  parser ignores diff-content lines. It never writes inside the repository and
-  cleans up after itself. It is the second step of `pnpm test`, so the gate can
-  never silently rot: editing the checker without updating its expectations fails
-  the same run.
+  passes, invalid bytes / C1 / mojibake / `U+FFFD` / CRLF / mixed endings fail,
+  BOM and blank-at-eof only warn, NUL-bearing and empty files are skipped, and the
+  `git diff --check` parser ignores diff-content lines. It also builds a real
+  throwaway git repository (its own `core.autocrlf=false`, identity pinned),
+  stages fixtures - including one declared CR carrier in that repo's
+  `.gitattributes` - and runs the full non-fixture check there, which is the only
+  way to cover the git pass, the blank-at-eof dedupe and the attribute escape
+  hatch. It never writes inside this repository and cleans up after itself. It is
+  the second step of `pnpm test`, so the gate can never silently rot: editing the
+  checker without updating its expectations fails the same run.
 - `tsc -b` type-checks both leaves and emits `lib/types`.
 - `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` (which spans both
   faces, so that project has DOM + React JSX and node ambient types at once)
@@ -117,6 +131,13 @@ recorded where they are read (the module history), not where they cannot run.
 Do not "fix" this by moving a spec under `tests/` or by re-adding `.lizhu_env/`
 to the index.
 
+`.module_agent/` (the agent-harness working data: module specs, plans, execution
+logs and the per-module file backups) is ignored for the same reason, plus one
+concrete hazard: its backup files carry CRLF and BOMs, so committing the
+directory would make the encoding gate fail for every module at once - the CR
+rule is an error and the repository pins LF in `.gitattributes`. Keep it
+machine-local.
+
 `vitest.config.ts` keeps excluding `.lizhu_env/**` from collection. Being
 ignored by git does not make a directory invisible to the unit runner — vitest
 walks the filesystem, not the index — so without that `exclude` the browser
@@ -141,12 +162,20 @@ disposable: nothing in it can be shared through the repository.
   This exists because cross-module edits have already caused real damage here
   (a module rewrote another module's spec, and a PowerShell round-trip through a
   spec file silently re-encoded it).
+- **Never introduce a CR or mixed line endings.** The repository fixes its
+  line-ending policy in `.gitattributes` (`* text=auto eol=lf`), so the index and
+  every checkout are LF and CR cannot come back through `core.autocrlf`. The
+  encoding gate fails the run on a CR, which means a tool that writes CRLF (a
+  PowerShell pipeline, an editor default) is caught immediately rather than
+  silently producing a whole-file diff. A file that legitimately must carry CR
+  declares it in `.gitattributes` (`-text` or `eol=crlf`) and the gate honours
+  that declaration.
 - **Run the encoding/whitespace gate before committing.** It is the first step of
   `npm test` (`node scripts/check-encoding.mjs`); run it standalone with
   `npm run check:encoding`. It scans tracked text files for invalid UTF-8, C1
-  control characters, cp1252 mojibake and the `U+FFFD` replacement character,
-  plus `git diff --check`-style whitespace violations. When it reports a file
-  outside your module, report it — do not fix it.
+  control characters, cp1252 mojibake, the `U+FFFD` replacement character and CR
+  line endings, plus `git diff --check`-style whitespace violations. When it
+  reports a file outside your module, report it — do not fix it.
 - **When editing text files, never let a tool re-encode them.** Write with the
   editor/file tools, and if a shell is unavoidable read and write raw bytes with
   an explicit UTF-8 (no BOM) encoding. This is the setup for the accident the

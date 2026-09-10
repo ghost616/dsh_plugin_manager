@@ -1,0 +1,33 @@
+# Repository line-ending policy.
+#
+# The index stores LF for every text file (verified: `git ls-files --eol` showed
+# i/lf across the tree), but without this file the *working tree* shape was left
+# to each clone: this machine has core.autocrlf=true, which materializes CRLF on
+# checkout and, worse, lets a tool that writes CRLF (a PowerShell pipeline, an
+# editor default) slip CR into a file whose committed form is LF. The encoding
+# gate then reports CR warnings that are really checkout/tool artefacts.
+#
+# `text=auto eol=lf` fixes both directions at the repository level:
+#   - `text=auto`  -> git decides text vs binary by content (a NUL in the first
+#                     8 KiB means binary), normalizing text to LF in the index;
+#   - `eol=lf`     -> checkout writes LF, and it WINS over core.autocrlf, so the
+#                     working tree is LF regardless of the machine's git config.
+#
+# `binary` is kept explicit as documentation: the auto-detection above is what
+# actually decides (a file matching `binary` is never normalized, diffed as text
+# or merged as text), and naming it makes the intent obvious to the next reader.
+# Screenshots and CSS art belong here too, so a future committed image cannot be
+# mangled by a stray eol rule.
+* text=auto eol=lf
+# Generated bundle output is not tracked (see .gitignore); excluded explicitly so
+# a future `git add -f lib` can never reintroduce a mixed-endings blob.
+/lib/** -text
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary

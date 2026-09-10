@@ -101,5 +101,3 @@ describe('isManagedLocalDirName / splitManagedLocalDir (v2 checkout layout)', ()
     }
   })
 })
-
-

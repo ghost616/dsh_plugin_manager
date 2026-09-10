@@ -10,3 +10,9 @@ tests/.tmp/
 # so version control keeps nothing from it. vitest.config.ts additionally
 # excludes it from test collection.
 .lizhu_env/
+# Agent-harness runtime state (module specs, plans, execution logs, file backups
+# under .module_agent/framework/backups/...). Machine-local working data, not part
+# of the package: it is written by tooling, its backup files carry CRLF and BOMs,
+# and committing it would make the encoding gate fail for every module at once
+# (the CR rule is an error: the repository pins LF in .gitattributes).
+.module_agent/

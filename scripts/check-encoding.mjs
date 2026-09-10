@@ -33,7 +33,14 @@
  *        when the git pass did not already report it for that file. Missing a
  *        FINAL newline is not flagged at all: git's default rule set does not
  *        include `missing-at-eof`, and many tracked files predate it.
- *     8. NOT DETECTED ON PURPOSE - a bare `?` where a dash/quote used to be.
+ *     8. CR in a text file - CRLF-only line endings, or CRLF mixed with bare LF.
+ *        The index stores LF throughout (the repository's committed shape), so a
+ *        CR in the worktree is a worktree-only artefact: either a checkout with
+ *        `core.autocrlf=true` or a tool that wrote CRLF (e.g. a PowerShell
+ *        pipeline). A WARNING for now; raise it to an error once every tracked
+ *        file is CR-free, at which point re-normalizing a file becomes a real
+ *        defect rather than a checkout setting.
+ *     9. NOT DETECTED ON PURPOSE - a bare `?` where a dash/quote used to be.
  *        The 0x3F accident is real, but no shape of it can be told apart from
  *        this codebase's ordinary code: ` ? ` is the ternary separator in
  *        nearly every TypeScript file here (a candidate rule matched 275
@@ -46,7 +53,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -65,10 +72,44 @@ const REPLACEMENT = /\uFFFD/
  */
 const MOJIBAKE = /[\u00C2\u00C3\u00E2](?:[\u0080-\u00BF]|[\u2018-\u201F\u2020-\u2022\u20AC\u2030\u2039\u203A\u2122])/
 
-/** Run one git command, returning stdout and exit code. */
+/**
+ * Whether the repository's own attribute rules excuse a file from the
+ * line-ending rule: a path marked `-text` (binary) or given an explicit
+ * `eol=crlf`/`eol=cr` is an intentional CR carrier, so flagging it would be a
+ * false positive. Values are cached per path (`git check-attr` is a subprocess).
+ */
+const attributesCache = new Map()
+function attributesException(file) {
+  if (file === undefined) return false
+  const cached = attributesCache.get(file)
+  if (cached !== undefined) return cached
+  const { stdout, code } = git(['check-attr', 'text', 'eol', '--', file])
+  // An empty/failed query (a path outside this repository, e.g. a temp-dir
+  // fixture) says nothing about the file: answer "no exception" WITHOUT caching,
+  // so the same relative path is still asked about once it is evaluated from
+  // inside its own repository.
+  if (code !== 0 || stdout.trim().length === 0) return false
+  // `git check-attr` prints `<path>: <attr>: <value>`; anchor on the attribute
+  // name (the path prefix makes a `^text:` anchor silently never match).
+  const value = (name) => {
+    const match = new RegExp(`(?:^|\\s)${name}: (.*)$`, 'm').exec(stdout)
+    return match === null ? 'unspecified' : match[1].trim()
+  }
+  const excused = value('text') === 'unset'
+    || value('eol') === 'crlf'
+    || value('eol') === 'cr'
+  attributesCache.set(file, excused)
+  return excused
+}
+
+/**
+ * Run one git command, returning stdout and exit code. Callers append `--`
+ * themselves when their command takes a pathspec: doing it here corrupted
+ * `git check-attr ... -- <path>` by appending an extra `--` path token.
+ */
 function git(args) {
   try {
-    const stdout = execFileSync('git', [...args, '--'], { encoding: 'utf8' })
+    const stdout = execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     return { stdout, code: 0 }
   } catch (error) {
     return {
@@ -147,7 +188,7 @@ function hexWindow(bytes, offset, radius = 6) {
  * Content checks for ONE byte buffer. Split out from the corpus walk so the
  * self-test can drive it over synthetic fixtures without touching the worktree.
  */
-function checkFile(bytes) {
+function checkFile(bytes, file) {
   const errors = []
   const warnings = []
   const decoded = decodeStrict(bytes)
@@ -176,10 +217,29 @@ function checkFile(bytes) {
     errors.push(`cp1252 mojibake pair (two bogus accented chars) on line(s) ${mojibake.join(', ')} - UTF-8 bytes re-read as Latin-1 where a dash/quote belongs`)
   }
 
+  // Line endings: an ERROR, because the repository pins the policy itself
+  // (`.gitattributes`: `* text=auto eol=lf`, which wins over core.autocrlf), so a
+  // CR in a tracked file can only come from a tool that wrote CRLF - exactly what
+  // this gate exists to stop. `attributesException(file)` honours a declared
+  // carrier: a path marked `-text` or `eol=crlf`/`eol=cr` in .gitattributes is
+  // skipped, so an intentionally CRLF file can never make this rule unusable.
+  if (text.includes('\r') && !attributesException(file)) {
+    const line = lineNumbers(text, /\r/)[0]
+    const mixed = text.replace(/\r\n/g, '').includes('\n')
+    errors.push(mixed
+      ? `mixed line endings (CRLF and LF together) - first CR on line ${line}; .gitattributes pins LF (add "-text" or "eol=crlf" for a legitimate CR carrier)`
+      : `CRLF line endings - first CR on line ${line}; .gitattributes pins LF (add "-text" or "eol=crlf" for a legitimate CR carrier)`)
+  }
+
   // `blank-at-eof` is git's own rule; this is only a hint for files git does not
-  // report (git walks changed files only). `check()` dedupes it against git.
-  const end = text.endsWith('\n') ? text.slice(0, -1) : null
-  const onlyNewline = bytes.length === 1 && bytes[0] === 10
+  // report (git walks changed files only). `check()` adds the git findings
+  // FIRST and dedupes this out when git already said it.
+  // CRLF-aware: normalize CR out before asking whether the file ends with two
+  // newlines, so a `})\r\n\r\n` tail is recognized too.
+  const normalized = text.replace(/\r\n/g, '\n')
+  const endsWithNewline = normalized.endsWith('\n')
+  const end = endsWithNewline ? normalized.slice(0, -1) : null
+  const onlyNewline = normalized === '\n'
   if (end !== null && !onlyNewline && (end.endsWith('\n') || end.length === 0)) {
     warnings.push('blank line(s) at end of file (git blank-at-eof)')
   }
@@ -233,10 +293,35 @@ function check(options = {}) {
     ? [...roots]
     : trackedFiles(undefined).filter((file) => !file.startsWith(IGNORED_PREFIX))
 
+  // Git's own whitespace findings come FIRST: the blank-at-eof dedupe below
+  // needs the set of files git already reported, and collecting it after the
+  // file loop (as an earlier version did) made the dedupe a no-op.
+  //
+  // `blank-at-eof` wording differs by case: an added trailing blank line is
+  // "new blank line at EOF.", a pre-existing one "blank line at end of file".
+  const isBlankAtEofFinding = (message) => /blank line at (the )?end of file|new blank line at EOF/i.test(message)
+  const diffChecks = []
+  const gitFindings = []
+  if (roots === undefined) {
+    for (const args of [['diff', '--check'], ['diff', '--cached', '--check']]) {
+      const { stdout, code } = git([...args, '--'])
+      if (code !== 0 && stdout.trim().length === 0) {
+        // No HEAD / no index yet (fresh `git init`): not a whitespace failure.
+        continue
+      }
+      diffChecks.push({ label: `git ${args.join(' ')}`, code })
+      for (const found of parseWhitespaceErrors(stdout)) {
+        gitFindings.push(found)
+      }
+    }
+  }
+  /** Files whose blank-at-eof the git pass already reports (dedupe target). */
+  const gitBlankAtEof = new Set(
+    gitFindings.filter((found) => isBlankAtEofFinding(found.message)).map((found) => found.file),
+  )
+
   let scanned = 0
   let skippedBinary = 0
-  /** Files whose blank-at-eof the git pass already reports (dedupe target). */
-  const gitBlankAtEof = new Set()
 
   for (const file of files) {
     let bytes
@@ -254,7 +339,7 @@ function check(options = {}) {
     }
     scanned += 1
 
-    const result = checkFile(bytes)
+    const result = checkFile(bytes, file)
     for (const message of result.errors) error(file, undefined, message)
     for (const message of result.warnings) {
       if (message.startsWith('blank line(s) at end of file') && gitBlankAtEof.has(file)) continue
@@ -262,25 +347,18 @@ function check(options = {}) {
     }
   }
 
-  const diffChecks = []
-  if (roots === undefined) {
-    for (const args of [['diff', '--check'], ['diff', '--cached', '--check']]) {
-      const { stdout, code } = git(args)
-      if (code !== 0 && stdout.trim().length === 0) {
-        // No HEAD / no index yet (fresh `git init`): not a whitespace failure.
-        continue
-      }
-      diffChecks.push({ label: `git ${args.join(' ')}`, code })
-      for (const found of parseWhitespaceErrors(stdout)) {
-        error(found.file, found.line === 0 ? undefined : found.line, `whitespace: ${found.message}`)
-        if (found.message.includes('blank line at end of file')) gitBlankAtEof.add(found.file)
-      }
-    }
+  for (const found of gitFindings) {
+    error(found.file, found.line === 0 ? undefined : found.line, `whitespace: ${found.message}`)
   }
 
   return {
     errors: violations,
-    warnings,
+    // Belt and braces: even if a hint slipped past the loop-time check, git's
+    // own blank-at-eof finding wins and the duplicate warning is dropped here.
+    warnings: warnings.filter((entry) => {
+      if (!entry.includes('blank line(s) at end of file')) return true
+      return !gitBlankAtEof.has(entry.slice(0, entry.lastIndexOf(': ')))
+    }),
     scanned,
     skippedBinary,
     diffChecks,
@@ -334,15 +412,24 @@ function selfTest() {
     const binary = write('blob.bin', Buffer.from([0x00, 0x01, 0xE2, 0x20, 0xFF]))
     // 9. empty file: skipped, never counted as text
     const empty = write('empty.ts', Buffer.alloc(0))
+    // 10. CRLF-only line endings (now an ERROR: .gitattributes pins LF)
+    const crlf = write('crlf.ts', Buffer.from('const z = 3\r\nconst w = 4\r\n', 'utf8'))
+    // 11. CRLF-shaped blank-at-eof: `})\r\n\r\n` must still be recognized (a
+    //     pure-CRLF file, so the CR rule's CRLF branch applies).
+    const crlfEof = write('crlf-eof.ts', Buffer.from('function f() {\r\n})\r\n\r\n', 'utf8'))
+    // 12. genuinely mixed endings: CRLF lines plus a bare LF line.
+    const mixed = write('mixed.ts', Buffer.from('const ok = 1\r\nconst no = 2\n', 'utf8'))
 
-    const result = check({ roots: [clean, invalid, c1, mojibake, replacement, bom, blankEof, binary, empty] })
+    const result = check({
+      roots: [clean, invalid, c1, mojibake, replacement, bom, blankEof, binary, empty, crlf, crlfEof, mixed],
+    })
 
-    assert('text files scanned (binary + empty skipped)', result.scanned, 7)
+    assert('text files scanned (binary + empty skipped)', result.scanned, 10)
     assert('binary files skipped', result.skippedBinary, 1)
-    // Four damaged files (invalid UTF-8, C1, mojibake, U+FFFD) are ERRORs; the
-    // BOM and the trailing blank line are WARNINGS only.
-    assert('error count', result.errors.length, 4)
-    assert('warning count', result.warnings.length, 2)
+    // Seven damaged files (invalid UTF-8, C1, mojibake, U+FFFD, CRLF, CRLF+blank,
+    // mixed) are ERRORs; BOM and the trailing blank line are WARNINGS only.
+    assert('error count', result.errors.length, 7)
+    assert('warning count', result.warnings.length, 3)
 
     const errorsFor = (file) => result.errors.filter((entry) => entry.startsWith(`${file}:`))
     const warningsFor = (file) => result.warnings.filter((entry) => entry.startsWith(`${file}:`))
@@ -352,13 +439,25 @@ function selfTest() {
     assert('C1 control character detected', errorsFor(c1).length, 1)
     assert('cp1252 mojibake detected', errorsFor(mojibake).length, 1)
     assert('U+FFFD detected', errorsFor(replacement).length, 1)
-    assert('damaged files carry no warnings', result.warnings.filter((entry) => errorsFor(entry.split(':')[0]).length >= 0 && entry.startsWith(invalid)).length, 0)
+    assert('damaged invalid-utf8 file has no warnings', warningsFor(invalid).length, 0)
     assert('clean file: no errors', errorsFor(clean).length, 0)
     assert('clean file: no warnings', warningsFor(clean).length, 0)
     assert('binary file: no findings', result.errors.concat(result.warnings).filter((entry) => entry.startsWith(`${binary}:`)).length, 0)
     assert('empty file: no findings', result.errors.concat(result.warnings).filter((entry) => entry.startsWith(`${empty}:`)).length, 0)
     assert('BOM warning reported', warningsFor(bom).some((entry) => entry.includes('BOM')), true)
     assert('blank-at-eof warning reported', warningsFor(blankEof).some((entry) => entry.includes('blank line(s) at end of file')), true)
+    // CR rule now fails the run
+    assert('CRLF-only file is an error', errorsFor(crlf).length, 1)
+    assert('CRLF error names the cause and the fix', errorsFor(crlf)[0]?.includes('CRLF line endings') && errorsFor(crlf)[0]?.includes('.gitattributes'), true)
+    assert('CRLF-only file has no warnings left', warningsFor(crlf).length, 0)
+    // `})\r\n\r\n` must be recognized: CR error + CRLF-aware blank-at-eof warning
+    assert('CRLF-shaped blank-at-eof file: one error + one warning',
+      errorsFor(crlfEof).length + warningsFor(crlfEof).length, 2)
+    assert('CRLF-shaped blank-at-eof detected', warningsFor(crlfEof).some((entry) => entry.includes('blank line(s) at end of file')), true)
+    assert('CRLF-EOL fixture also fails the CR rule', errorsFor(crlfEof).some((entry) => entry.includes('CRLF line endings')), true)
+    assert('mixed-ending file is an error about mixing', errorsFor(mixed).length, 1)
+    assert('mixed endings detected', errorsFor(mixed)[0]?.includes('mixed line endings'), true)
+    assert('mixed-ending file has no warnings left', warningsFor(mixed).length, 0)
 
     // Whitespace parser: exactly the output shape real `git diff --check` emits
     // (the trailing `+const b = 2   ` content line is NOT a second finding).
@@ -374,6 +473,83 @@ function selfTest() {
     assert('blank-at-eof parser: one finding', blankParsed.length, 1)
     assert('blank-at-eof parser: message', blankParsed[0]?.message, 'blank line at end of file')
     assert('parser: empty output is clean', parseWhitespaceErrors('').length, 0)
+
+    // ------------------------------------------------------------------
+    // Non-roots mode over a REAL throwaway git repo: this is the only way to
+    // exercise the git pass and, crucially, the blank-at-eof DEDUPE (an earlier
+    // version collected git's findings after the file loop, so the dedupe set
+    // was still empty while it was consulted and the warning was never
+    // suppressed).
+    // ------------------------------------------------------------------
+    const repo = join(dir, 'git-repo')
+    mkdirSync(repo)
+    const gitRun = (args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    gitRun(['init', '-q'])
+    // Pin a deterministic identity and line-ending policy: the machine's own
+    // config must not change what this fixture asserts.
+    gitRun(['config', 'core.autocrlf', 'false'])
+    gitRun(['config', 'user.email', 'selftest@example.invalid'])
+    gitRun(['config', 'user.name', 'check-encoding selftest'])
+    // `})` + a trailing blank line: git reports "new blank line at EOF." for it
+    // and the script's own hint must NOT be added on top.
+    writeFileSync(join(repo, 'trailing-blank.ts'), Buffer.from('const f = (): void => {\n})\n\n', 'utf8'))
+    // staged trailing whitespace: git reports it and also prints the offending
+    // diff content line, which must not become a second finding.
+    writeFileSync(join(repo, 'trailing-space.ts'), Buffer.from('const g = 1   \n', 'utf8'))
+    // CRLF file: git has no line-ending rule (it reads each CR as trailing
+    // whitespace), so the CR finding is what the script's own rule contributes.
+    writeFileSync(join(repo, 'crlf-only.ts'), Buffer.from('const h = 2\r\nconst i = 3\r\n', 'utf8'))
+    // Escape hatch: an intentionally CR-carrying file is declared in the repo's
+    // own attribute rules, and the CR rule must honour that declaration.
+    writeFileSync(join(repo, 'crlf-declared.ts'), Buffer.from('const j = 4\r\nconst k = 5\r\n', 'utf8'))
+    writeFileSync(join(repo, '.gitattributes'), Buffer.from('* text=auto eol=lf\ncrlf-declared.ts -text\n', 'utf8'))
+    gitRun(['add', 'trailing-blank.ts', 'trailing-space.ts', 'crlf-only.ts', 'crlf-declared.ts', '.gitattributes'])
+
+    const previousCwd = process.cwd()
+    let repoResult
+    try {
+      process.chdir(repo)
+      repoResult = check()
+    } finally {
+      process.chdir(previousCwd)
+    }
+
+    const relName = (entry) => entry.slice(0, entry.indexOf(':'))
+    const repoErrorsFor = (name) => repoResult.errors.filter((entry) => relName(entry) === name)
+    const repoWarningsFor = (name) => repoResult.warnings.filter((entry) => relName(entry) === name)
+
+    assert('git repo: five text files scanned (four fixtures + .gitattributes)', repoResult.scanned, 5)
+    assert('git repo: blank-at-eof reported once by git', repoErrorsFor('trailing-blank.ts').length, 1)
+    assert('git repo: git owns the blank-at-eof wording', repoErrorsFor('trailing-blank.ts')[0]?.includes('blank line at EOF'), true)
+    assert('git repo: blank-at-eof NOT duplicated as a warning', repoWarningsFor('trailing-blank.ts').length, 0)
+    assert('git repo: trailing whitespace reported once', repoErrorsFor('trailing-space.ts').length, 1)
+    assert('git repo: whitespace error keeps its position', repoErrorsFor('trailing-space.ts')[0]?.includes('trailing-space.ts:1:'), true)
+    assert('git repo: diff content line not a finding', repoResult.errors.filter((entry) => entry.includes('const g = 1')).length, 0)
+    // Measured with core.autocrlf=false: git does not have a line-ending rule,
+    // it treats a CR as trailing whitespace (one finding per CRLF line) - while
+    // the CR rule fails the file. Both statements are asserted explicitly.
+    assert('git repo: CRLF file is flagged by the CR rule', repoWarningsFor('crlf-only.ts').length, 0)
+    assert('git repo: CRLF file gets a CR error carrying the cause',
+      repoErrorsFor('crlf-only.ts').some((entry) => entry.includes('CRLF line endings')), true)
+    // Escape hatch: the file's own `-text` attribute suppresses the CR-rule
+    // finding (git's own `trailing whitespace` findings are a separate matter
+    // and are deliberately left to git).
+    const crRuleFindings = (name) => repoResult.errors.concat(repoResult.warnings)
+      .filter((entry) => relName(entry) === name)
+      .filter((entry) => entry.includes('CRLF line endings') || entry.includes('mixed line endings'))
+    assert('git repo: declared CR carrier is exempt from the CR rule', crRuleFindings('crlf-declared.ts').length, 0)
+    assert('git repo: undeclared CR carrier is not exempt', crRuleFindings('crlf-only.ts').length, 1)
+    // Declared line-ending policy is the other half of the guarantee: with LF
+    // pinned, a fresh checkout cannot reintroduce CR. `git check-attr` reads the
+    // same declaration the CR rule consults.
+    const eolPolicy = git(['check-attr', 'eol', '--', 'trailing-blank.ts'])
+    assert('git repo: .gitattributes pins eol=lf for a text file', eolPolicy.stdout.includes('eol: lf'), true)
+    assert('git repo: whitespace summary reports git', repoResult.whitespaceSummary.includes('reported'), true)
+    // The dedupe is the point: no file may be reported by both passes.
+    const bothPasses = repoResult.errors
+      .filter((entry) => entry.includes('blank line at EOF'))
+      .filter((entry) => repoResult.warnings.some((warning) => warning.startsWith(relName(entry))))
+    assert('git repo: no file gets both git error and script warning', bothPasses.length, 0)
   } finally {
     // Never leave fixtures behind (and never create them inside the repo).
     rmSync(dir, { recursive: true, force: true })
@@ -414,5 +590,5 @@ console.log(
   + ` (${result.skippedBinary} binary skipped; ${result.warnings.length} warning(s); ${result.whitespaceSummary}).`,
 )
 if (result.warnings.length > 0) {
-  console.log(`check-encoding: ${result.warnings.length} non-blocking warning(s) listed above (UTF-8 BOM / blank-at-eof).`)
+  console.log(`check-encoding: ${result.warnings.length} non-blocking warning(s) listed above (UTF-8 BOM / blank-at-eof / CR line endings).`)
 }
