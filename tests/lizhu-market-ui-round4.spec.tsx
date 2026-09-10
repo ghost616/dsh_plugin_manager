@@ -196,10 +196,10 @@ describe('[离朱] 2. 下载入口不再检测已下载/已安装', () => {
       branches: ['main'],
       tags: ['v1.0.0', 'v2.0.0'],
     }))
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
-      makeInstallReview({ repository, version: version ?? undefined, exists }))
-    const install = vi.fn(async (repository: string, _token: string, version: string | null) =>
-      makeInstallOutcome({ repository, version: version ?? undefined, overwritten: exists }))
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}), exists }))
+    const install = vi.fn(async (repository: string, _token: string, version?: string | null) =>
+      makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}), overwritten: exists }))
     const { props } = managePageHarness({ list, search, repositoryDetail, previewInstall, install })
     return { props, previewInstall, install }
   }
@@ -294,9 +294,9 @@ describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () =
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository, branches: ['main'], tags: [],
     }))
-    const install = vi.fn(async (repository: string, _token: string, version: string | null) =>
-      makeInstallOutcome({ repository, version: version ?? undefined }))
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+    const install = vi.fn(async (repository: string, _token: string, version?: string | null) =>
+      makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall: previewInstall as never, install })
     return { props, install }
   }
 
@@ -317,8 +317,8 @@ describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () =
     ['skills', zh.classificationSkills],
     ['other', zh.classificationOther],
   ] as const)('三种 classification（%s）都公告分类且确认键可用、下载可达 done', async (classification, expected) => {
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
-      makeInstallReview({ repository, version: version ?? undefined, classification }))
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}), classification }))
     const { props, install } = harness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
@@ -342,10 +342,10 @@ describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () =
     ['skills'], ['plugin'], ['tooling'], ['preset'], ['other'],
   ] as const)('分析结论 kind=%s 时旧拒绝面板依然不出现，下载不被阻断', async (kind) => {
     const reason = `analyzer verdict: ${kind}`
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({
         repository,
-        version: version ?? undefined,
+        ...(typeof version === 'string' ? { version } : {}),
         analysis: { kind, reason },
         entryNote: reason,
       }))
@@ -365,22 +365,45 @@ describe('[离朱] 3. 下载确认框分类展示与旧拒绝面板移除', () =
     expect(install).toHaveBeenCalledTimes(1)
   })
 
-  it('entryNote 原文与 buildRequired 提示各自渲染在独立节点上', async () => {
-    const note = '该仓库没有可直接加载的入口文件。'
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+  it('结构化 note 的词典文案、引擎明细与 buildRequired 提示各自渲染在独立节点上', async () => {
+    // The host ships a stable note kind (no prose) plus an engine-supplied
+    // detail: the tab renders its own dictionary copy for the kind and keeps
+    // the untrusted detail on a secondary node.
+    const detail = 'No runnable entry "dist/index.js" is present in the checkout yet.'
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({
         repository,
-        version: version ?? undefined,
+        ...(typeof version === 'string' ? { version } : {}),
         classification: 'other',
-        entryNote: note,
+        note: { kind: 'entry-missing', text: detail, entry: 'dist/index.js' },
         buildRequired: true,
       }))
     const { props } = harness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openInstall(host)
-    expect(el(host, '[data-classification-note]').textContent).toBe(note)
+    expect(el(host, '[data-classification-note]').textContent).toBe(zh.entryMissingNote)
+    expect(el(host, '[data-classification-detail]').textContent).toBe(detail)
     expect(el(host, '[data-build-required]').textContent).toContain(zh.buildRequiredNotice)
+    expect(dialog.querySelector('[data-install-confirm]')).not.toBeNull()
+  })
+
+  it('debug 专用的 entryNote 字符串不会渲染为用户可见文案', async () => {
+    const diagnostic = 'The resolved plugin entry "index.js" does not exist inside the checkout.'
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({
+        repository,
+        ...(typeof version === 'string' ? { version } : {}),
+        classification: 'other',
+        entryNote: diagnostic,
+      }))
+    const { props } = harness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openInstall(host)
+    expect(dialog.querySelector('[data-classification-note]')).toBeNull()
+    expect(dialog.querySelector('[data-classification-detail]')).toBeNull()
+    expect(dialog.textContent).not.toContain(diagnostic)
     expect(dialog.querySelector('[data-install-confirm]')).not.toBeNull()
   })
 
@@ -492,17 +515,22 @@ describe('[离朱] 4. 本地仓库列表分类标签与启停禁用', () => {
     expect(toggles[3]!.disabled).toBe(true)
     expect(toggles[3]!.getAttribute('data-not-loadable')).toBe('entry')
 
-    // aria-label/title 与行内提示同一句话（开关与行注一致）。
-    for (const [index, name] of [[1, 'acme/skills-pack'], [2, 'acme/preset'], [3, 'acme/unbuilt']] as const) {
-      const expected = zh.switchNotLoadable.replace('{name}', name)
-      expect(toggles[index]!.getAttribute('aria-label')).toBe(expected)
-      expect(toggles[index]!.getAttribute('title')).toBe(expected)
+    // aria-label/title 与行内提示同一句话（开关与行注一致）。两种门禁原因各
+    // 有自己的句子：分类原因走 switchNotLoadable，缺入口原因走
+    // switchNotLoadableEntry（清理批拆分）。
+    for (const [index, copy] of [
+      [1, zh.switchNotLoadable.replace('{name}', 'acme/skills-pack')],
+      [2, zh.switchNotLoadable.replace('{name}', 'acme/preset')],
+      [3, zh.switchNotLoadableEntry.replace('{name}', 'acme/unbuilt')],
+    ] as const) {
+      expect(toggles[index]!.getAttribute('aria-label')).toBe(copy)
+      expect(toggles[index]!.getAttribute('title')).toBe(copy)
     }
     const notes = Array.from(host.querySelectorAll<HTMLElement>('[data-toggle-disabled-note]'))
     expect(notes.map(note => note.textContent)).toEqual([
       zh.switchNotLoadable.replace('{name}', 'acme/skills-pack'),
       zh.switchNotLoadable.replace('{name}', 'acme/preset'),
-      zh.switchNotLoadable.replace('{name}', 'acme/unbuilt'),
+      zh.switchNotLoadableEntry.replace('{name}', 'acme/unbuilt'),
     ])
 
     // 点击禁用开关绝对不触发宿主调用。

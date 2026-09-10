@@ -1,0 +1,40 @@
+{
+  // Test-side type check (no emit). `tests/` sits outside both build leaves, so
+  // it is checked here rather than growing the Host/Client Programs: the suites
+  // deliberately span both faces (host business modules *and* the browser half
+  // rendered under jsdom), which is why this project - unlike the leaves - has
+  // DOM + React JSX and node ambient types at the same time.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Check only: no declaration/map/composite/incremental emission here.
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "composite": false,
+    "incremental": false,
+    // jsdom component suites mount React elements from .tsx specs.
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    // node:*/IO suites plus the vitest module surface.
+    "types": ["node", "vitest"],
+    // Test-only relaxation: a spec legitimately carries declarations it keeps
+    // for documentation/driver parity (scripted fakes with unused callback
+    // parameters, shared driver tables). Every *type* rule - and with it the
+    // branded-id / exactOptionalPropertyTypes / shape-mismatch signal that
+    // matters - stays fully enabled.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  // Suites import `../src/**/*.ts` for types and values; `src` is listed so the
+  // ambient CSS-module declaration (src/client/css-modules.d.ts) and the whole
+  // client/host surface are part of this Program. The leaves keep owning the
+  // emission of lib/types.
+  //
+  // Ordering: the control specs import the tsc-emitted artifact
+  // (`../lib/types/host/control/*.js`, because this environment's vitest/oxc
+  // pipeline cannot lower their TC39 decorators), so `tsc -b tsconfig.json`
+  // must run before this project - which is exactly how `npm test` chains the
+  // two: `tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run`.
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
+}

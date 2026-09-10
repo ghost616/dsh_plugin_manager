@@ -416,9 +416,23 @@ export interface PluginInstallReviewAnalysis {
 
 /**
  * Stable kind of one install-review note: why the reviewed checkout is not
- * expected to become a loadable plugin. The consumer renders the copy for the
- * kind through its own locale dictionary — the Host never ships UI prose; the
- * optional detail fields carry the untrusted, engine-supplied specifics.
+ * expected to become a loadable plugin.
+ *
+ * CONTRACT FOR CONSUMERS (the UI half): the Host never ships user-facing prose
+ * for a note. Render the copy for `kind` from your own locale dictionary:
+ *
+ * - `'classified'` → the checkout is not a plugin; pair it with
+ *   `PluginInstallReview.classification` (e.g. "will be tagged as SKILLS") and
+ *   optionally show `note.text` as a secondary analyzer detail;
+ * - `'entry-missing'` → no runnable entry is present; the download still runs,
+ *   the record ends up not loadable (see `recordNotLoadableReason`);
+ * - `'analysis-unavailable'` → the smart-install analyzer could not classify
+ *   the checkout; show the model-configuration guidance (the same copy the
+ *   preview's `market/llm-unconfigured` failure uses) and `note.text` is
+ *   absent.
+ *
+ * The optional detail fields carry only untrusted, engine-supplied specifics
+ * (analyzer rationale, expected entry path) — never Host copy.
  */
 export type MarketInstallNoteKind =
   /** The checkout is not a plugin at all (skills pack / preset / tooling / …). */
@@ -429,19 +443,18 @@ export type MarketInstallNoteKind =
   | 'analysis-unavailable'
 
 /**
- * Structured, localizable note of one install review. Unlike the legacy
- * `entryNote` string this never carries Host-authored user-facing prose: a
- * consumer maps `kind` onto its own dictionary and only renders the optional
- * `text` (an analyzer rationale or a resolved entry path) as a secondary
- * detail.
+ * Structured, localizable note of one install review. This — not the legacy
+ * `entryNote` string — is the note channel for user-visible copy: a consumer
+ * maps `kind` onto its own dictionary and may render the optional `text` (an
+ * analyzer rationale or a resolved entry path) as a secondary detail.
  */
 export interface MarketInstallNote {
   readonly kind: MarketInstallNoteKind
   /**
    * Engine-supplied detail: the analyzer's rationale for a classified
    * checkout, or the entry path that could not be found. Untrusted
-   * model/third-party text, shown as a secondary detail — never as the primary
-   * UI copy.
+   * model/third-party text, shown at most as a secondary detail — never as the
+   * primary UI copy and never as the sole content of a status line.
    */
   readonly text?: string
   /** Entry path the checkout was expected to carry, when one is known. */
@@ -497,29 +510,32 @@ export interface PluginInstallReview {
    * needing a build step before it becomes loadable (the analysis judged it a
    * dsh plugin whose entry is not present yet). Present only when true.
    *
-   * Reachability: this needs an entry probe at review time. The production
-   * preview reads only the remote manifest, so it can never probe the entry and
-   * the flag stays absent there; it is populated when previewInstall runs an
-   * analysis over a probed snapshot (see
-   * `MarketSourceDeps.analysisEntryProbe`). The authoritative signal for "this
-   * checkout has no runnable entry" is the classification/entry of the install
-   * outcome and of the managed record (`recordNotLoadableReason`), which the UI
-   * already renders as the not-loadable state.
+   * NOT PRODUCED BY THE PRODUCTION ASSEMBLY (test-only seam): the flag needs an
+   * entry probe at review time, and the production preview reads only the
+   * remote manifest — nothing can probe a checkout that has not been downloaded
+   * yet (see `MarketSourceDeps.analysisEntryProbe`). It is populated only when
+   * previewInstall runs an analysis over an injected probe, i.e. in specs. The
+   * authoritative "this checkout has no runnable entry" signal is
+   * `classification`/`entry` of {@link PluginInstallOutcome} and of the managed
+   * record (`recordNotLoadableReason`), which consumers already render as the
+   * not-loadable state.
    */
   readonly buildRequired?: boolean
   /**
-   * Legacy plain-text note of a review that is not expected to become a
-   * loadable plugin. Non-empty only for engine-supplied detail (the analyzer's
-   * own rationale); the Host never authors UI prose here — see
-   * {@link note} for the localizable form, which is preferred by new
-   * consumers.
+   * Diagnostic note of a review that is not expected to become a loadable
+   * plugin. DEBUG/LOG-ONLY: when present it holds the analyzer's own rationale
+   * (third-party/model text). It is NOT a UI copy channel — render
+   * {@link note} (stable kind + dictionary lookup) instead, and never surface
+   * this string as user-visible copy.
    */
   readonly entryNote?: string
   /**
-   * Structured, localizable form of {@link entryNote} (stable kind + untrusted
-   * detail). Present whenever the checkout is not expected to become a loadable
-   * plugin, including the "no usable analysis" case whose legacy `entryNote`
-   * was Host-authored prose and is therefore omitted.
+   * Structured, localizable note of the review — THE UI CHANNEL for "why this
+   * checkout will not be a plugin" copy (see {@link MarketInstallNote} and
+   * {@link MarketInstallNoteKind} for the exhaustive kind list and the
+   * per-kind rendering contract). Present whenever the checkout is not
+   * expected to become a loadable plugin, including the "no usable analysis"
+   * case; unlike {@link entryNote} it never carries Host-authored prose.
    */
   readonly note?: MarketInstallNote
   /**
@@ -538,6 +554,11 @@ export interface PluginInstallReview {
  * the host pipeline actually filed (the checkout inspection, not the review
  * prediction), so a consumer can show the real result without re-reading the
  * record.
+ *
+ * UI CONTRACT: render {@link classification} + {@link entry} (+ the managed
+ * record's `loadable` state) — those are stable, dictionary-friendly facts.
+ * {@link entryNote} is a DEBUG/LOG-ONLY diagnostic string (host pipeline prose,
+ * English) and must never be rendered as user-visible copy.
  */
 export interface PluginInstallOutcome {
   readonly key: PluginMarketKey
@@ -550,7 +571,13 @@ export interface PluginInstallOutcome {
   readonly classification?: PluginMarketClassification
   /** Runnable entry that was registered, or null when the checkout has none. */
   readonly entry?: string | null
-  /** Host note explaining a null entry (unreadable manifest / missing entry). */
+  /**
+   * DEBUG/LOG-ONLY diagnostic of a null entry (which resolved entry was missing,
+   * or that the checkout manifest was unreadable). Host-authored English prose
+   * for operators and test assertions: never render it as user-visible copy —
+   * UI copy comes from the review's structured note and from
+   * `classification`/`entry` above.
+   */
   readonly entryNote?: string | null
   /** Whether the dependency step (`pnpm install`) actually ran. */
   readonly dependenciesInstalled?: boolean

@@ -51,6 +51,8 @@ export const zh = {
   classificationOther: '其他',
   /** Why a non-plugin checkout can never be enabled (switch tooltip/note). */
   switchNotLoadable: '「{name}」不是可加载的插件，无法启用。',
+  /** Why a plugin checkout without a runnable entry can never be enabled. */
+  switchNotLoadableEntry: '「{name}」没有可加载的入口文件，无法启用。',
   /** Phase dot label when no live loader fiber exists. */
   unobserved: '未运行',
   /** Phase dot label while the entry waits for dependencies. */
@@ -97,8 +99,6 @@ export const zh = {
   githubAuthError: 'GitHub 请求被拒绝（认证问题）。',
   /** Dedicated copy for a missing/removed GitHub repository. */
   githubNotFound: 'GitHub 仓库不存在或已删除。',
-  /** Search results heading. */
-  searchResults: '搜索结果',
   /** Detail-view title inside the GitHub tab. */
   detailTitle: '仓库详情',
   /** Back-to-results action of the detail view. */
@@ -143,8 +143,6 @@ export const zh = {
   updatedLabel: '更新于 {date}',
   /** Download action of an unmanaged result. */
   downloadButton: '下载',
-  /** Update action of an already-managed result. */
-  updateButton: '更新',
   /** Managed list section heading. */
   managedHeading: '已管理插件',
   /** Row action opening the two-step removal flow. */
@@ -175,6 +173,13 @@ export const zh = {
   previewing: '正在检查该仓库并分析可否安装…',
   /** Confirmation line naming the classification the download will be filed under. */
   classificationNotice: '将标记为：{classification}',
+  /**
+   * Note of a review whose checkout was classified as a non-plugin (the
+   * classification notice above names the tag; this explains the effect).
+   */
+  classificationNote: '该检出不是可加载的插件：下载后会入库并保持停用，不会注册加载条目。',
+  /** Note of a review whose checkout carries no runnable entry. */
+  entryMissingNote: '该检出没有可直接加载的入口文件：下载后会入库并保持停用。',
   /** Extra note when the download will need a build step before it can load. */
   buildRequiredNotice: '该仓库缺少可直接加载的入口，下载后需先构建才能启用。',
   /** Preview failure when no LLM endpoint is configured for smart analysis. */
@@ -237,6 +242,7 @@ export const en: Record<MarketManageLocaleKey, string> = {
   classificationSkills: 'SKILLS',
   classificationOther: 'Other',
   switchNotLoadable: '{name} is not a loadable plugin and cannot be enabled.',
+  switchNotLoadableEntry: '{name} has no loadable entry file and cannot be enabled.',
   unobserved: 'Not running',
   phasePending: 'Waiting for dependencies',
   phaseLoading: 'Loading',
@@ -260,7 +266,6 @@ export const en: Record<MarketManageLocaleKey, string> = {
   networkError: 'Network error; the service is unreachable.',
   githubAuthError: 'GitHub request rejected (auth problem).',
   githubNotFound: 'The GitHub repository was not found or has been removed.',
-  searchResults: 'Search results',
   detailTitle: 'Repository details',
   detailBack: 'Back',
   detailLoading: 'Loading repository details…',
@@ -283,7 +288,6 @@ export const en: Record<MarketManageLocaleKey, string> = {
   starsLabel: '{count} stars',
   updatedLabel: 'Updated {date}',
   downloadButton: 'Download',
-  updateButton: 'Update',
   managedHeading: 'Managed plugins',
   removeButton: 'Remove',
   downloadDialogTitle: 'Download plugin',
@@ -301,6 +305,13 @@ export const en: Record<MarketManageLocaleKey, string> = {
   previewing: 'Inspecting the repository and analyzing whether it can be installed…',
   /** Confirmation line naming the classification the download will be filed under. */
   classificationNotice: 'Will be tagged as: {classification}',
+  /**
+   * Note of a review whose checkout was classified as a non-plugin (the
+   * classification notice above names the tag; this explains the effect).
+   */
+  classificationNote: 'This checkout is not a loadable plugin: it is filed as-is and stays disabled, with no loader entry registered.',
+  /** Note of a review whose checkout carries no runnable entry. */
+  entryMissingNote: 'This checkout carries no ready-to-load entry: it is filed as-is and stays disabled after the download.',
   /** Extra note when the download will need a build step before it can load. */
   buildRequiredNotice: 'This repository has no ready-to-load entry; build it after downloading before enabling.',
   analysisNotConfigured: 'Smart analysis is not configured.',

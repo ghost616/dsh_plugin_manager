@@ -18,7 +18,6 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { PluginRecordStore } from '../src/host/market/records.ts'
 import { MarketRepositoryService } from '../src/host/market/service.ts'
 import type { MarketRepository } from '../src/host/market/index.ts'
-// @ts-expect-error -- compiled artifact (see header note)
 import { default as marketControlPlugin } from '../lib/types/host/control/index.js'
 import { key, demoPluginSource, DEMO_LOG_KEY } from './support/control-testbed.ts'
 

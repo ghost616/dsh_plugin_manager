@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Port-level spec of the production installer adapter: the real
  * `createInstallerPort` over a real `PluginInstaller` whose subprocesses are
  * stubbed (the same fake-runner pattern market-install.spec uses), so the
@@ -14,7 +14,6 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
-  PluginInstaller,
   type CommandOutcome,
   type CommandRunner,
 } from '../src/host/market/install.ts'
@@ -56,8 +55,9 @@ function fakeRunner(fixture: Fixture): {
       await writeFile(join(target, 'package.json'), JSON.stringify(fixture.manifest ?? {}), 'utf8')
       for (const file of fixture.files ?? ['index.js']) {
         const segments = file.split('/')
-        const name = segments.pop()
-        if (name !== undefined) await mkdir(join(target, ...segments), { recursive: true })
+        const name = segments.pop() ?? ''
+        if (name === '') continue
+        await mkdir(join(target, ...segments), { recursive: true })
         await writeFile(join(target, ...segments, name), 'export const value = 1\n', 'utf8')
       }
       return { code: 0, stdout: '', stderr: '' }

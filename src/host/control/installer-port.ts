@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Production installer adapter of the market control surface: the one place
  * where the control layer's review decisions are handed to the host install
  * pipeline and where the install-time facts come back.
@@ -61,7 +61,11 @@ export function createInstallerPort(
         confirmed: true,
       })
       // Report the install-time facts back verbatim, so a consumer sees what
-      // was really filed (not what the review predicted).
+      // was really filed (not what the review predicted). `entryNote` is the
+      // host pipeline's own diagnostic prose: it is forwarded for
+      // logs/tests only and consumers must not render it as user-visible copy
+      // (see PluginInstallOutcome; UI copy comes from classification/entry and
+      // from the review's structured note).
       return {
         record: outcome.record,
         checkoutDir: outcome.checkoutDir,

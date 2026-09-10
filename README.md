@@ -33,6 +33,7 @@ owns exactly one Cordis instance at runtime.
 | `scripts/install-profile.mjs` | Idempotent profile self-load recipe (junction/copy + the single patch row) | framework |
 | `scripts/verify-load.mjs` | Demo verification: real Loader activation of the single row + artifact checks | framework |
 | `tests/` | Vitest suites for all modules (business tests live with their module owners) | all modules |
+| `vitest.config.ts` + `tsconfig.test.json` | Test gate: vitest keeps its defaults (only `.lizhu_env/**` is excluded) and `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` | framework |
 
 ### Row contract (single-row convergence)
 
@@ -57,10 +58,14 @@ Requires Node `^22.19.0 || >=24` and pnpm.
 pnpm install
 pnpm build        # tsc -b (types to lib/types) && tsdown (lib/index.js, lib/client.js)
 pnpm verify       # demo profile + real single-row Loader activation
-pnpm test         # tsc -b + vitest run
+pnpm test         # tsc -b && tsc -p tsconfig.test.json --noEmit && vitest run
 ```
 
 - `tsc -b` type-checks both leaves and emits `lib/types`.
+- `tsc -p tsconfig.test.json --noEmit` type-checks `tests/**` (which spans both
+  faces, so that project has DOM + React JSX and node ambient types at once);
+  `vitest` itself never type-checks, so this step is what keeps the specs honest
+  about the wire types (branded keys, `exactOptionalPropertyTypes` shapes).
 - `tsdown` bundles the tsc emission: the Node half (`lib/index.js`) keeps
   production-section specifiers external; the browser half (`lib/client.js`)
   is the lazy-CJS closure factory whose externals resolve through the loader
@@ -69,6 +74,19 @@ pnpm test         # tsc -b + vitest run
   sub-entry is additionally emitted as `lib/control.js`.
 - Client code never value-imports another plugin: the tsdown purity gate
   rejects cross-plugin `@deepseek-ai/*` value imports (types are erased).
+
+### Local test environment (`.lizhu_env/`)
+
+`.lizhu_env/` is a **local, ignored** testing environment (an independent
+Playwright E2E checkout with its own `node_modules`, browser specs and run
+artifacts). It is listed in `.gitignore` and excluded from the unit runner via
+`vitest.config.ts` (`exclude: [..., '.lizhu_env/**']`), because its specs import
+`@playwright/test`, which this package does not depend on. `tsconfig.test.json`
+only covers `tests/**`, so `npm test` never sees it either.
+
+Run those browser specs from `.lizhu_env/e2e/` itself (`npm install`,
+`npx playwright install chromium`, then `npx playwright test`); each spec's
+header documents its own setup. Keep the directory out of version control.
 
 ## Profile self-load (development recipe)
 

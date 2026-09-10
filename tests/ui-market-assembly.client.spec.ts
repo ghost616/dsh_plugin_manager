@@ -102,7 +102,7 @@ describe('plugin-market browser half assembly', () => {
   })
 
   it('registers the page as a localized settings section without touching the channel', async () => {
-    const { slots, locale } = await bench()
+    const { slots } = await bench()
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: makeList([]) }))
     stubChannel(fetchMock)
 
@@ -164,7 +164,7 @@ describe('plugin-market browser half assembly', () => {
     ]
     for (const page of pages) {
       await page.call()
-      const [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit]
+      const [url, init] = fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit]
       expect(url).toBe(MARKET_CONTROL_WEB_PATH)
       expect(JSON.parse(String(init.body))).toMatchObject({ method: page.method, args: page.args })
     }
@@ -185,12 +185,12 @@ describe('plugin-market browser half assembly', () => {
 
     // Legacy calls never serialize a refKind key: the host treats the absence
     // as the pre-v2 default-branch review/install.
-    const preview = fetchMock.mock.calls[0] as [string, RequestInit]
+    const preview = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(JSON.parse(String(preview[1].body))).toEqual({
       method: 'previewInstall',
       args: { repository: 'octocat/demo', version: 'v2.0.0' },
     })
-    const installCall = fetchMock.mock.calls[1] as [string, RequestInit]
+    const installCall = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
     expect(JSON.parse(String(installCall[1].body))).toEqual({
       method: 'install',
       args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main' },
@@ -207,9 +207,9 @@ describe('plugin-market browser half assembly', () => {
     declareSection(slots)
     const face = faceOf(sectionEntry(slots))
 
-    const error = await face.search('agents').catch((caught: unknown) => caught)
+    const error = await face.search('agents', 1).catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
-    expect(error).toMatchObject({ code: 'github/rate-limit', message: 'limited' })
+    expect(error as MarketCallFailure).toMatchObject({ code: 'github/rate-limit', message: 'limited' })
   })
 
   it('normalizes a transport failure to the market/unreachable code', async () => {
@@ -219,9 +219,9 @@ describe('plugin-market browser half assembly', () => {
     declareSection(slots)
 
     const face = faceOf(sectionEntry(slots))
-    const error = await face.install('octocat/demo', 'tok').catch((caught: unknown) => caught)
+    const error = await face.install('octocat/demo', 'tok', null, undefined).catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(MarketCallFailure)
-    expect(error).toMatchObject({ code: 'market/unreachable' })
+    expect(error as MarketCallFailure).toMatchObject({ code: 'market/unreachable' })
   })
 
   it('passes decoded values through to the lazy closures', async () => {

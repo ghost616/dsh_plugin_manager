@@ -60,7 +60,7 @@ describe('plugin-market-host public export surface', () => {
     expect(typeof resolveInstallTarget).toBe('function')
     const key = pluginKeyForGithubRef('owner/repo', 'branch', 'main')
     expect(key).toBe(parsePluginKey(key))
-    expect(parseRefSeg(refSegOf('feature/x'))).toBe('feature/x')
+    expect(parseRefSeg(refSegOf('feature/x') ?? '')).toBe('feature/x')
     expect(isManagedLocalDirName('owner/repo/branch/main')).toBe(true)
     expect(isManagedLocalDirName('gh-owner-repo')).toBe(true)
   })
@@ -71,7 +71,9 @@ describe('plugin-market-host public export surface', () => {
   })
 
   it('keeps stable error behavior through the surface (config/invalid)', () => {
-    const env = { cwd: process.cwd(), home: homedir() }
+    // os.homedir() types as `string | null` under @types/node; an empty home
+    // keeps the fixture's path expansion deterministic.
+    const env = { cwd: process.cwd(), home: homedir() ?? '' }
     try {
       normalizeMarketConfig({ repositoryPath: 42 }, env)
       throw new Error('expected config/invalid')

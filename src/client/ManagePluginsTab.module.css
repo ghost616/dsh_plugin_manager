@@ -420,7 +420,14 @@
 
 /* README block: the last row of the detail body and its one scrolling row, so
    an oversized document scrolls here instead of stretching the tab or pushing
-   the pinned detail head out of view. */
+   the pinned detail head out of view.
+
+   MIN-HEIGHT TRADEOFF: this row has no lower bound beyond `min-height: 0`. In a
+   very short host the pinned head keeps its natural height and this row collapses
+   toward 0. A `min-height` floor is intentionally NOT set: the floor would exceed
+   the leftover space, so the head rows (.detailHeader/.refPicker) would have to
+   become shrinkable in the same change, otherwise the document would be pushed
+   out of the clipping zone. */
 .readmeSection {
   display: flex;
   flex-direction: column;
@@ -767,6 +774,15 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* Secondary analyzer detail under a review note (untrusted engine text). */
+.analysisDetail {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 /* Model-config guidance under an analysis preview failure (llm-unconfigured). */
 .analysisGuide {
   margin: 4px 0 0;
@@ -892,11 +908,18 @@
 
 /* --- repository detail view (metadata + branch/tag download + README) --- */
 
+/* The pinned head rows of the detail view (metadata header + ref picker) carry
+   the same right inset as the scrolling README row below them. The zone clips
+   (`overflow: hidden`), and `.refSelect:focus-visible` paints a 2px ring plus a
+   2px spread box-shadow OUTSIDE its border box: without this inset that ring
+   would be cut off at the zone's right edge. The matching inset also keeps the
+   head's content column aligned with the README it sits above. */
 .detailHeader {
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
 .detailName {
@@ -921,12 +944,14 @@
 }
 
 /* Merged branch/tag ref picker of the detail view: one labelled select with
-   grouped options and the single install action below it. */
+   grouped options and the single install action below it. Right inset as on the
+   header above: the select's focus ring must survive the zone's clipping. */
 .refPicker {
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
 .groupTitle {

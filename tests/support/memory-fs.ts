@@ -121,7 +121,9 @@ export class MemoryFs implements FsLike {
   private dirAt(segments: readonly string[]): DirNode | undefined {
     let cursor: Node = this.root
     for (const segment of segments) {
-      const next = cursor.kind === 'dir' ? cursor.children.get(segment) : undefined
+      // Explicit annotation: the union-typed cursor makes the initializer's
+      // inference circular (TS7022) without it.
+      const next: Node | undefined = cursor.kind === 'dir' ? cursor.children.get(segment) : undefined
       if (next === undefined) return undefined
       cursor = next
     }

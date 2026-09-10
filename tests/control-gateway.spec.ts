@@ -8,13 +8,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { RemoteError, remoteErrorOf, remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import type { InstallAnalysisEngine } from '../src/host/control/source.ts'
-// @ts-expect-error -- compiled artifact (see header note)
 import {
   MARKET_CONTROL_SERVICE_KEY,
   MarketControllerGateway,
   toRemoteError,
 } from '../lib/types/host/control/gateway.js'
-// @ts-expect-error -- compiled artifact (see header note)
 import { MarketControlError } from '../lib/types/host/control/controller.js'
 import { MarketError } from '../src/host/market/errors.ts'
 import {
@@ -52,10 +50,13 @@ function gatewayWith(
   const source = makeSourceOps(repository, bed.records, bed.engines, {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
   })
+  // This spec drives the tsc-emitted gateway artifact while the fakes carry
+  // `src/`-derived types; both describe the same classes (the artifact is a
+  // plain emit of those sources), so the boundary needs one explicit cast.
   const gateway = new MarketControllerGateway(ctx, {
-    controller: () => controller,
-    repository: () => repository,
-    source,
+    controller: () => controller as never,
+    repository: () => repository as never,
+    source: source as never,
   })
   return { ctx, gateway, engines: bed.engines, records: bed.records }
 }
@@ -118,7 +119,7 @@ describe('MarketControllerGateway host Remote surface', () => {
     const { gateway } = gatewayWith({ idle: true })
     const idle = await gateway.listManaged().catch((error: unknown) => error)
     expect(remoteErrorOf(idle)).toMatchObject({ code: 'market/idle' })
-    const idleSearch = await gateway.search('demo', null).catch((error: unknown) => error)
+    const idleSearch = await gateway.search('demo', null, null).catch((error: unknown) => error)
     expect(remoteErrorOf(idleSearch)).toMatchObject({ code: 'market/idle' })
     const idleInstall = await gateway.install('octocat/demo', 'tok', null, null).catch((error: unknown) => error)
     expect(remoteErrorOf(idleInstall)).toMatchObject({ code: 'market/idle' })

@@ -65,7 +65,8 @@ interface RunnerCall {
 function fakeRunner(fixture: InstallFixture): { run: CommandRunner; calls: RunnerCall[] } {
   const calls: RunnerCall[] = []
   const run: CommandRunner = async (command, args, options) => {
-    calls.push({ command, args: [...args], cwd: options?.cwd })
+    const cwd = options?.cwd
+    calls.push({ command, args: [...args], ...(cwd === undefined ? {} : { cwd }) })
     const all = [...args]
     if (command === 'git' && all[0] === 'clone') {
       const target = all[all.length - 1] ?? ''
@@ -84,8 +85,9 @@ function fakeRunner(fixture: InstallFixture): { run: CommandRunner; calls: Runne
       }
       for (const file of fixture.files ?? ['index.js']) {
         const segments = file.split('/')
-        const name = segments.pop()
-        if (name !== undefined) await mkdir(join(target, ...segments), { recursive: true })
+        const name = segments.pop() ?? ''
+        if (name === '') continue
+        await mkdir(join(target, ...segments), { recursive: true })
         await writeFile(join(target, ...segments, name), 'export const value = 1\n', 'utf8')
       }
       return { code: 0, stdout: '', stderr: '' }

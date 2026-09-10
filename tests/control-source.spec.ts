@@ -296,6 +296,8 @@ describe('MarketSourceOperations previewInstall', () => {
       entry: 'dist/index.js',
     })
     expect(review.entryNote).toContain('build step first')
+    // `entryNote` is DEBUG-ONLY diagnostics (engine detail); the copy channel
+    // is the structured note above, and the persisted tag is `classification`.
     // A build-first plugin keeps a legacy verdict rendered as the folded `other`
     // kind; the fold into the persisted tag rides on the classification too.
     expect(review.analysis).toEqual({
@@ -308,11 +310,12 @@ describe('MarketSourceOperations previewInstall', () => {
     expect(outcome.record).toMatchObject({ classification: 'other', entry: null })
   })
 
-  it('reports buildRequired from the preview-time entry probe when one is wired', async () => {
+  it('[test-only seam] reports buildRequired from the preview-time entry probe when one is wired', async () => {
     const bed = testbed()
     bed.engines.previewResult = NO_MANIFEST_PREVIEW
-    // The probe is what makes buildRequired reachable: without it the
-    // production preview cannot know whether the entry exists.
+    // TEST-ONLY: `analysisEntryProbe` is a seam the production assembly never
+    // wires (the remote preview cannot inspect a checkout), so `buildRequired`
+    // is reachable only in specs — this case pins the fold the seam drives.
     const probed: string[] = []
     const analysis = fakeAnalysisEngine({
       probeDistribution: {
@@ -335,7 +338,7 @@ describe('MarketSourceOperations previewInstall', () => {
     expect(review.note).toMatchObject({ kind: 'entry-missing', entry: 'dist/index.js' })
   })
 
-  it('answers plugin from the same probe when the entry is present', async () => {
+  it('[test-only seam] answers plugin from the same probe when the entry is present', async () => {
     const bed = testbed()
     bed.engines.previewResult = NO_MANIFEST_PREVIEW
     const analysis = fakeAnalysisEngine({
@@ -522,7 +525,7 @@ describe('MarketSourceOperations install (double confirmation)', () => {
     if (error instanceof Error) {
       expect(error.message).toContain('dist/index.js')
       // No message rewrite: the build-first guidance is delivered by the
-      // review's classification/entryNote contract, not by patched errors.
+      // review's classification/note contract, not by patched errors.
       expect(error.message).not.toContain('documented build step')
     }
   })

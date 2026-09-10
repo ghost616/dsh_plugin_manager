@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Production-assembly spec: the REAL `apply()` activation chain (not the
  * injectable fakes of control-source.spec) driven through a real
  * `PluginInstaller`, so the activation wiring itself is under test.
@@ -35,8 +35,6 @@ import { PluginRecordStore } from '../src/host/market/records.ts'
 import { MarketRepositoryService } from '../src/host/market/service.ts'
 import type { MarketRepository } from '../src/host/market/index.ts'
 import { parsePluginKey } from '../src/host/market/keys.ts'
-// @ts-expect-error -- compiled artifact (decorators cannot be lowered by the
-// vitest/oxc pipeline for Node 25; see control-gateway.spec.ts).
 import { marketControlPlugin } from '../lib/types/host/control/index.js'
 
 const SLUG = 'octocat/demo-plugin'

@@ -22,6 +22,12 @@ export interface FetchInit {
 /** Minimal response surface modeled on the Fetch Response object. */
 export interface FetchResponse {
   readonly status: number
+  /**
+   * Transport-level success flag, present on real `Response` objects and used
+   * by test doubles. Never read by this client: the GitHub mapping is driven by
+   * `status` plus the rate-limit headers.
+   */
+  readonly ok?: boolean
   headers: { get(name: string): string | null }
   text(): Promise<string>
 }

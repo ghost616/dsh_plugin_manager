@@ -18,9 +18,14 @@ import type {
   ManagedPluginView,
   MarketCheckoutKind,
   MarketInstallNote,
+  PluginInstallOutcome,
+  PluginInstallReview,
   PluginMarketClassification,
   PluginMarketRecord,
+  PluginMarketKey,
+  PluginPreviewOutcome,
 } from '../../src/types.ts'
+import type { ManagePluginsTabInjected, ManagePluginsTabProps } from '../../src/client/ManagePluginsTab.tsx'
 import { en, zh, type MarketManageLocaleKey } from '../../src/client/locales.ts'
 
 /** Languages this tab's dictionaries register. */
@@ -49,7 +54,7 @@ export class FakeLocaleRuntime {
 
   register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): () => void
   register(ns: string, locale: FakeLocale, dict: Record<string, string>): () => void
-  register(ns: string, arg: Record<string, string> | { zh: Record<string, string>; en: Record<string, string> }, dict?: Record<string, string>): () => void {
+  register(ns: string, arg: FakeLocale | { zh: Record<string, string>; en: Record<string, string> }, dict?: Record<string, string>): () => void {
     const entry = this.dicts.get(ns) ?? {}
     if (dict !== undefined && typeof arg === 'string') {
       entry[arg as FakeLocale] = dict
@@ -480,6 +485,15 @@ export function makeStatus(configured: boolean, repositoryPath: string | null = 
   return { configured, repositoryPath }
 }
 
+/**
+ * Spread-time helper for the exactOptionalPropertyTypes fixtures below: an
+ * optional property is either present with a real value or absent entirely,
+ * never present-and-`undefined`.
+ */
+function note<T extends object>(value: T | undefined): T | Record<string, never> {
+  return value === undefined ? {} : value
+}
+
 export interface InstallReviewSeed {
   repository: string
   exists?: boolean
@@ -501,7 +515,7 @@ export interface InstallReviewSeed {
 }
 
 /** Build a PluginInstallReview-shaped fixture for one repository. */
-export function makeInstallReview(seed: InstallReviewSeed) {
+export function makeInstallReview(seed: InstallReviewSeed): PluginInstallReview {
   const slug = seed.repository
   const key = `gh-${slug.replace('/', '-')}`
   const summary = {
@@ -512,7 +526,7 @@ export function makeInstallReview(seed: InstallReviewSeed) {
       peerDependencies: seed.peerDependencies ?? [],
     },
   }
-  const preview = seed.degraded === true
+  const preview: PluginPreviewOutcome = seed.degraded === true
     ? { status: 'degraded', summary, reason: 'manifest unreadable', code: 'github/bad-response' }
     : { status: 'ready', summary }
   // A skills-shaped analysis files `skills`; every other non-plugin kind folds
@@ -523,7 +537,7 @@ export function makeInstallReview(seed: InstallReviewSeed) {
       : seed.analysis.kind === 'skills' ? 'skills' : 'other')
   return {
     repository: slug,
-    key,
+    key: key as PluginMarketKey,
     preview,
     exists: seed.exists === true,
     overwrite: seed.exists === true,
@@ -532,17 +546,20 @@ export function makeInstallReview(seed: InstallReviewSeed) {
     expiresAt: '2026-01-02T00:00:00.000Z',
     classification,
     ...(seed.buildRequired === true ? { buildRequired: true } : {}),
-    ...(seed.entryNote === undefined ? {} : { entryNote: seed.entryNote }),
-    ...(seed.note === undefined ? {} : { note: seed.note }),
-    ...(seed.analysis === undefined ? {} : { analysis: seed.analysis }),
+    ...note(seed.entryNote === undefined ? undefined : { entryNote: seed.entryNote }),
+    ...note(seed.note === undefined ? undefined : { note: seed.note }),
+    // The review carries the host's non-installable analysis verdict shape.
+    ...note(seed.analysis === undefined
+      ? undefined
+      : { analysis: { installable: false as const, kind: seed.analysis.kind, reason: seed.analysis.reason } }),
   }
 }
 
 /** Build a PluginInstallOutcome-shaped fixture. */
-export function makeInstallOutcome(seed: { repository: string; overwritten?: boolean; version?: string }) {
+export function makeInstallOutcome(seed: { repository: string; overwritten?: boolean; version?: string }): PluginInstallOutcome {
   const key = `gh-${seed.repository.replace('/', '-')}`
   return {
-    key,
+    key: key as PluginMarketKey,
     overwritten: seed.overwritten === true,
     record: makeView({
       key,
@@ -559,8 +576,16 @@ export function makeRemoveRequest(key: string, token = 'rm-token') {
 }
 
 /** Default prop mocks for the full settings page (each override-able). */
-export function managePageHarness(overrides: Record<string, unknown> = {}) {
+export function managePageHarness(overrides: Partial<ManagePluginsTabInjected> = {}): {
+  /** Props accepted by the component under test (injected face + shell seats). */
+  props: ManagePluginsTabProps
+  /** The individual spies, for call assertions that do not go through `props`. */
+  mocks: ManagePluginsTabInjected
+} {
   const mocks = {
+    t: makeTranslator('zh'),
+    // The settings shell's one owner prop (`settings.section` share).
+    close: vi.fn(),
     status: vi.fn(async () => makeStatus(true)),
     list: vi.fn(async () => makeList([])),
     setEnabled: vi.fn(async () => { throw new Error('unused default setEnabled') }),
@@ -570,14 +595,8 @@ export function managePageHarness(overrides: Record<string, unknown> = {}) {
     repositoryDetail: vi.fn(async () => { throw new Error('unused default repositoryDetail') }),
     previewInstall: vi.fn(async (repository: string) => makeInstallReview({ repository })),
     install: vi.fn(async () => { throw new Error('unused default install') }),
-  }
-  const props = {
-    t: makeTranslator('zh'),
-    // The settings shell's one owner prop (`settings.section` share).
-    close: vi.fn(),
-    ...mocks,
-    ...overrides,
-  }
+  } satisfies ManagePluginsTabInjected & Pick<ManagePluginsTabProps, 't' | 'close'>
+  const props: ManagePluginsTabProps = { ...mocks, ...overrides }
   return { props, mocks }
 }
 

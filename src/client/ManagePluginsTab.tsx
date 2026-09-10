@@ -22,6 +22,7 @@ import type {
   PluginMarketClassification,
   PluginMarketKey,
   PluginMarketRecord,
+  PluginRecordNotLoadableReason,
   RemoveOutcome,
   RemoveRequest,
   RepositoryDetail,
@@ -225,13 +226,30 @@ function classificationOf(record: PluginMarketRecord): PluginMarketClassificatio
 }
 
 /**
+ * Why one checkout cannot be enabled, as localized copy. The two gate reasons
+ * are distinct user situations — a non-plugin checkout versus a plugin whose
+ * runnable entry is missing — so they get their own sentences instead of one
+ * shared "cannot be enabled" line. Both keys keep the same `{name}` placeholder.
+ */
+function notLoadableText(
+  reason: PluginRecordNotLoadableReason,
+  name: string,
+  t: Translate,
+): string {
+  return reason === 'entry'
+    ? t('switchNotLoadableEntry', { name })
+    : t('switchNotLoadable', { name })
+}
+
+/**
  * Accessible name of one row's enable switch. A row whose checkout can never be
- * registered as a live plugin entry (a skills/other classification, or a plugin
- * without a resolved entry) carries the refusal copy instead of a toggle verb:
- * its switch is disabled, and the same tooltip explains why.
+ * registered as a live plugin entry carries the refusal copy of its own reason
+ * instead of a toggle verb: its switch is disabled, and the same sentence is the
+ * row tooltip and the inline note.
  */
 function switchLabel(view: ManagedPluginView, name: string, t: Translate): string {
-  if (recordNotLoadableReason(view.record) !== null) return t('switchNotLoadable', { name })
+  const reason = recordNotLoadableReason(view.record)
+  if (reason !== null) return notLoadableText(reason, name, t)
   return view.record.enabled ? t('switchDisable', { name }) : t('switchEnable', { name })
 }
 
@@ -344,12 +362,13 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
             const busy = busyKeys.has(view.key)
             /** Why this checkout can never be registered (null = it can). */
             const notLoadable = recordNotLoadableReason(view.record)
+            /** Localized reason copy, shared by tooltip, note and switch label. */
+            const blockedText = notLoadable === null ? null : notLoadableText(notLoadable, name, t)
             const classification = classificationOf(view.record)
             // The row tooltip prefers the "cannot load" fact over a stale
             // runtime error: an unloadable checkout is never a retry candidate.
-            const rowTitle = notLoadable !== null
-              ? t('switchNotLoadable', { name })
-              : failed && runtimeError !== null ? runtimeError : undefined
+            const rowTitle = blockedText
+              ?? (failed && runtimeError !== null ? runtimeError : undefined)
             return (
               <li
                 key={view.key}
@@ -406,13 +425,13 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
                     data-busy={busy ? 'true' : undefined}
                     data-not-loadable={notLoadable === null ? undefined : notLoadable}
                     disabled={busy || notLoadable !== null}
-                    title={notLoadable === null ? undefined : t('switchNotLoadable', { name })}
+                    title={blockedText ?? undefined}
                     onClick={() => { onToggle(view) }}
                   />
                 </div>
-                {notLoadable === null ? null : (
+                {blockedText === null ? null : (
                   <p className={css.rowNote} data-toggle-disabled-note>
-                    {t('switchNotLoadable', { name })}
+                    {blockedText}
                   </p>
                 )}
                 {rowFailures.get(view.key) === undefined ? null : (
@@ -457,18 +476,18 @@ function reviewClassificationText(review: PluginInstallReview, t: Translate): st
 }
 
 /**
- * Localized guidance of one review's structured note, or null when the note
- * needs no extra copy. The Host never ships user-facing prose for a note (see
- * {@link MarketInstallNote}): the copy for `analysis-unavailable` is the same
- * model-configuration guidance the preview failure path shows, so a checkout
- * the analyzer could not classify still tells the user how to enable it.
+ * Localized note of one review, or null when the review carries none. The Host
+ * ships only a stable {@link MarketInstallNote} kind (no prose), so every line
+ * here comes from this tab's dictionary; `note.text` (analyzer rationale) is a
+ * secondary detail shown next to the dictionary copy, never as the sole text.
+ * The legacy `review.entryNote` string is debug-only and is never rendered.
  */
-function reviewNoteGuide(note: MarketInstallNote | undefined, t: Translate): string | null {
+function reviewNoteText(note: MarketInstallNote | undefined, t: Translate): string | null {
   if (note === undefined) return null
   switch (note.kind) {
     case 'analysis-unavailable': return t('analysisConfigGuide')
-    case 'classified':
-    case 'entry-missing': return null
+    case 'entry-missing': return t('entryMissingNote')
+    case 'classified': return t('classificationNote')
   }
 }
 
@@ -571,11 +590,11 @@ function InstallDialog({ repository, version, refKind, previewInstall, install, 
             <p className={css.classificationNotice} data-download-classification>
               {t('classificationNotice', { classification: reviewClassificationText(review, t) })}
             </p>
-            {review.entryNote === undefined ? null : (
-              <p className={css.classificationNote} data-classification-note>{review.entryNote}</p>
+            {reviewNoteText(review.note, t) === null ? null : (
+              <p className={css.classificationNote} data-classification-note>{reviewNoteText(review.note, t)}</p>
             )}
-            {reviewNoteGuide(review.note, t) === null ? null : (
-              <p className={css.analysisGuide} data-download-analysis-guide>{reviewNoteGuide(review.note, t)}</p>
+            {review.note?.text === undefined || review.note.text.length === 0 ? null : (
+              <p className={css.analysisDetail} data-classification-detail>{review.note.text}</p>
             )}
             {review.buildRequired === true ? (
               <p className={css.warning} data-build-required>{t('buildRequiredNotice')}</p>

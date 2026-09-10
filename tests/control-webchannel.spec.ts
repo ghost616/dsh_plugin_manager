@@ -9,9 +9,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { MarketError } from '../src/host/market/errors.ts'
-// @ts-expect-error -- compiled artifact
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
-// @ts-expect-error -- compiled artifact
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
 import { FakeEngines, fakeAnalysisEngine, fakeDistribution, makeSourceOps, testbed } from './support/control-testbed.ts'
 
@@ -103,10 +101,11 @@ function routeFor(options: {
   const source = makeSourceOps(repository, bed.records, engines, {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
   })
+  // Compiled-artifact gateway over `src/`-typed fakes (see control-gateway.spec.ts).
   const gateway = new MarketControllerGateway(ctx, {
-    controller: () => controller,
-    repository: () => repository,
-    source,
+    controller: () => controller as never,
+    repository: () => repository as never,
+    source: source as never,
   })
   const router = new RouterServer()
   servers.push(router.server)

@@ -5,3 +5,6 @@ lib/
 .demo-profile/
 .dsh-profile-*/
 tests/.tmp/
+# Local test environment (Playwright E2E checkout + run artifacts); never part
+# of the package. It holds its own node_modules, package-lock and screenshots.
+.lizhu_env/

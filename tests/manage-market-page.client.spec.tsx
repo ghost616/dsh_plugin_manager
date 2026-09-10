@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 import { zh } from '../src/client/locales.ts'
 import { MarketCallFailure } from '../src/client/channel.ts'
-import { ManagePluginsTab } from '../src/client/ManagePluginsTab.tsx'
+import { ManagePluginsTab, type ManagePluginsTabProps } from '../src/client/ManagePluginsTab.tsx'
 import {
   makeInstallOutcome,
   makeInstallReview,
@@ -282,17 +282,17 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
       branches: ['main', 'dev'],
       tags: ['v1.0.0'],
     }))
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
-      makeInstallReview({ repository, version: version ?? undefined }))
-    const install = vi.fn(async (repository: string, _token: string, version: string | null) => {
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    const install = vi.fn(async (repository: string, _token: string, version?: string | null) => {
       snapshot = makeList([{
         key: `gh-${repository.replace('/', '-')}`,
         repository,
-        version,
+        ...(typeof version === 'string' ? { version } : {}),
         refKind: 'branch',
         enabled: false,
       }])
-      return makeInstallOutcome({ repository, version: version ?? undefined })
+      return makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) })
     })
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
@@ -358,9 +358,9 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
       branches: ['main'],
       tags: [],
     }))
-    const previewInstall = vi.fn(async (repository: string, version: string | null) => makeInstallReview({
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) => makeInstallReview({
       repository,
-      version: version ?? undefined,
+      ...(typeof version === 'string' ? { version } : {}),
       exists: true,
       degraded: true,
       dependencies: [],
@@ -395,8 +395,8 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
       branches: ['main'],
       tags: ['v1.0.0'],
     }))
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
-      makeInstallReview({ repository, version: version ?? undefined }))
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
     const install = vi.fn(async () => {
       throw new MarketCallFailure({ code: 'market/confirm-expired', message: 'expired', details: {} })
     })
@@ -429,7 +429,7 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
   it('ignores a late search result after the page unmounts', async () => {
     let settle: (page: unknown) => void = () => {}
     const search = vi.fn(() => new Promise(resolve => { settle = resolve }))
-    const { props } = managePageHarness({ search })
+    const { props } = managePageHarness({ search: search as never })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
@@ -455,7 +455,7 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
         { repository: `acme/${keywords}`, name: keywords },
       ]))
     })
-    const { props } = managePageHarness({ search })
+    const { props } = managePageHarness({ search: search as never })
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const dialog = await openMarket(host)
@@ -564,7 +564,7 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     await flush()
     const dialog = await openMarket(host)
 
-    const scrollZone = dialog.querySelector('[data-market-scroll]')
+    const scrollZone = dialog.querySelector<HTMLElement>('[data-market-scroll]')
     expect(scrollZone).not.toBeNull()
     expect(scrollZone?.querySelector('[data-market-results]')).not.toBeNull()
     // The search form is a sibling of the scroll zone, never inside it: it
@@ -1219,7 +1219,7 @@ describe('ManagePluginsTab download classification', () => {
   /** One-repository harness whose review result is fully under test control.
    *  The download itself resolves, so every state below can be driven to its
    *  confirmation and past it: nothing about a classification blocks it. */
-  function classificationHarness(previewInstall: ReturnType<typeof vi.fn>) {
+  function classificationHarness(previewInstall: ReturnType<typeof vi.fn>): { props: ManagePluginsTabProps; previewInstall: ReturnType<typeof vi.fn>; install: ReturnType<typeof vi.fn> } {
     const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
       repository,
       branches: ['main'],
@@ -1228,9 +1228,9 @@ describe('ManagePluginsTab download classification', () => {
     const search = vi.fn(async () => makeSearchPage([
       { repository: 'acme/helper', name: 'helper' },
     ]))
-    const install = vi.fn(async (repository: string, _token: string, version: string | null) =>
-      makeInstallOutcome({ repository, version: version ?? undefined }))
-    const { props } = managePageHarness({ search, repositoryDetail, previewInstall, install })
+    const install = vi.fn(async (repository: string, _token: string, version?: string | null) =>
+      makeInstallOutcome({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    const { props } = managePageHarness({ search, repositoryDetail, previewInstall: previewInstall as never, install })
     return { props, previewInstall, install }
   }
 
@@ -1239,8 +1239,8 @@ describe('ManagePluginsTab download classification', () => {
     ['skills', zh.classificationSkills],
     ['other', zh.classificationOther],
   ] as const)('names the %s classification in the download confirmation', async (classification, expected) => {
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
-      makeInstallReview({ repository, version: version ?? undefined, classification }))
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}), classification }))
     const { props, previewInstall: preview, install } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
@@ -1264,11 +1264,13 @@ describe('ManagePluginsTab download classification', () => {
 
   it('keeps a non-plugin analysis note informational and still downloads', async () => {
     const reason = 'This checkout ships agent skill packs instead of a plugin entry.'
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({
         repository,
-        version: version ?? undefined,
+        ...(typeof version === 'string' ? { version } : {}),
         analysis: { kind: 'skills', reason },
+        note: { kind: 'classified', text: reason },
+        // Debug-only diagnostics MUST never reach the dialog as copy.
         entryNote: reason,
       }))
     const { props, install } = classificationHarness(previewInstall)
@@ -1276,11 +1278,13 @@ describe('ManagePluginsTab download classification', () => {
     await flush()
     const installDialog = await openInstallDialog(host)
 
-    // The analyzer note survives as plain copy; the old refusal panel (which
-    // replaced the whole confirmation flow) is gone.
+    // The copy is the tab's own dictionary line keyed by note.kind; the analyzer
+    // rationale stays a secondary detail; the old refusal panel (which replaced
+    // the whole confirmation flow) is gone.
     expect(installDialog.querySelector('[data-download-classification]')?.textContent)
       .toBe(zh.classificationNotice.replace('{classification}', zh.classificationSkills))
-    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(reason)
+    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(zh.classificationNote)
+    expect(installDialog.querySelector('[data-classification-detail]')?.textContent).toBe(reason)
     expect(installDialog.querySelector('[data-analysis-blocked]')).toBeNull()
     expect(installDialog.querySelector('[data-analysis-title]')).toBeNull()
     expect(installDialog.querySelector('[data-analysis-close]')).toBeNull()
@@ -1292,10 +1296,10 @@ describe('ManagePluginsTab download classification', () => {
   })
 
   it('flags a checkout that needs a build before it can load', async () => {
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({
         repository,
-        version: version ?? undefined,
+        ...(typeof version === 'string' ? { version } : {}),
         classification: 'other',
         buildRequired: true,
       }))
@@ -1312,10 +1316,10 @@ describe('ManagePluginsTab download classification', () => {
     // The Host ships a structured note (kind only, no prose): the tab must
     // render its own copy for it, reusing the model-configuration guidance the
     // preview failure path shows.
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({
         repository,
-        version: version ?? undefined,
+        ...(typeof version === 'string' ? { version } : {}),
         classification: 'other',
         note: { kind: 'analysis-unavailable' },
       }))
@@ -1324,9 +1328,8 @@ describe('ManagePluginsTab download classification', () => {
     await flush()
     const installDialog = await openInstallDialog(host)
 
-    const guide = installDialog.querySelector('[data-download-analysis-guide]')
-    expect(guide?.textContent).toBe(zh.analysisConfigGuide)
-    expect(installDialog.querySelector('[data-classification-note]')).toBeNull()
+    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(zh.analysisConfigGuide)
+    expect(installDialog.querySelector('[data-classification-detail]')).toBeNull()
     expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
 
     await click(installDialog.querySelector('[data-install-confirm]'))
@@ -1334,23 +1337,40 @@ describe('ManagePluginsTab download classification', () => {
     expect(install).toHaveBeenCalledTimes(1)
   })
 
-  it('renders no extra guidance for a classified note (the tag line carries it)', async () => {
-    const reason = 'This checkout ships agent skill packs.'
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
+  it('renders the entry-missing line for a checkout without a runnable entry', async () => {
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
       makeInstallReview({
         repository,
-        version: version ?? undefined,
-        classification: 'skills',
-        note: { kind: 'classified', text: reason },
-        entryNote: reason,
+        ...(typeof version === 'string' ? { version } : {}),
+        classification: 'other',
+        note: { kind: 'entry-missing', entry: 'dist/index.js' },
       }))
     const { props } = classificationHarness(previewInstall)
     const host = await renderInto(<ManagePluginsTab {...props} />)
     await flush()
     const installDialog = await openInstallDialog(host)
 
-    expect(installDialog.querySelector('[data-download-analysis-guide]')).toBeNull()
-    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(reason)
+    expect(installDialog.querySelector('[data-classification-note]')?.textContent).toBe(zh.entryMissingNote)
+    expect(installDialog.querySelector('[data-classification-detail]')).toBeNull()
+  })
+
+  it('renders no note line for a review the host did not annotate', async () => {
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({
+        repository,
+        ...(typeof version === 'string' ? { version } : {}),
+        // Debug-only diagnostics alone must not produce a copy line.
+        entryNote: 'The resolved plugin entry "index.js" does not exist inside the checkout.',
+      }))
+    const { props } = classificationHarness(previewInstall)
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const installDialog = await openInstallDialog(host)
+
+    expect(installDialog.querySelector('[data-classification-note]')).toBeNull()
+    expect(installDialog.querySelector('[data-classification-detail]')).toBeNull()
+    expect(installDialog.textContent).not.toContain('does not exist inside the checkout')
+    expect(installDialog.querySelector('[data-install-confirm]')).not.toBeNull()
   })
 
   it('shows the loading copy while the review preview is pending', async () => {
@@ -1528,7 +1548,6 @@ describe('ManagePluginsTab tab switches with an open dialog', () => {
 
 describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
   /** Open the market modal and drive it into the install review dialog. */
-  /** Open the market modal and drive it into the install review dialog. */
   async function openInstallDialog(host: HTMLElement): Promise<HTMLElement> {
     const market = await openMarket(host)
     await searchIn(market, 'helper')
@@ -1592,8 +1611,8 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
   })
 
   it('recovers any non-expired install failure through re-preview', async () => {
-    const previewInstall = vi.fn(async (repository: string, version: string | null) =>
-      makeInstallReview({ repository, version: version ?? undefined }))
+    const previewInstall = vi.fn(async (repository: string, version?: string | null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
     const install = vi.fn(async () => {
       throw new MarketCallFailure({ code: 'install/git-failed', message: 'git failed', details: {} })
     })

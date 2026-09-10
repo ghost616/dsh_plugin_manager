@@ -309,6 +309,7 @@ describe('ManagePluginsTab managed roster', () => {
   it('disables the switch of a plugin-classified row that has no runnable entry', async () => {
     const list = vi.fn(async () => makeList([
       { key: 'gh-unbuilt', repository: 'acme/unbuilt', classification: 'plugin', entry: null },
+      { key: 'gh-skills', repository: 'acme/skills-pack', classification: 'skills' },
     ]))
     const setEnabled = vi.fn(async () => { throw new Error('enable must never be called without an entry') })
     const { props } = managePageHarness({ list, setEnabled })
@@ -319,7 +320,19 @@ describe('ManagePluginsTab managed roster', () => {
     const toggle = toggles(host)[0]!
     expect(toggle.disabled).toBe(true)
     expect(toggle.getAttribute('data-not-loadable')).toBe('entry')
-    expect(toggle.getAttribute('aria-label')).toBe(zh.switchNotLoadable.replace('{name}', 'acme/unbuilt'))
+    // The two gate reasons get their own sentence: a plugin without a runnable
+    // entry is not the same user situation as a non-plugin checkout.
+    const entryCopy = zh.switchNotLoadableEntry.replace('{name}', 'acme/unbuilt')
+    expect(toggle.getAttribute('aria-label')).toBe(entryCopy)
+    expect(toggle.getAttribute('title')).toBe(entryCopy)
+    expect(host.querySelector('[data-toggle-disabled-note]')?.textContent).toBe(entryCopy)
+    expect(entryCopy).not.toBe(zh.switchNotLoadable.replace('{name}', 'acme/unbuilt'))
+
+    // The classification row right below keeps the shared classification copy.
+    const skillsToggle = toggles(host)[1]!
+    expect(skillsToggle.getAttribute('aria-label'))
+      .toBe(zh.switchNotLoadable.replace('{name}', 'acme/skills-pack'))
+
     await click(toggle)
     await flush()
     expect(setEnabled).not.toHaveBeenCalled()

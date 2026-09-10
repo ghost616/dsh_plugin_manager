@@ -8,7 +8,6 @@
 import type { Plugin } from '@deepseek-ai/cordis'
 import type {
   GitHubSearchPage,
-  ManagedPluginPhase,
   PluginMarketClassification,
   PluginMarketGithubSource,
   PluginMarketKey,
@@ -198,7 +197,10 @@ export function key(raw: string): PluginMarketKey {
 export function fakeRepository(records: FakeRecords, root = '/repo'): MarketRepository {
   return {
     root,
-    records,
+    // The fake store implements the record surface the market consumes; the
+    // concrete PluginRecordStore type is only needed by the installer port,
+    // which these specs never build (they inject a scripted InstallerPort).
+    records: records as unknown as MarketRepository['records'],
     harnessLinks: { scopePath: `${root}/node_modules/@deepseek-ai`, links: [] },
     harnessVerified: null,
   }
@@ -231,8 +233,13 @@ export class FakeEngines {
    * decides the filed tag.
    */
   installedEntry: string | null = 'index.js'
-  /** Facts the fake installer reported back on the last install call. */
-  installedFacts: InstalledPluginFacts = {
+  /**
+   * Facts the fake installer reports back on the last install call. Only the
+   * fields at the installer boundary are preset here; `record`/`checkoutDir`
+   * are always attached by {@link FakeEngines.installer} from the record it
+   * just filed.
+   */
+  installedFacts: Omit<InstalledPluginFacts, 'record' | 'checkoutDir'> = {
     classification: 'plugin',
     entry: 'index.js',
     entryNote: null,
@@ -333,7 +340,9 @@ export class FakeEngines {
           source: record.source,
           localDirName: record.localDirName,
           entry: record.entry,
-          classification: record.classification,
+          // exactOptionalPropertyTypes: an absent classification must stay
+          // absent, never be spread back as `undefined`.
+          ...(record.classification === undefined ? {} : { classification: record.classification }),
           enabled: false,
           trusted: 'trusted',
           trustedAt: record.trustedAt,
@@ -371,8 +380,10 @@ export function makeSourceOps(
     /** Optional smart-install analysis engine (default: none → llm-unconfigured). */
     analysis?: InstallAnalysisEngine
     /**
-     * Optional preview-time entry probe (production wires none: the remote
-     * preview cannot inspect the checkout).
+     * TEST-ONLY SEAM: the preview-time entry probe. The production assembly
+     * never supplies one (the remote preview cannot inspect a checkout), so
+     * injecting it here is how specs make the analyzer's build-first fold
+     * (`buildRequired`) observable.
      */
     analysisEntryProbe?: (repository: string, relativeEntry: string) => boolean | Promise<boolean>
   } = {},
@@ -435,6 +446,10 @@ export interface FakeAnalysisCall {
  * consulting the request's `hasFile` probe, mirroring what the real host
  * analyzer does with it (a plugin answer whose entry is absent folds into
  * `other` + `buildRequired`).
+ *
+ * TEST-ONLY: `probeDistribution` exercises the injected `analysisEntryProbe`
+ * seam, which the production assembly never wires — it is the only way specs
+ * can observe the build-first fold (see PluginInstallReview.buildRequired).
  */
 export function fakeAnalysisEngine(script: {
   /**
@@ -448,6 +463,8 @@ export function fakeAnalysisEngine(script: {
     readonly entryHint: string
     readonly reason: string
   }
+  // `probeDistribution` only fires when the caller injected the test-only
+  // analysisEntryProbe seam (see makeSourceOps): production wires none.
   /** Throw this error on the next call instead of returning. */
   error?: unknown
 } = {}): InstallAnalysisEngine & { readonly calls: FakeAnalysisCall[] } {

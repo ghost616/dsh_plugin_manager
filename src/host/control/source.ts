@@ -158,12 +158,17 @@ export interface MarketSourceDeps {
    */
   readonly analysis?: InstallAnalysisEngine
   /**
-   * Optional entry probe the preview-side analysis runs over a reviewed
-   * checkout. The production preview only reads the remote manifest, so no
-   * probe exists there and `PluginInstallReview.buildRequired` stays absent;
-   * an assembly that can inspect the candidate (a checkout already on disk, or
-   * one read through the repository API) injects the probe here so a plugin
-   * whose entry has to be built first is reported as `buildRequired`.
+   * TEST-ONLY SEAM: the preview-time entry probe a spec injects to exercise the
+   * analyzer's build-first fold (a plugin answer whose entry is absent becomes
+   * `other` + `buildRequired`).
+   *
+   * The production assembly deliberately injects none: the preview only reads
+   * the remote manifest, so nothing can probe the candidate checkout before it
+   * is downloaded. `PluginInstallReview.buildRequired` is therefore unreachable
+   * in production — the authoritative "no runnable entry" signal is the
+   * classification/entry of the install outcome and of the managed record
+   * (`recordNotLoadableReason`), which the UI already renders as the
+   * not-loadable state.
    */
   readonly analysisEntryProbe?: (repository: string, relativeEntry: string) => boolean | Promise<boolean>
   /** Optional structured logger. */
@@ -199,12 +204,24 @@ export interface InstallAnalysisEngine {
      * Answers whether the named checkout-relative entry exists. The engine
      * forwards it to the analyzer, so a plugin whose entry is not present yet
      * resolves to `other` + `buildRequired` instead of a loadable `plugin`.
+     *
+     * TEST-ONLY SEAM: the production assembly never supplies one (see
+     * `MarketSourceDeps.analysisEntryProbe`), so `buildRequired` is unreachable
+     * in production — it exists so specs can drive the analyzer's build-first
+     * fold. A future production source of entry evidence (a probe over an
+     * already-downloaded checkout) would plug in here.
      */
     readonly hasFile?: (relativeEntry: string) => boolean | Promise<boolean>
   }): Promise<PluginAnalysisDistribution | null>
 }
 
-/** One pending install confirmation, keyed by the derived install key. */
+/**
+ * One pending install confirmation, keyed by the derived install key. Only the
+ * facts the later `install()` call needs are kept: the token/expiry, the
+ * reviewed ref, and the classification hint. The review's analyzer verdict is
+ * NOT stored — nothing reads it at install time (the checkout itself is the
+ * authority), so keeping it would be a second, stale copy of review state.
+ */
 interface PendingInstall {
   readonly token: string
   readonly expiresAt: number
@@ -217,8 +234,6 @@ interface PendingInstall {
   readonly classification: PluginMarketClassification
   /** Review note rendered on the review (absence = a runnable entry is expected). */
   readonly note: MarketInstallNote | null
-  /** Legacy analyzer verdict rendered on the review (non-plugin only). */
-  readonly analysis?: PluginInstallReviewAnalysis
 }
 
 /**
@@ -436,10 +451,11 @@ export class MarketSourceOperations {
    * real checkout and files a checkout with a runnable entry as `plugin`
    * whatever the review said, and the authoritative tags come back on the
    * install outcome. `note` is the structured, localizable explanation of a
-   * missing runnable entry (its legacy `entryNote` carries only engine-supplied
-   * detail) and `buildRequired` marks the plugin that needs its build step
-   * first; both let the UI warn while still offering the download. The review
-   * mints its confirmation token in every case.
+   * missing runnable entry (consumers render its `kind` through their own
+   * dictionary) and `buildRequired` marks the plugin that needs its build step
+   * first (test-only seam, see `MarketSourceDeps.analysisEntryProbe`); both let
+   * the UI warn while still offering the download. The review mints its
+   * confirmation token in every case.
    */
   async previewInstall(
     repositoryRaw: string,
@@ -469,7 +485,6 @@ export class MarketSourceOperations {
       version: ref,
       classification: review.classification,
       note: review.note,
-      ...(analysisVerdict === undefined ? {} : { analysis: analysisVerdict }),
     })
     const entryNote = legacyEntryNoteOf(review.note)
     return {

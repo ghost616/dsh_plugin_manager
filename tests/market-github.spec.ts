@@ -22,7 +22,7 @@ function stubGitHub(
 ): { fetchImpl: FetchLike; calls: Array<{ url: string; init?: FetchInit }> } {
   const calls: Array<{ url: string; init?: FetchInit }> = []
   const fetchImpl: FetchLike = async (url, init) => {
-    calls.push({ url, init })
+    calls.push({ url, ...(init === undefined ? {} : { init }) })
     const stub = handler(url, init)
     return {
       status: stub.status,

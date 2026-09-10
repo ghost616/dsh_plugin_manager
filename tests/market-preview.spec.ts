@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest'
 import type { PluginPreviewOutcome } from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { PluginPreviewer } from '../src/host/market/preview.ts'
-import type { FetchLike, FetchResponse } from '../src/host/market/github.ts'
+import type { FetchInit, FetchLike, FetchResponse } from '../src/host/market/github.ts'
 
 /** Route-based GitHub stub covering the API meta call and raw package reads. */
 function stubRoutes(
   routes: Record<string, () => { status: number; body?: unknown; rawText?: string }>,
 ): { fetchImpl: FetchLike; urls: string[] } {
   const urls: string[] = []
-  const fetchImpl: FetchLike = async (url, init?: FetchInit) => {
+  const fetchImpl: FetchLike = async (url, _init?: FetchInit) => {
     urls.push(url)
     const handler = routes[url]
     if (!handler) throw new TypeError(`fetch failed: unexpected url ${url}`)

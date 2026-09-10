@@ -61,7 +61,7 @@
     "prepare": "tsdown --config tsdown.prepare.config.ts",
     "verify": "node scripts/verify-load.mjs",
     "install-profile": "node scripts/install-profile.mjs",
-    "test": "tsc -b tsconfig.json && vitest run",
+    "test": "tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit && vitest run",
     "test:watch": "vitest"
   },
   "peerDependencies": {

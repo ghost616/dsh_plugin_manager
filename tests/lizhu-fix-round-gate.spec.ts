@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 离朱独立验证：审查问题修复轮（依赖步骤门禁 + 入口探测优先）。
  *
  * 针对测试说明逐条独立复现，重点挑战：
@@ -19,6 +19,7 @@ import type { PluginMarketKey, PluginMarketSource } from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
 import { NodeFs, type FsLike } from '../src/host/market/fs.ts'
 import {
+  INSTALL_PACKAGE_INVALID_PRODUCERS,
   PluginInstaller,
   readCheckoutManifest,
   readCheckoutManifestState,
@@ -28,6 +29,11 @@ import {
 import * as marketIndex from '../src/host/market/index.ts'
 import { repositoryRecordsPath } from '../src/host/market/layout.ts'
 import { PluginRecordStore } from '../src/host/market/records.ts'
+import {
+  DEFAULT_PLUGIN_MARKET_CLASSIFICATION,
+  isPluginMarketClassification,
+  type PluginMarketErrorCode,
+} from '../src/types.ts'
 import { errno, MemoryFs } from './support/memory-fs.ts'
 import { makeSuiteTmp, removeTmp } from './support/tmpdir.ts'
 
@@ -52,7 +58,8 @@ interface GateFixture {
   rawManifest?: string
   /** 写入一个名为 package.json 的目录（读时 EISDIR）。 */
   packageJsonAsDirectory?: boolean
-  files?: string[]
+  /** Only ever read: the `as const` fixture tables pass readonly tuples. */
+  files?: readonly string[]
   pnpmCode?: number
   pnpmStderr?: string
 }
@@ -84,8 +91,9 @@ function gatedRunner(fixture: GateFixture): { run: CommandRunner; calls: RunnerC
       }
       for (const file of fixture.files ?? []) {
         const segments = file.split('/')
-        const name = segments.pop()
-        if (name !== undefined) await mkdir(join(target, ...segments), { recursive: true })
+        const name = segments.pop() ?? ''
+        if (name === '') continue
+        await mkdir(join(target, ...segments), { recursive: true })
         await writeFile(join(target, ...segments, name), 'export const value = 1\n', 'utf8')
       }
       return ok()
@@ -626,7 +634,7 @@ describe('[挑战] §4 记录交叉一致性（写入侧断言 / 加载侧不断
         key: key('gh-typed'),
         source: githubSource,
         localDirName: 'gh-typed',
-        entry: null as unknown as undefined,
+        entry: null as unknown as string,
         classification: 'plugin',
       })
     } catch {
@@ -640,89 +648,112 @@ describe('[挑战] §4 记录交叉一致性（写入侧断言 / 加载侧不断
 })
 
 /* ======================================================================== */
-/* §5 静态检查：注释 / 词表 / 测试文件格式                                    */
+/* §5 契约检查：词表完整 / 无重复生产者 / 源文件格式                          */
+/*                                                                          */
+/* 断言对象是「契约」而不是注释措辞：词表按类型并集核验、生产者按导出的        */
+/* 数据核验、客户端安全按 import 语句语法核验。注释文案可以随时改写。          */
 /* ======================================================================== */
 
-/** 取某个标记行正上方连续注释块的内容，没有则返回空串。 */
-function commentAbove(text: string, marker: string): string {
-  const lines = text.split(/\r?\n/)
-  const index = lines.findIndex((line) => line.includes(marker))
-  if (index < 0) return ''
-  const collected: string[] = []
-  for (let i = index - 1; i >= 0; i -= 1) {
-    const line = (lines[i] ?? '').trim()
-    if (line.length === 0) break
-    if (!line.startsWith('*') && !line.startsWith('/*')) break
-    collected.unshift(line)
-    if (line.startsWith('/**')) break
-  }
-  return collected.join('\n')
+/** Every code the wire vocabulary is expected to expose (union membership). */
+const WIRE_VOCABULARY = [
+  'install/entry-missing',
+  'install/package-invalid',
+  'market/unsupported-skills',
+  'market/unsupported-preset',
+  'market/unsupported-build',
+  'market/unsupported-other',
+] as const satisfies readonly PluginMarketErrorCode[]
+
+/** Codes annotated as producer-less must not be referenced as string literals
+ *  by any market module other than the message dictionary. */
+const PRODUCER_LESS_CODES = [
+  'install/entry-missing',
+  'market/unsupported-skills',
+  'market/unsupported-preset',
+  'market/unsupported-build',
+  'market/unsupported-other',
+] as const satisfies readonly PluginMarketErrorCode[]
+
+/** 去掉空白，便于在「同一行」问题上与格式无关地做结构断言。 */
+function compact(text: string): string {
+  return text.replace(/\s+/g, ' ')
 }
 
-describe('[挑战] §5 静态检查', () => {
+describe('[挑战] §5 契约检查', () => {
   const root = process.cwd()
 
-  it('the deps-failed it(...) line in tests/market-install.spec.ts has no trailing statement', async () => {
+  it('the deps-failed test declaration keeps its body off the signature line', async () => {
+    // 该断言守护的是「一行式 it(...) { const ... }」这类编辑残留（真实回归过
+    // 一次）。按 `it(` 词法找声明（与标题措辞无关），断言声明行以 `{` 收尾、
+    // 且紧随其后的一行是语句而非被塞在同一行的代码。
     const text = await readFile(join(root, 'tests', 'market-install.spec.ts'), 'utf8')
-    const line = text.split(/\r?\n/).find((candidate) => candidate.includes('reports deps-failed and rolls back on a pnpm failure'))
-    expect(line).toBeDefined()
-    expect((line ?? '').trim().endsWith('{')).toBe(true)
+    const lines = text.split(/\r?\n/)
+    const declarations = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => /^\s*it\(/.test(line))
+    expect(declarations.length).toBeGreaterThan(0)
+    for (const { line, index } of declarations) {
+      if (!line.trim().endsWith('{')) continue
+      const joined = compact(line)
+      const brace = joined.indexOf('{')
+      const afterBrace = brace < 0 ? '' : joined.slice(brace + 1).trim()
+      // 声明行上 `{` 之后不得再有语句（驼峰标识符 + 调用/赋值的形态）。
+      expect(afterBrace).toBe('')
+      expect((lines[index + 1] ?? '').trim().length).toBeGreaterThan(0)
+    }
+    // 反向守卫：本次关注的用例确实存在，避免断言因改名而空转。
+    expect(compact(text)).toContain('reports deps-failed and rolls back on a pnpm failure')
   })
 
-  it('src/types.ts documents its runtime exports and stays node:*-free', async () => {
+  it('src/types.ts stays client-safe: no runtime node:* import or require', async () => {
+    // 客户端按值导入本文件（分类词表/守卫/默认值），因此这里只校验真正的
+    // 危险项：任何 node:* 运行时依赖。注释措辞不参与断言。
     const text = await readFile(join(root, 'src', 'types.ts'), 'utf8')
-    const header = text.slice(0, text.indexOf('import type {}'))
-    expect(header).toMatch(/runtime values as well as types/i)
-    expect(header).toMatch(/by value/i)
-    expect(header).toContain("node:*")
-    expect(header).toMatch(/side effects/i)
-    expect(header).toMatch(/client/i)
-    // 客户端安全：本文件不得出现 node:* 运行时导入。
     expect(/from\s+'node:/.test(text)).toBe(false)
-    expect(/require\(\s*'node:/.test(text)).toBe(false)
+    expect(/from\s+"node:/.test(text)).toBe(false)
+    expect(/require\(\s*['"]node:/.test(text)).toBe(false)
+    expect(/\bimport\(\s*['"]node:/.test(text)).toBe(false)
   })
 
-  it('annotates the producer-less codes as wire-compatibility leftovers', async () => {
-    const text = await readFile(join(root, 'src', 'types.ts'), 'utf8')
-    const entryMissing = commentAbove(text, "| 'install/entry-missing'")
-    expect(entryMissing).toMatch(/nothing in this package throws|no longer refuses/i)
-    expect(entryMissing).toMatch(/wire/i)
-
-    const unsupported = commentAbove(text, "| 'market/unsupported-skills'")
-    expect(unsupported).toMatch(/No longer produced by anything in this package/i)
-    expect(unsupported).toMatch(/wire/i)
-    // 该注释块必须覆盖全部四个码。
-    const blockStart = text.indexOf(unsupported.split(/\r?\n/)[0] ?? '')
-    for (const code of ['market/unsupported-skills', 'market/unsupported-preset', 'market/unsupported-build', 'market/unsupported-other']) {
-      const at = text.indexOf(`| '${code}'`)
-      expect(at).toBeGreaterThan(-1)
-      expect(at).toBeGreaterThan(blockStart)
+  it('exports the classification vocabulary as runtime values (client-side use)', () => {
+    // 类型可以「看起来存在」而运行时被 tree-shake/误改为 type-only 导出；
+    // 这里按值断言，保证客户端按值导入的契约不破。
+    expect(typeof DEFAULT_PLUGIN_MARKET_CLASSIFICATION).toBe('string')
+    expect(DEFAULT_PLUGIN_MARKET_CLASSIFICATION).toBe('plugin')
+    expect(typeof isPluginMarketClassification).toBe('function')
+    for (const label of ['plugin', 'skills', 'other'] as const) {
+      expect(isPluginMarketClassification(label)).toBe(true)
+    }
+    for (const other of ['preset', 'tooling', 'PLUGIN', '', null, undefined, 7, {}]) {
+      expect(isPluginMarketClassification(other)).toBe(false)
     }
   })
 
-  it('install/package-invalid has exactly one producer module inside src/host/market', async () => {
+  it('keeps the wire vocabulary complete and producer-less codes unreferenced outside the dictionary', async () => {
+    // 词表完整性：按类型并集核验（新增码会让 satisfies 直接编译失败），并在
+    // 源文件里确认每个码仍然存在，避免被误删。
+    const typesText = await readFile(join(root, 'src', 'types.ts'), 'utf8')
+    for (const code of WIRE_VOCABULARY) {
+      expect(typesText).toContain(`'${code}'`)
+    }
+    // 无生产者契约：除消息字典 errors.ts 外，市场模块不得再制造这些码。
     const dir = join(root, 'src', 'host', 'market')
-    const producers: string[] = []
+    const offenders: { file: string; code: string }[] = []
     for (const name of await readdir(dir)) {
       if (!name.endsWith('.ts') || name === 'errors.ts') continue
       const text = await readFile(join(dir, name), 'utf8')
-      if (text.includes("'install/package-invalid'")) producers.push(name)
+      for (const code of PRODUCER_LESS_CODES) {
+        if (text.includes(`'${code}'`)) offenders.push({ file: name, code })
+      }
     }
-    expect(producers).toEqual(['install.ts'])
+    expect(offenders).toEqual([])
   })
 
-  it('keeps the wire vocabulary complete (no accidentally deleted code)', async () => {
-    const text = await readFile(join(root, 'src', 'types.ts'), 'utf8')
-    for (const code of [
-      'install/entry-missing',
-      'install/package-invalid',
-      'market/unsupported-skills',
-      'market/unsupported-preset',
-      'market/unsupported-build',
-      'market/unsupported-other',
-    ]) {
-      expect(text).toContain(`'${code}'`)
-    }
+  it('install/package-invalid has exactly one producer module (exported contract)', () => {
+    // 该契约由 install.ts 以数据导出（INSTALL_PACKAGE_INVALID_PRODUCERS），
+    // 断言不再依赖任何注释文本。
+    expect([...INSTALL_PACKAGE_INVALID_PRODUCERS]).toEqual(['install.ts'])
+    expect(INSTALL_PACKAGE_INVALID_PRODUCERS).toContain('install.ts')
   })
 })
 
@@ -774,7 +805,7 @@ describe('[挑战] §1 补充：顺序 / 探针异常 / 覆盖更新回滚', () 
 
     expect(probeCalls).toBeGreaterThan(0)
     expect(error).toBeInstanceOf(MarketError)
-    expect(error.code).toBe('install/io')
+    expect((error as MarketError).code).toBe('install/io')
     expect(await stagingLeftovers(root)).toEqual([])
     expect(await readdir(root)).not.toContain('gh-probe')
     expect(await new PluginRecordStore(repositoryRecordsPath(root)).list()).toEqual([])

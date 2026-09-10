@@ -159,7 +159,9 @@ describe('[挑战] record classification —— 输入路径非法标签 record/
       source: githubSource,
       localDirName: 'gh-undef',
       entry: 'index.js',
-      classification: undefined,
+      // Deliberate type violation: the store's cross-consistent default is what
+      // this case pins (see the test name).
+      classification: undefined as unknown as PluginMarketClassification,
     })
     expect(withEntry.classification).toBe('plugin')
     // ...while an entry-less record defaults to `other`, never to a
@@ -168,7 +170,7 @@ describe('[挑战] record classification —— 输入路径非法标签 record/
       key: key('gh-undef-less'),
       source: githubSource,
       localDirName: 'gh-undef-less',
-      classification: undefined,
+      classification: undefined as unknown as PluginMarketClassification,
     })
     expect(entryLess.classification).toBe('other')
     const raw = JSON.parse(await readFile(file, 'utf8')) as { records: Record<string, { classification?: string }> }
@@ -340,8 +342,9 @@ function fakeRunner(fixture: Fixture): CommandRunner {
       }
       for (const file of fixture.files ?? []) {
         const segments = file.split('/')
-        const name = segments.pop()
-        if (name !== undefined) await mkdir(join(target, ...segments), { recursive: true })
+        const name = segments.pop() ?? ''
+        if (name === '') continue
+        await mkdir(join(target, ...segments), { recursive: true })
         await writeFile(join(target, ...segments, name), 'export const value = 1\n', 'utf8')
       }
       return { code: 0, stdout: '', stderr: '' } satisfies CommandOutcome
@@ -588,9 +591,12 @@ describe('[挑战] probeCheckoutEntry 语义', () => {
     const error = await probeCheckoutEntry(() => { throw new Error('EACCES boom') }, 'lib/entry.js')
       .catch((e: unknown) => e as MarketError)
     expect(error).toBeInstanceOf(MarketError)
-    expect(error.code).toBe('market/io')
-    expect(error.message).toContain('lib/entry.js')
-    expect(error.message).toContain('EACCES boom')
+    // The probe surface is `boolean | undefined`; the cast above keeps the
+    // failure branch addressable (this test only runs it on a throw).
+    const failure = error as MarketError
+    expect(failure.code).toBe('market/io')
+    expect(failure.message).toContain('lib/entry.js')
+    expect(failure.message).toContain('EACCES boom')
   })
 
   it('rethrows an existing MarketError unchanged', async () => {
