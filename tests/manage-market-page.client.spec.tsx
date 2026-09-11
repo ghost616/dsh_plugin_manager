@@ -1337,9 +1337,12 @@ describe('ManagePluginsTab download classification', () => {
     // is only a hint on the confirmation screen).
     expect(commitDownload).toHaveBeenCalledWith('dl-acme-helper', 'plugin')
     expect(installDialog.querySelector('[data-install-done]')).not.toBeNull()
-    // Downloading sources never installs dependencies, and the dialog says so.
+    // Downloading sources never installs dependencies: the dialog states the
+    // fact AND gives the way out — run pnpm install in the checkout directory,
+    // which is shown right there.
     expect(installDialog.querySelector('[data-no-deps-installed]')?.textContent)
-      .toBe(zh.depsNotInstalledNotice)
+      .toBe(zh.depsInstallHint)
+    expect(installDialog.querySelector('[data-checkout-dir]')?.textContent).toBe('/repo/gh-acme-helper')
     expect(installDialog.querySelector('[data-verdict-final]')?.textContent)
       .toBe(zh.verdictFinal.replace('{classification}', zh.classificationPlugin))
   })

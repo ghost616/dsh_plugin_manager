@@ -36,7 +36,7 @@ import type { MarketRepository } from '../market/index.ts'
 import { parsePluginKey } from '../market/keys.ts'
 import { MarketError } from '../market/errors.ts'
 import { MarketControlError, type MarketPluginController } from './controller.ts'
-import { requireClassification, type DownloadClassification, type DownloadCommit, type DownloadPreparation, type MarketSourceOperations } from './source.ts'
+import { requireClassification, wireDetailsOf, type DownloadClassification, type DownloadCommit, type DownloadPreparation, type MarketSourceOperations } from './source.ts'
 
 /** The Cordis service key (and wire namespace) of the gateway. */
 export const MARKET_CONTROL_SERVICE_KEY = 'marketControl'
@@ -92,10 +92,15 @@ export function toRemoteError(error: unknown): RemoteError {
     )
   }
   if (error instanceof MarketError) {
+    // Host failures carry machine-readable details (`details.swapCompleted`,
+    // `details.checkoutDir`, `details.key`, …). Only the fields the shared
+    // `MarketRemoteErrorDetails` declares travel on the wire — they are
+    // normalized rather than forwarded verbatim, so the wire contract stays
+    // exactly as wide as `src/types.ts` says it is.
     return new RemoteError(
       error.code as never,
       error.message,
-      {} as never,
+      wireDetailsOf(error) as never,
       { cause: error },
     )
   }
@@ -106,7 +111,7 @@ export function toRemoteError(error: unknown): RemoteError {
     return new RemoteError(
       error.code as never,
       error.message,
-      error.details as never,
+      wireDetailsOf(error) as never,
       { cause: error },
     )
   }

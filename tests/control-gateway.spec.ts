@@ -16,6 +16,12 @@ import {
 import { MarketControlError } from '../lib/types/host/control/controller.js'
 import { MarketError } from '../src/host/market/errors.ts'
 import {
+  DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
+  DOWNLOAD_REASON_EXPIRED,
+  DOWNLOAD_REASON_REPAIR_RECORD_STALE,
+  DOWNLOAD_REASON_UNKNOWN,
+} from '../src/host/control/source.ts'
+import {
   fakeAnalysisEngine,
   fakeDistribution,
   key,
@@ -51,6 +57,8 @@ function gatewayWith(
     idle?: boolean
     analysis?: InstallAnalysisEngine
     previewResult?: import('../src/types.ts').PluginPreviewOutcome
+    now?: () => Date
+    downloadTtlMs?: number
   } = {},
 ): {
   ctx: Context
@@ -66,6 +74,8 @@ function gatewayWith(
   const repository = options.idle === true ? null : bed.repository
   const source = makeSourceOps(repository, bed.records, bed.engines, {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
   })
   // This spec imports the tsc-emitted gateway artifact, so its `.d.ts` names a
   // second nominal identity for every class-typed dep (`MarketControllerGateway`
@@ -306,16 +316,73 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect((await gateway.listManaged()).entries[0]).toMatchObject({ key: 'gh-skills-pack', loadable: false })
   })
 
-  it('passes an install/entry-missing failure through over the gateway', async () => {
+  it('passes a prepare failure through over the gateway', async () => {
     const { gateway, engines } = gatewayWith()
     const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
     engines.installError = new MarketError(
-      'install/entry-missing',
-      'The resolved plugin entry "dist/index.js" does not exist inside the checkout.',
+      'install/git-failed',
+      'The git clone step failed (offline).',
     )
     const caught = await gateway.prepareDownload('octocat/demo-plugin', review.confirmToken, null, null)
       .catch((error: unknown) => error)
-    expect(remoteErrorOf(caught)).toMatchObject({ code: 'install/entry-missing' })
+    expect(remoteErrorOf(caught)).toMatchObject({ code: 'install/git-failed' })
+  })
+
+  it('carries the commit swap facts onto the wire details as stable reasons', async () => {
+    const { gateway, engines } = gatewayWith()
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    const prepared = await gateway.prepareDownload('octocat/demo-plugin', review.confirmToken, null, null)
+
+    // A pre-swap failure keeps the download retryable and says so on the wire.
+    engines.commitError = new MarketError('install/io', 'the records file is locked')
+    const retryable = await gateway.commitDownload(prepared.token, 'other').catch((error: unknown) => error)
+    expect(remoteErrorOf(retryable)).toMatchObject({
+      code: 'install/io',
+      details: { key: 'gh-octocat-demo-plugin', reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+    })
+
+    // The same handle then commits successfully.
+    engines.commitError = undefined
+    await expect(gateway.commitDownload(prepared.token, 'other')).resolves.toMatchObject({
+      dependenciesInstalled: false,
+    })
+
+    // A post-swap failure is a repair: the host's checkoutDir travels as `path`.
+    const second = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    const secondPrepared = await gateway.prepareDownload('octocat/demo-plugin', second.confirmToken, null, null)
+    engines.commitError = new MarketError('install/io', 'the records file is locked')
+    engines.commitFailsAfterSwap = true
+    const repair = await gateway.commitDownload(secondPrepared.token, 'other').catch((error: unknown) => error)
+    expect(remoteErrorOf(repair)).toMatchObject({
+      code: 'install/io',
+      details: {
+        key: 'gh-octocat-demo-plugin',
+        reason: DOWNLOAD_REASON_REPAIR_RECORD_STALE,
+        path: '/repo/gh-octocat-demo-plugin',
+      },
+    })
+  })
+
+  it('distinguishes a swept download handle from a never-prepared one', async () => {
+    let nowMs = 1_000
+    const { gateway, engines } = gatewayWith({ now: () => new Date(nowMs), downloadTtlMs: 60_000 })
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    const prepared = await gateway.prepareDownload('octocat/demo-plugin', review.confirmToken, null, null)
+
+    nowMs += 60_001
+    const expired = await gateway.classifyDownload(prepared.token).catch((error: unknown) => error)
+    expect(remoteErrorOf(expired)).toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_EXPIRED, path: prepared.token },
+    })
+    expect(engines.cancelledCalls).toEqual([prepared.token])
+
+    const unknown = await gateway.classifyDownload('dl-0123456789abcdef0123456789abcdef')
+      .catch((error: unknown) => error)
+    expect(remoteErrorOf(unknown)).toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_UNKNOWN },
+    })
   })
 
   it('bypasses analysis for standard plugins (ready preview never consults the engine)', async () => {

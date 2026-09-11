@@ -691,6 +691,153 @@ export type MarketWireErrorCode =
   | 'market/load-failed'
   | 'market/bad-request'
 
+/* ------------------------------------------------------------------------ */
+/* Download-phase wire contract (prepare -> classify -> commit)             */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Cross-face shapes of the three-phase DOWNLOAD surface, as the host control
+ * channel returns them.
+ *
+ * ## "Download" vs "install" - the vocabulary this file pins down
+ *
+ * - **download** = fetch the sources into the local repository. The three
+ *   phases below are one download: `DownloadPreparation` (cloned into a private
+ *   staging directory, nothing filed yet), `DownloadClassification` (the label
+ *   decision for that checkout) and `DownloadCommit` (the staged checkout is
+ *   swapped into its final location and the record is written, disabled).
+ * - **install** = whatever comes after: installing the checkout's dependencies
+ *   (`pnpm install`, a separate explicit action) and enabling the plugin
+ *   (the loader registration the control layer owns).
+ *
+ * The split is the reason `dependenciesInstalled` on {@link DownloadCommit} is
+ * `false` by contract: **a download never installs dependencies**. A later,
+ * explicit install action is what flips that fact.
+ *
+ * Authoritative source of these shapes is the host control channel
+ * (`src/host/control/source.ts`, built on the phases of
+ * `src/host/market/install.ts`); the faces consume them from here so a drift
+ * cannot hide behind a local mirror.
+ */
+
+/**
+ * Opaque download handle as it travels the wire.
+ *
+ * Plain `string` on purpose: the channel is JSON, so the handle is forwarded
+ * verbatim, and the host's own branded, process-local `DownloadToken` stays an
+ * internal detail of the installer. A handle is **in-memory and never
+ * persisted** - it is valid for the process that minted it, and a restart
+ * invalidates it (the next prepare cleans the stale staging area).
+ */
+export type DownloadHandle = string
+
+/** Lifecycle state of one staged download (mirrors the host's phase states). */
+export type DownloadStageState =
+  /** Cloned and awaiting classification/commit; cancellation is allowed. */
+  | 'prepared'
+  /** Classified (the label is not stored on the host - the caller keeps it). */
+  | 'classified'
+  /** Swap + record write finished; the handle is consumed. */
+  | 'committed'
+
+/**
+ * How one classification attempt finished. `unclassified` (no model available)
+ * and `failed` (the model call itself failed) both file the conservative
+ * `other` label and keep the checkout, so a model problem never blocks a
+ * download.
+ *
+ * {@link DownloadStageState} and this union are the canonical *names* for the
+ * literal unions the host channel spells inline; they expand to exactly the
+ * same members, so the wire contract and the host's return shape cannot drift.
+ */
+export type DownloadClassifyOutcome = 'classified' | 'unclassified' | 'failed'
+
+/**
+ * Channel answer of phase 1 (`prepareDownload`): what was cloned, under which
+ * handle, and the facts a UI shows for "cloning sources".
+ */
+export interface DownloadPreparation {
+  /** Process-local download handle; never persisted, never reused across restarts. */
+  readonly token: DownloadHandle
+  /** Stable loader-safe key the eventual record will carry. */
+  readonly key: PluginMarketKey
+  /** `owner/repo` slug that was cloned. */
+  readonly repository: string
+  /** V2 ref kind; absent for a legacy default-branch download. */
+  readonly refKind?: GithubRefKind
+  /** Branch/tag name that was checked out (null for a legacy unpinned clone). */
+  readonly ref: string | null
+  /** Repository-root-relative checkout location the commit phase will create. */
+  readonly localDirName: string
+  /** Commit the staged checkout sits at, when resolvable. */
+  readonly commit: string | null
+  /** ISO-8601 timestamp of the staging start. */
+  readonly startedAt: string
+  /** Current lifecycle state (see {@link DownloadStageState}). */
+  readonly state: DownloadStageState
+  /** Whether a record already exists for this key (the commit will overwrite it). */
+  readonly overwrite: boolean
+}
+
+/**
+ * Channel answer of phase 2 (`classifyDownload`).
+ *
+ * **This phase never fails for a model problem**: an unavailable or failing
+ * model yields `outcome: 'unclassified' | 'failed'` with
+ * `classification: 'other'`, `unclassified: true` and a human-readable
+ * `reason`, so the download keeps its checkout and the label can be corrected
+ * later. Only an unknown/expired handle fails the call.
+ */
+export interface DownloadClassification {
+  readonly outcome: DownloadClassifyOutcome
+  /** Label to commit: the model's answer, or the conservative `'other'`. */
+  readonly classification: PluginMarketClassification
+  /**
+   * Rationale (untrusted model text, or the host's explanation for why no
+   * classification happened); shown at most as a secondary detail.
+   */
+  readonly reason: string
+  /** True when the model could not classify (either `unclassified` or `failed`). */
+  readonly unclassified: boolean
+  /**
+   * Mechanical hint only (never the classifier): whether the resolved entry
+   * exists in the checkout. `null` when the checkout has no usable manifest.
+   */
+  readonly entryPresent: boolean | null
+  /** Entry the mechanical probe resolved (checkout-relative), or null. */
+  readonly entryHint: string | null
+  /** Stable error code of a failed model call (`market/llm-*`, `market/io`). */
+  readonly errorCode?: string
+}
+
+/**
+ * Channel answer of phase 3 (`commitDownload`): the record the download was
+ * actually filed as. The checkout has been swapped into its final location and
+ * the record written `enabled: false` under the TrustGate `trusted` state; only
+ * the loader registration is still withheld (that is the later install/enable
+ * action).
+ */
+export interface DownloadCommit {
+  readonly key: PluginMarketKey
+  /** Whether an existing checkout for the same key was replaced. */
+  readonly overwritten: boolean
+  readonly record: PluginMarketRecord
+  /** Final absolute checkout directory. */
+  readonly checkoutDir: string
+  /** Label the checkout was actually filed under. */
+  readonly classification: PluginMarketClassification
+  /** Registered runnable entry, or null for an entry-less checkout. */
+  readonly entry: string | null
+  /**
+   * Always `false`: the download path never installs dependencies. The fact is
+   * kept so a consumer can show "dependencies not installed yet" and a later
+   * explicit action can flip it.
+   */
+  readonly dependenciesInstalled: boolean
+  /** Diagnostic note (null on the happy path). */
+  readonly note: string | null
+}
+
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface RemoteErrorDetailsMap {
     'config/invalid': MarketRemoteErrorDetails

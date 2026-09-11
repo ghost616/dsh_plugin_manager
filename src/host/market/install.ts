@@ -51,6 +51,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type {
   GithubRefKind,
@@ -76,11 +77,12 @@ import {
 } from './paths.ts'
 import { PluginRecordStore } from './records.ts'
 import {
-  ANALYZE_SYSTEM_PROMPT,
+  buildAnalyzePrompt,
   collectCheckoutSnapshot,
   parseAnalysisOutput,
   probeCheckoutEntry,
   resolveAnalysisDistribution,
+  type CheckoutManifestSummary,
   type CheckoutSnapshot,
 } from './analyze.ts'
 
@@ -132,7 +134,11 @@ export const nodeCommandRunner: CommandRunner = (command, args, options = {}) =>
     }))
   })
 
-/** Input of one {@link PluginInstaller.install} run. */
+/**
+ * Input of {@link PluginInstaller.install} — the **legacy one-shot install**
+ * surface (see that method: no in-package caller; use the three download phases
+ * for new code).
+ */
 export interface InstallPluginInput {
   /** Validated repository root (must already exist and be writable). */
   readonly repositoryRoot: string
@@ -182,15 +188,16 @@ export interface InstallPluginInput {
 }
 
 /**
- * Successful install: the registered record and its checkout directory.
+ * Result of the **legacy one-shot install** ({@link PluginInstaller.install};
+ * see that method for why it is kept):
  *
  * `classification` mirrors `record.classification`; `entry` is the runnable
- * entry that was registered, or null when the checkout has none (the record
- * then carries `entry: null` and the control layer decides whether a loader
- * row is registered at all). `entryNote` explains a null entry and/or a
- * skipped dependency step (the dependency command is only run for a classified
- * plugin with a readable package.json) for logging/UI;
- * `dependenciesInstalled` reports whether `pnpm install` actually ran.
+ * entry that was registered, or null when the checkout has none (the record then
+ * carries `entry: null` and the control layer decides whether a loader row is
+ * registered at all). `entryNote` is a DEBUG/LOG-ONLY diagnostic string (never
+ * user-facing copy); `dependenciesInstalled` is **always false** on this path —
+ * no package manager runs during a download (the dependency step is the
+ * standalone `installCheckoutDependencies`).
  */
 export interface InstalledPlugin {
   readonly record: PluginMarketRecord
@@ -198,8 +205,38 @@ export interface InstalledPlugin {
   readonly classification: PluginMarketClassification
   readonly entry: string | null
   readonly entryNote: string | null
-  /** True when `pnpm install` ran in the checkout (see the class docs). */
+  /** Always false: downloads never install dependencies. */
   readonly dependenciesInstalled: boolean
+}
+
+/**
+ * Attach the swap fact to a commit failure so callers can tell the two failure
+ * windows apart (see {@link PluginInstaller.commitDownload}):
+ * `details.swapCompleted = false` means the checkout never moved (staging was
+ * cleaned, the previous checkout/record are intact), `true` means the new
+ * checkout is already in place and only the record write failed — the checkout
+ * is kept for manual repair and the record still holds its previous value.
+ */
+function withSwapFact(error: MarketError, swapCompleted: boolean, checkoutDir: string): MarketError {
+  const details = { ...error.details, swapCompleted, checkoutDir }
+  const note = swapCompleted
+    ? ' The new checkout is already in place; the record could not be updated, so it still holds its previous value — repair the record or re-commit.'
+    : ' The staged checkout was removed; the previous checkout and record (if any) are unchanged.'
+  const next = new MarketError(error.code, `${error.message}${note}`, { details })
+  next.cause = error
+  return next
+}
+
+/** String field of a raw manifest object, or null. */
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+/** Whether a manifest's `scripts` object declares a non-blank `build` script. */
+function hasNonEmptyBuildScript(scripts: unknown): boolean {
+  if (scripts === null || typeof scripts !== 'object' || Array.isArray(scripts)) return false
+  const build = (scripts as Record<string, unknown>)['build']
+  return typeof build === 'string' && build.trim().length > 0
 }
 
 /** Options for {@link PluginInstaller}.
@@ -233,9 +270,14 @@ declare const downloadTokenBrand: unique symbol
  */
 export type DownloadToken = string & { readonly [downloadTokenBrand]: 'download-token' }
 
-/** Validate/narrow an untrusted value into a {@link DownloadToken}. */
+/**
+ * Validate/narrow an untrusted value into a {@link DownloadToken}: the exact
+ * shape this host mints (`dl-` + 32 lowercase hex chars from
+ * `crypto.randomBytes(16)`). Anything else is refused, so a caller cannot pass
+ * an arbitrary string into the phase methods.
+ */
 export function isDownloadToken(value: unknown): value is DownloadToken {
-  return typeof value === 'string' && /^dl-[0-9a-z]+-[0-9a-z]+$/.test(value)
+  return typeof value === 'string' && /^dl-[0-9a-f]{32}$/.test(value)
 }
 
 /** Lifecycle state of one staged download. */
@@ -359,6 +401,11 @@ export interface CommittedDownload {
  * Registry of staged downloads. Injectable so cancellation and lifecycle can be
  * tested without the class, and so an assembly could share one registry across
  * installer instances.
+ *
+ * `add` REFUSES to silently replace an entry: two live downloads must never
+ * share one handle (a silent overwrite would orphan the first checkout and make
+ * cancellation delete the wrong one), so a duplicate token throws
+ * `install/io` and the caller mints another one.
  */
 export interface DownloadStaging {
   /** Register a freshly staged download and return its handle. */
@@ -377,7 +424,21 @@ export interface DownloadStaging {
 export class InMemoryDownloadStaging implements DownloadStaging {
   private readonly entries = new Map<DownloadToken, StagedDownload>()
 
+  /**
+   * Register one staged download. A token that is still live is **rejected**
+   * (`install/io`) instead of being overwritten: the handle identifies a
+   * staging directory, so a silent replace would leak the first checkout and
+   * let {@link PluginInstaller.cancelDownload} remove the wrong one. Callers
+   * mint a fresh token and retry (see `PluginInstaller.mintUnusedToken`).
+   */
   add(entry: StagedDownload): StagedDownload {
+    if (this.entries.has(entry.token)) {
+      throw new MarketError(
+        'install/io',
+        `The download handle "${entry.token}" is already in use; refusing to replace a live download.`,
+        { path: entry.stagedDir, details: { token: entry.token } },
+      )
+    }
     this.entries.set(entry.token, entry)
     return entry
   }
@@ -517,7 +578,7 @@ export class PluginInstaller {
       })
       const commit = await this.readHeadSha(stagedDir)
       const handle: StagedDownload = {
-        token: this.mintToken(),
+        token: this.mintUnusedToken(),
         key: target.key,
         repository: ownerRepo,
         refKind: target.refKind,
@@ -568,7 +629,7 @@ export class PluginInstaller {
       }
     }
     try {
-      const raw = await this.runCompletion(complete, options, snapshot)
+      const raw = await this.runCompletion(complete, options, snapshot.snapshot)
       const entryPresent = await this.probeEntry(
         staged.stagedDir,
         snapshot.entryHint ?? DEFAULT_CHECKOUT_ENTRY,
@@ -605,13 +666,24 @@ export class PluginInstaller {
    * Phase 3 — atomically move the staged checkout to its final location and
    * register the record (TrustGate `trusted`, `enabled: false`).
    *
-   * Failure semantics: the staged directory is removed and the handle dropped,
-   * and a previous checkout/record for the same key is left untouched (the swap
-   * only happens once the new checkout is fully staged). Throws
-   * `market/not-found` for an unknown/expired token, `gate/consent-required`
-   * when the staged handle was not consented (impossible through the public
-   * phases — kept defensive), `record/*` for validation failures and
-   * `install/io` for filesystem failures.
+   * **Failure semantics (the swap fact is observable).** The commit has two
+   * windows and they are NOT equivalent:
+   *
+   * - **before the swap** (`swapCompleted === false`): the rename has not run,
+   *   so the staging directory is still there and is removed — zero residue —
+   *   and any previous checkout/record for the same key is untouched.
+   * - **after the swap** (`swapCompleted === true`): the rename already moved the
+   *   checkout to its final location, so the staging directory no longer exists
+   *   and is NOT cleaned; the new checkout is deliberately **kept in place** so
+   *   the failure can be repaired by hand (the caller sees this through
+   *   `error.details['swapCompleted']`, which `MarketError` also copies onto the
+   *   instance for direct reading). The record still holds its previous value in
+   *   that case — the checkout is newer than the record, and the error says so
+   *   instead of pretending the two agree.
+   *
+   * @throws {MarketError} `record/not-found` for an unknown/expired token,
+   * `record/invalid` for an invalid entry path, and `install/io` for swap or
+   * record-write failures (carrying `details.swapCompleted`).
    */
   async commitDownload(input: CommitDownloadInput): Promise<CommittedDownload> {
     const staged = this.requireStaged(input.token)
@@ -624,10 +696,13 @@ export class PluginInstaller {
     if (entry !== null && !isCheckoutEntryPath(entry)) {
       throw new MarketError('record/invalid', `entry "${entry}" is not a valid checkout-relative entry path.`)
     }
+    // Local marker of the swap window: set exactly once the rename succeeded.
+    let swapCompleted = false
     try {
       await this.fs.mkdirp(dirname(staged.checkoutDir))
       if ((await this.fs.lstat(staged.checkoutDir)) !== null) await this.fs.rmrf(staged.checkoutDir)
       await this.fs.rename(staged.stagedDir, staged.checkoutDir)
+      swapCompleted = true
       const record = await store.register({
         key: staged.key,
         source: staged.refKind === undefined
@@ -655,10 +730,17 @@ export class PluginInstaller {
         note: input.note ?? null,
       }
     } catch (error) {
-      await this.fs.rmrf(staged.stagedDir).catch(() => undefined)
       this.staging.remove(input.token)
-      if (error instanceof MarketError) throw error
-      throw new MarketError('install/io', 'Committing the downloaded checkout failed.', { path: staged.checkoutDir, cause: error })
+      if (!swapCompleted) {
+        // Pre-swap failure: the staged clone is still on disk and is garbage.
+        await this.fs.rmrf(staged.stagedDir).catch(() => undefined)
+      }
+      if (error instanceof MarketError) throw withSwapFact(error, swapCompleted, staged.checkoutDir)
+      throw withSwapFact(
+        new MarketError('install/io', 'Committing the downloaded checkout failed.', { path: staged.checkoutDir, cause: error }),
+        swapCompleted,
+        staged.checkoutDir,
+      )
     }
   }
 
@@ -690,9 +772,25 @@ export class PluginInstaller {
     return this.store ?? new PluginRecordStore(repositoryRecordsPath(root), { fs: this.fs })
   }
 
+  /**
+   * Mint one opaque download token from a cryptographically random source
+   * (`crypto.randomBytes`, 16 bytes hex) so tokens cannot be guessed or collide
+   * by accident the way a `Math.random`/timestamp scheme can.
+   */
   private mintToken(): DownloadToken {
-    const random = Math.random().toString(36).slice(2, 10)
-    return `dl-${Date.now().toString(36)}-${random}` as DownloadToken
+    return `dl-${randomBytes(16).toString('hex')}` as DownloadToken
+  }
+
+  /** Mint a token that is not in use yet (bounded retry; collision is fatal). */
+  private mintUnusedToken(): DownloadToken {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const token = this.mintToken()
+      if (this.staging.get(token) === null) return token
+    }
+    throw new MarketError(
+      'install/io',
+      'Could not allocate a unique download handle (token collision); retry the download.',
+    )
   }
 
   private requireStaged(token: DownloadToken): StagedDownload {
@@ -733,60 +831,60 @@ export class PluginInstaller {
     }
   }
 
-  /** Mechanical snapshot used to feed (but never to decide) classification. */
+  /**
+   * Mechanical snapshot of a staged checkout, built from the checkout's **real
+   * manifest** (the same tolerant read + entry resolution the commit phase
+   * uses), so the prompt the model sees and the entry that finally lands in the
+   * record can never disagree — `package.json` `exports` included.
+   *
+   * The entry result is only a HINT for the prompt/UI; classification itself is
+   * always the model's call.
+   */
   private async snapshotForClassification(stagedDir: string): Promise<{
-    snapshot: CheckoutSnapshot | null
+    snapshot: CheckoutSnapshot
     entryPresent: boolean | null
     entryHint: string | null
   }> {
-    const snapshot = await collectCheckoutSnapshot(stagedDir, { fs: this.fs })
-    const entryHint = resolveCheckoutEntry(undefined, snapshot.manifest === null ? {} : {
-      ...(snapshot.manifest.main === null ? {} : { main: snapshot.manifest.main }),
-    })
-    const stat = await this.fs.stat(join(stagedDir, ...entryHint.split('/')))
-    const entryPresent = stat !== null && stat.isFile()
-    return { snapshot, entryPresent, entryHint: entryPresent ? entryHint : null }
+    const collected = await collectCheckoutSnapshot(stagedDir, { fs: this.fs })
+    const manifest = await readCheckoutManifestState(stagedDir, this.fs)
+    const source = manifest.manifest ?? {}
+    const summary: CheckoutManifestSummary = {
+      name: stringOrNull(source['name']),
+      version: stringOrNull(source['version']),
+      description: stringOrNull(source['description']),
+      main: stringOrNull(source['main']),
+      hasBuildScript: hasNonEmptyBuildScript(source['scripts']),
+    }
+    const snapshot: CheckoutSnapshot = {
+      readme: collected.readme,
+      entries: collected.entries,
+      topLevelCount: collected.topLevelCount,
+      manifest: manifest.manifest === null ? null : summary,
+    }
+    // The entry hint uses the SAME resolver as the commit phase, over the full
+    // raw manifest (so `main` *and* `exports` count) — the prompt can therefore
+    // never suggest an entry different from the one that lands in the record.
+    const entry = await this.resolveEntryIn(stagedDir, source)
+    return { snapshot, entryPresent: entry !== null, entryHint: entry }
   }
 
-  /** Run one completion call through the analyzer's prompt contract. */
+  /** One completion call over the shared analyzer prompt contract. */
   private async runCompletion(
     complete: DownloadCompletion,
     options: ClassifyDownloadOptions,
-    snapshot: { snapshot: CheckoutSnapshot | null },
+    snapshot: CheckoutSnapshot,
   ): Promise<ReturnType<typeof parseAnalysisOutput>> {
     if (options.provider === undefined || options.model === undefined) {
       throw marketError('market/llm-unconfigured')
     }
-    const body: CheckoutSnapshot = snapshot.snapshot ?? {
-      readme: null,
-      entries: [],
-      topLevelCount: 0,
-      manifest: null,
-    }
-    const user = [
-      'Candidate checkout analysis',
-      '===========================',
-      `Top-level entries (${body.entries.length} listed):`,
-      ...(body.entries.length === 0 ? ['- (no entries)'] : body.entries.map((e) => (e.directory ? `- ${e.name}/` : `- ${e.name}`))),
-      '',
-      'package.json summary:',
-      ...(body.manifest === null
-        ? ['- (absent or unreadable)']
-        : [
-          `- name: ${body.manifest.name ?? '(none)'}`,
-          `- version: ${body.manifest.version ?? '(none)'}`,
-          `- main: ${body.manifest.main ?? '(none)'}`,
-          `- build script: ${body.manifest.hasBuildScript ? 'yes' : 'no'}`,
-        ]),
-      '',
-      'README (capped):',
-      body.readme === null ? '- (no README found)' : body.readme.slice(0, 6000),
-    ].join('\n')
+    // Reuse the analyzer's own prompt builder (single source for the output
+    // contract, the README cap, the listing and the per-field 200-char cap).
+    const prompt = buildAnalyzePrompt(snapshot)
     const text = await complete({
       provider: options.provider,
       model: options.model,
-      system: ANALYZE_SYSTEM_PROMPT,
-      user,
+      system: prompt.system,
+      user: prompt.user,
     }).catch((error: unknown) => {
       // Normalize a transport failure the same way the analyzer orchestrator
       // does, so the caller's stable errorCode is `market/llm-failed` rather
@@ -808,13 +906,17 @@ export class PluginInstaller {
     )
   }
 
-  /** Mechanically resolved runnable entry of a staged checkout (or null). */
-  private async resolveStagedEntry(stagedDir: string): Promise<string | null> {
-    const state = await readCheckoutManifestState(stagedDir, this.fs)
-    const resolved = resolveCheckoutEntry(undefined, state.manifest ?? {})
-    const candidates = [resolved, DEFAULT_CHECKOUT_ENTRY]
+  /**
+   * The mechanically resolved runnable entry of one checkout, or null:
+   * explicit/manifest resolution (`resolveCheckoutEntry` over the real manifest,
+   * so `main`/`exports` count) followed by the conventional `index.js` fallback,
+   * each probed for existence. Shared by the classification prompt and the
+   * commit phase so both agree.
+   */
+  private async resolveEntryIn(stagedDir: string, manifest: Record<string, unknown>): Promise<string | null> {
+    const resolved = resolveCheckoutEntry(undefined, manifest)
     const seen = new Set<string>()
-    for (const candidate of candidates) {
+    for (const candidate of [resolved, DEFAULT_CHECKOUT_ENTRY]) {
       if (seen.has(candidate)) continue
       seen.add(candidate)
       const stat = await this.fs.stat(join(stagedDir, ...candidate.split('/')))
@@ -823,22 +925,30 @@ export class PluginInstaller {
     return null
   }
 
+  /** Mechanically resolved runnable entry of a staged checkout (or null). */
+  private async resolveStagedEntry(stagedDir: string): Promise<string | null> {
+    const state = await readCheckoutManifestState(stagedDir, this.fs)
+    return this.resolveEntryIn(stagedDir, state.manifest ?? {})
+  }
+
   /**
-   * Clone, classify, install dependencies and register one checkout.
+   * **External compatibility surface (deprecated in favour of the three
+   * phases).** One-shot clone + file: it does the whole download in a single
+   * call, classifies mechanically (entry probe, NOT the model) and therefore
+   * cannot show progress, cannot be cancelled between phases and can mis-file a
+   * skills pack that ships an `index.js`.
+   *
+   * No code in this package calls it any more — the control layer migrated to
+   * {@link PluginInstaller.prepareDownload} / `classifyDownload` /
+   * `commitDownload` — and it is kept only because {@link InstallPluginInput} /
+   * {@link InstalledPlugin} were exported, so an out-of-tree caller may still
+   * use them. New callers must use the three phases.
    *
    * Order matters: the checkout is inspected (entry + classification) BEFORE
-   * any dependency command runs, and the `pnpm install` step is skipped unless
-   * the checkout is a classified plugin with a readable, parseable
-   * package.json. A skills pack, documentation repository or any other
-   * unconventional checkout without a usable manifest therefore lands in the
-   * local source repository instead of failing with `install/deps-failed`;
-   * skipping the command also guarantees pnpm never runs in a directory whose
-   * manifest it cannot see (which would make pnpm walk up to an ancestor
-   * project and write `node_modules`/`pnpm-lock.yaml` outside the repository).
-   *
-   * A checkout without a runnable entry is NOT a failure either: it is filed
-   * with a null entry and the resolved classification (`skills`/`other`), so
-   * unconventional repositories stay manageable.
+   * anything else, and **no package manager runs** — the dependency step lives
+   * in the standalone {@link installCheckoutDependencies} and is never part of a
+   * download. A checkout without a runnable entry is not a failure either: it is
+   * filed with a null entry and a `skills`/`other` classification.
    *
    * @throws {MarketError} `gate/consent-required` when not confirmed;
    * `install/*` on pipeline failures; `record/*` on invalid input.

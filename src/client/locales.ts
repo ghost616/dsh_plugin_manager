@@ -211,10 +211,10 @@ export const zh = {
   /** Final verdict line of a finished download. */
   verdictFinal: '入库分类：{classification}',
   /**
-   * Reminder shown after a download: sources only. Installing dependencies is a
-   * later, separate action that this UI does not offer yet.
+   * Concrete way out of "no dependencies installed": which command to run, in
+   * the checkout directory printed right below this line.
    */
-  depsNotInstalledNotice: '本次仅下载源码，未安装依赖；安装依赖是后续独立动作。',
+  depsInstallHint: '本次仅下载源码，未安装依赖；如需依赖，请在该插件检出目录执行 pnpm install（目录见下方）。',
   /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: '正在检查该仓库并分析可否安装…',
   /** Confirmation line naming the classification the download will be filed under. */
@@ -373,7 +373,7 @@ export const en: Record<MarketManageLocaleKey, string> = {
   verdictUnclassified: 'Not classified: the model is unavailable. It is filed as "other"; correct the tag by hand from the local repository list if needed.',
   verdictFailed: 'Not classified: the analysis failed. It is filed as "other"; correct the tag by hand from the local repository list if needed.',
   verdictFinal: 'Filed as: {classification}',
-  depsNotInstalledNotice: 'Sources only — no dependencies were installed. Installing dependencies is a separate, later action.',
+  depsInstallHint: 'Sources only — no dependencies were installed. Run pnpm install inside this plugin checkout directory (shown below) if you need them.',
   /** Install-dialog loading copy while the preview (incl. smart analysis) runs. */
   previewing: 'Inspecting the repository and analyzing whether it can be installed…',
   /** Confirmation line naming the classification the download will be filed under. */

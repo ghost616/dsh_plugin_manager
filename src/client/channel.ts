@@ -21,6 +21,9 @@
  */
 
 import type {
+  DownloadClassification,
+  DownloadCommit,
+  DownloadPreparation,
   GitHubSearchPage,
   GithubRefKind,
   ManagedPluginList,
@@ -34,60 +37,6 @@ import type {
   RemoveRequest,
   RepositoryDetail,
 } from '../types.ts'
-
-/**
- * Download-phase wire shapes as this half consumes them.
- *
- * MIRRORS OF THE HOST CONTRACT (authoritative definitions live in
- * `src/host/control/source.ts`: `DownloadPreparation` / `DownloadClassification`
- * / `DownloadCommit`, built on `src/host/market/install.ts`). They are declared
- * locally because the client tsconfig leaf includes only `src/client` +
- * `src/types.ts`, so the host module is not importable from this face — and
- * `src/types.ts` (framework-owned) does not carry them yet. REQUESTED
- * PROMOTION: these three belong on the shared cross-face surface; until they
- * move, keep this block in lockstep with the host interfaces (same field names,
- * same optionality) so a drift is a small, reviewable diff rather than silent
- * runtime surprise.
- */
-export interface DownloadPreparation {
-  /** Process-local download handle; never persisted, never reused across restarts. */
-  readonly token: string
-  readonly key: PluginMarketKey
-  readonly repository: string
-  readonly refKind?: GithubRefKind
-  readonly ref: string | null
-  readonly localDirName: string
-  readonly commit: string | null
-  readonly startedAt: string
-  readonly state: 'prepared' | 'classified' | 'committed'
-  /** Whether a record already exists for this key (the commit overwrites it). */
-  readonly overwrite: boolean
-}
-
-/** Classification-phase answer. Never a thrown model failure (see the host). */
-export interface DownloadClassification {
-  readonly outcome: 'classified' | 'unclassified' | 'failed'
-  readonly classification: PluginMarketClassification
-  /** Engine rationale; optionally shown as a secondary detail. */
-  readonly reason: string
-  readonly unclassified: boolean
-  readonly entryPresent: boolean | null
-  readonly entryHint: string | null
-  readonly errorCode?: string
-}
-
-/** Commit-phase answer: the record the download was actually filed as. */
-export interface DownloadCommit {
-  readonly key: PluginMarketKey
-  readonly overwritten: boolean
-  readonly record: PluginMarketRecord
-  readonly checkoutDir: string
-  readonly classification: PluginMarketClassification
-  readonly entry: string | null
-  /** Always false: downloading sources never installs dependencies. */
-  readonly dependenciesInstalled: boolean
-  readonly note: string | null
-}
 
 /** Exact route path registered by the Host control row. */
 export const MARKET_CONTROL_WEB_PATH = '/api/plugins-market'

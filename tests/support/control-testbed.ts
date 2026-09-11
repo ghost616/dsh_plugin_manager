@@ -356,7 +356,16 @@ export class FakeEngines {
         const handle = this.requireHandle(handles, input.token)
         this.stagedCalls.push({ kind: 'commit', token: input.token, key: handle.request.key })
         this.classifications.push(input.classification)
-        if (this.commitError !== undefined) throw this.commitError
+        // Mirror the host's commit failure contract: the handle is dropped on
+        // EVERY failure, the staged checkout is discarded only when the swap had
+        // not happened, and the thrown error carries the swap fact
+        // (`details.swapCompleted` + `details.checkoutDir`).
+        if (this.commitError !== undefined) {
+          const swapCompleted = this.commitFailsAfterSwap === true
+          handles.delete(input.token)
+          this.commitFailures += 1
+          throw withSwapFact(this.commitError, swapCompleted, this.checkoutDirOf(handle.request))
+        }
         const { request } = handle
         // Mirror the host staging rule (entry probe wins): a checkout carrying a
         // runnable entry is ALWAYS filed `plugin`; the committed classification
@@ -432,8 +441,26 @@ export class FakeEngines {
   }
   /** Injected classification-phase failure (a real port never fails the phase). */
   classifyError: unknown = undefined
-  /** Injected commit failure (e.g. an install/io inconsistency). */
+  /**
+   * Injected commit failure. The fake mirrors the host: it drops the handle,
+   * attaches `details.swapCompleted` (see {@link commitFailsAfterSwap}) and
+   * `details.checkoutDir`, and discards the staged checkout only when the swap
+   * had not happened.
+   */
   commitError: unknown = undefined
+  /**
+   * Whether {@link commitError} models a failure AFTER the rename (the checkout
+   * is already in place, only the record write failed) instead of before it.
+   */
+  commitFailsAfterSwap = false
+  /** One failed commit call recorded for assertions. */
+  commitFailures: number = 0
+
+  /** Final checkout dir the fake host would create for one request. */
+  private checkoutDirOf(request: PrepareDownloadRequest): string {
+    const v2DirName = request.refKind === undefined ? null : refDirName(request.repository, request.refKind, request.version)
+    return `${request.repositoryRoot}/${v2DirName ?? request.key}`
+  }
 
   private requireHandle(
     handles: Map<string, { readonly request: PrepareDownloadRequest; state: 'prepared' | 'classified' | 'committed' }>,
@@ -451,6 +478,22 @@ export class FakeEngines {
   }
 }
 
+/**
+ * Attach the host's swap fact to a fake commit failure, exactly as
+ * `src/host/market/install.ts` does: `details.swapCompleted` says whether the
+ * rename already happened and `details.checkoutDir` names the checkout.
+ */
+function withSwapFact(error: unknown, swapCompleted: boolean, checkoutDir: string): unknown {
+  if (error instanceof MarketError) {
+    const next = new MarketError(error.code, error.message, {
+      details: { ...error.details, swapCompleted, checkoutDir },
+    })
+    next.cause = error
+    return next
+  }
+  return error
+}
+
 /** Build a MarketSourceOperations over a repository (null ⇒ idle). */
 export function makeSourceOps(
   repository: MarketRepository | null,
@@ -459,6 +502,8 @@ export function makeSourceOps(
   options: {
     now?: () => Date
     confirmTtlMs?: number
+    /** Download-stage TTL (from the successful prepare); defaults to 10 min. */
+    downloadTtlMs?: number
     isProtectedKey?: (key: string) => boolean
     isSelfModule?: (moduleName: string) => boolean
     /** Optional smart-install analysis engine (default: none → llm-unconfigured). */
@@ -491,6 +536,7 @@ export function makeSourceOps(
     ...(options.analysisEntryProbe === undefined ? {} : { analysisEntryProbe: options.analysisEntryProbe }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.confirmTtlMs === undefined ? {} : { confirmTtlMs: options.confirmTtlMs }),
+    ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
     logger: { warn: () => {}, error: () => {} },
   }
   return new MarketSourceOperations(deps)

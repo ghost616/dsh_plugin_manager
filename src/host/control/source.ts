@@ -32,6 +32,14 @@
 
 import { randomBytes } from 'node:crypto'
 import type {
+  DownloadClassifyOutcome,
+  DownloadClassification,
+  DownloadCommit,
+  DownloadHandle,
+  DownloadPreparation,
+  DownloadStageState,
+  MarketRemoteErrorDetails,
+  MarketWireErrorCode,
   GitHubSearchPage,
   PluginInstallReview,
   PluginInstallReviewAnalysis,
@@ -43,6 +51,18 @@ import type {
   RepositoryDetail,
 } from '../../types.ts'
 import { isPluginMarketClassification } from '../../types.ts'
+
+// The download-phase wire shapes live in the shared cross-face contract
+// (src/types.ts); they are re-exported here because this module is their
+// authoritative producer and every control-layer consumer imports them from it.
+export type {
+  DownloadClassifyOutcome,
+  DownloadClassification,
+  DownloadCommit,
+  DownloadHandle,
+  DownloadPreparation,
+  DownloadStageState,
+} from '../../types.ts'
 
 import type { PluginAnalysisDistribution } from '../market/analyze.ts'
 import type { MarketRepository } from '../market/index.ts'
@@ -126,7 +146,7 @@ export interface PreparedDownload {
   readonly localDirName: string
   readonly commit: string | null
   readonly startedAt: string
-  readonly state: 'prepared' | 'classified' | 'committed'
+  readonly state: DownloadStageState
 }
 
 /** Options of the classification phase (model endpoint of the assembly). */
@@ -146,7 +166,7 @@ export interface DownloadCompletionRequest {
 
 /** Result of the classification phase (never a thrown model failure). */
 export interface DownloadPreparationClassify {
-  readonly outcome: 'classified' | 'unclassified' | 'failed'
+  readonly outcome: DownloadClassifyOutcome
   readonly classification: PluginMarketClassification
   /** Engine rationale; untrusted model text or a host explanation. */
   readonly reason: string
@@ -178,57 +198,12 @@ export interface CommittedDownloadFacts {
   readonly note: string | null
 }
 
-/**
- * Opaque download handle as it travels the control channel. The host brands its
- * own `DownloadToken`; the control layer keeps the wire/user-facing view a plain
- * string (the channel is JSON) and hands the value back verbatim.
- */
-export type DownloadHandle = string
-
-/**
- * Channel answer of the prepare phase: what was cloned, under which handle, and
- * the facts the UI shows for "cloning sources".
- *
- * `token` is the DOWNLOAD handle (process-local, in-memory, never persisted) —
- * the single-use preview confirmation was consumed by this call.
- */
-export interface DownloadPreparation {
+/** Progress callback of one commit retry (test/UI observability). */
+export interface DownloadRetryNotice {
   readonly token: DownloadHandle
   readonly key: PluginMarketKey
-  readonly repository: string
-  readonly refKind?: 'branch' | 'tag'
-  readonly ref: string | null
-  readonly localDirName: string
-  readonly commit: string | null
-  readonly startedAt: string
-  readonly state: 'prepared' | 'classified' | 'committed'
-  /** Whether a record already exists for this key (the commit will overwrite). */
-  readonly overwrite: boolean
-}
-
-/** Channel answer of the classification phase (never a thrown model failure). */
-export interface DownloadClassification {
-  readonly outcome: 'classified' | 'unclassified' | 'failed'
-  readonly classification: PluginMarketClassification
-  /** Engine rationale; the UI renders its own copy for `outcome`/`errorCode`. */
+  /** Stable reason of the first failure that made the retry necessary. */
   readonly reason: string
-  readonly unclassified: boolean
-  readonly entryPresent: boolean | null
-  readonly entryHint: string | null
-  readonly errorCode?: string
-}
-
-/** Channel answer of the commit phase. */
-export interface DownloadCommit {
-  readonly key: PluginMarketKey
-  readonly overwritten: boolean
-  readonly record: PluginMarketRecord
-  readonly checkoutDir: string
-  readonly classification: PluginMarketClassification
-  readonly entry: string | null
-  /** Always false: the download path never installs dependencies. */
-  readonly dependenciesInstalled: boolean
-  readonly note: string | null
 }
 
 /** Everything the source operations need from its environment. */
@@ -255,6 +230,18 @@ export interface MarketSourceDeps {
   readonly now?: () => Date
   /** Confirmation validity window; defaults to {@link REMOVE_CONFIRM_TTL_MS}. */
   readonly confirmTtlMs?: number
+  /**
+   * How long a PREPARED download stays usable before its staging is swept;
+   * defaults to {@link DEFAULT_DOWNLOAD_TTL_MS} (ten minutes) and is measured
+   * **from the successful prepare**, not from the review.
+   *
+   * This is deliberately independent of {@link confirmTtlMs}: the review window
+   * only gates "may this review start a download?", while this window gates
+   * "may this staged checkout still be classified/committed?". A download in
+   * progress must therefore never be swept by the (shorter) review window.
+   * Configure it at least as long as the review window.
+   */
+  readonly downloadTtlMs?: number
   /**
    * Optional smart-install analysis engine. Present only when the market
    * Config configured `llm.provider`/`llm.model`; previewInstall then runs the
@@ -324,25 +311,18 @@ export interface InstallAnalysisEngine {
 }
 
 /**
- * One reviewed-and-possibly-staged download, keyed by the derived install key.
+ * One open review confirmation, keyed by the derived plugin key.
  *
- * It carries two independent handles, both process-local and in memory only:
- * - `token` — the single-use PREVIEW confirmation minted by
- *   {@link MarketSourceOperations.previewInstall}; it expires after
- *   `reviewExpiresAt` and is consumed by `prepareDownload`;
- * - `downloadToken` — the host staging handle minted by the prepare phase; it
- *   is valid until the download is committed or cancelled (or until the
- *   installer instance goes away — it is never persisted, never replayed after
- *   a restart, and never shared across requests).
- *
- * Written by `prepareDownload` (the field is replaced atomically there), read by
- * `classifyDownload` / `commitDownload` / `cancelDownload`.
+ * Short-lived and single use: it answers "may this review start a download?"
+ * and is consumed by {@link MarketSourceOperations.prepareDownload}. Its window
+ * ({@link MarketSourceDeps.confirmTtlMs}) has nothing to do with the download
+ * window a successful prepare opens afterwards.
  */
-interface PendingDownload {
+interface ReviewEntry {
   /** Single-use preview confirmation presented to `prepareDownload`. */
   readonly token: string
-  /** Expiry of the preview confirmation (the review's own TTL). */
-  readonly reviewExpiresAt: number
+  /** Expiry of the confirmation (the review's own TTL). */
+  readonly expiresAt: number
   /** Ref name the review pinned, honoured when the caller omits the version. */
   readonly version: string | null
   /**
@@ -353,13 +333,62 @@ interface PendingDownload {
   readonly classification: PluginMarketClassification
   /** Review note rendered on the review (absence = a runnable entry is expected). */
   readonly note: MarketInstallNote | null
-  /** Host staging handle; present only between prepare and commit/cancel. */
-  readonly downloadToken?: DownloadHandle
+  /** What a download started from this review has to stage. */
+  readonly recipe: DownloadRecipe
 }
 
-/** Why one download handle is no longer usable. */
-const DOWNLOAD_HANDLE_LOST =
-  'This download handle is unknown or has expired; start the download again (handles are process-local and never survive a restart).'
+/**
+ * One in-flight staged download, keyed by its handle token.
+ *
+ * Process-local and in memory only: the host handle it wraps is never
+ * persisted, never replayed after a restart and never shared across requests.
+ * Its deadline is counted from the successful prepare
+ * ({@link MarketSourceDeps.downloadTtlMs}) and is deliberately independent of
+ * the review window that started it.
+ */
+interface DownloadEntry {
+  /** Host staging handle (the token callers pass back to the later phases). */
+  readonly token: DownloadHandle
+  /** Stable key the eventual record will carry. */
+  readonly key: PluginMarketKey
+  /** Expiry of the staged download, counted from the successful prepare. */
+  readonly expiresAt: number
+  /** Recipe the handle was prepared from, so a retry can re-stage it. */
+  readonly recipe: DownloadRecipe
+  /**
+   * Set when a commit failed BEFORE the swap: the download is still retryable,
+   * and the next commit attempt re-stages from {@link recipe} first (the host
+   * drops its own handle on every failure — see
+   * {@link MarketSourceOperations.commitDownload}).
+   */
+  readonly restage?: boolean
+}
+
+/** What one staged download was prepared from (enough to stage it again). */
+interface DownloadRecipe {
+  readonly repositoryRoot: string
+  readonly key: PluginMarketKey
+  /** Validated `owner/repo` slug. */
+  readonly repository: string
+  readonly refKind: 'branch' | 'tag' | undefined
+  readonly ref: string | null
+}
+
+/**
+ * Why one download handle cannot be used, as the machine-readable
+ * `details.reason` of the failure. Two forms exist on purpose so a consumer can
+ * tell "you never prepared this" apart from "your staged checkout was swept":
+ * the first needs a fresh review+prepare, the second additionally means any
+ * staging directory has already been cleaned up.
+ */
+export const DOWNLOAD_REASON_UNKNOWN = 'download-unknown'
+export const DOWNLOAD_REASON_EXPIRED = 'download-expired'
+/** A commit failed before the swap: nothing moved and the commit is retryable. */
+export const DOWNLOAD_REASON_COMMIT_BEFORE_SWAP = 'commit-before-swap'
+/** A commit failed after the swap with no record for the new checkout. */
+export const DOWNLOAD_REASON_REPAIR_NO_RECORD = 'repair:checkout-committed-no-record'
+/** A commit failed after the swap while the previous record is still in place. */
+export const DOWNLOAD_REASON_REPAIR_RECORD_STALE = 'repair:checkout-committed-record-stale'
 
 /**
  * The classification fields one review carries: the predicted tag, the
@@ -497,6 +526,80 @@ function errorCodeOf(error: unknown): string | undefined {
 }
 
 /**
+ * Machine-readable details of any thrown value, read structurally so a
+ * `MarketError` raised by another copy of the host package (its `details` field
+ * is added by the host, not by this module) is still understood.
+ */
+function detailsOf(error: unknown): Readonly<Record<string, unknown>> {
+  const details = (error as { details?: unknown } | null)?.details
+  return typeof details === 'object' && details !== null ? details as Record<string, unknown> : {}
+}
+
+/**
+ * The host's swap fact of one commit failure: `true` only when the host reports
+ * that the rename already happened (`details.swapCompleted`), `false` when it
+ * reports it did not, and `undefined` for failures that carry no fact at all
+ * (e.g. an input-validation refusal before the swap window).
+ */
+function swapFactOf(error: unknown): boolean | undefined {
+  const value = detailsOf(error).swapCompleted
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/** Checkout directory the host reported on a commit failure, when present. */
+function swapCheckoutDirOf(error: unknown): string | undefined {
+  const value = detailsOf(error).checkoutDir
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * Map any thrown value onto a code this module may raise itself. Anything
+ * outside the wire vocabulary becomes `install/io` (the download/commit family
+ * code) so the channel never invents an unknown code.
+ */
+function wireCodeOf(error: unknown): MarketWireErrorCode {
+  const code = errorCodeOf(error)
+  return code !== undefined && WIRE_CODES.has(code) ? code as MarketWireErrorCode : 'install/io'
+}
+
+/** Every code of the shared wire vocabulary (see src/types.ts). */
+const WIRE_CODES = new Set<string>([
+  'config/invalid', 'repository/not-exist', 'repository/not-directory', 'repository/not-writable',
+  'repository/io', 'record/key-invalid', 'record/exists', 'record/not-found', 'record/corrupt',
+  'record/io', 'record/invalid', 'harness/resolve-failed', 'harness/link-conflict', 'harness/io',
+  'github/auth', 'github/rate-limit', 'github/network', 'github/not-found', 'github/bad-response',
+  'github/bad-request', 'install/dir-exists', 'install/dir-in-use', 'install/entry-missing',
+  'install/package-invalid', 'install/git-failed', 'install/deps-failed', 'install/io',
+  'gate/consent-required', 'market/llm-unconfigured', 'market/llm-failed', 'market/llm-bad-output',
+  'market/io', 'market/unsupported-skills', 'market/unsupported-preset', 'market/unsupported-build',
+  'market/unsupported-other', 'market/idle', 'market/not-found', 'market/protected',
+  'market/not-loadable', 'market/confirm-required', 'market/confirm-invalid', 'market/confirm-expired',
+  'market/load-failed', 'market/bad-request',
+])
+
+/**
+ * Normalize one thrown failure into the wire detail shape: the shared
+ * `MarketRemoteErrorDetails` only carries `key` / `path` / `reason`, so host
+ * details (`swapCompleted`, `checkoutDir`, `token`, …) are mapped onto those
+ * fields rather than forwarded as unknown properties — the wire contract stays
+ * the single source of truth for what a consumer can read. A value of the wrong
+ * type is DROPPED, never coerced or forwarded as-is: a non-string `key` from a
+ * foreign failure must not reach a consumer that reads `key` as a string.
+ */
+export function wireDetailsOf(error: unknown): MarketRemoteErrorDetails {
+  const details = detailsOf(error)
+  const detailsKey = typeof details.key === 'string' ? details.key : undefined
+  const detailsPath = typeof details.path === 'string'
+    ? details.path
+    : swapCheckoutDirOf(error)
+  return {
+    ...(detailsKey === undefined ? {} : { key: detailsKey }),
+    ...(detailsPath === undefined ? {} : { path: detailsPath }),
+    ...(typeof details.reason === 'string' ? { reason: details.reason } : {}),
+  }
+}
+
+/**
  * Normalize the classification a caller picked for the commit phase. Only the
  * persisted tag vocabulary is accepted; anything else is a caller bug surfaced
  * as the stable `market/bad-request` (zero side effect on the staged download —
@@ -510,40 +613,94 @@ export function requireClassification(value: unknown): PluginMarketClassificatio
   )
 }
 
+/** Default download-stage TTL: ten minutes from the successful prepare. */
+export const DEFAULT_DOWNLOAD_TTL_MS = 10 * 60_000
+
+/** Upper bound of the spent-handle bookkeeping (reason text stays accurate). */
+const EXPIRED_HANDLE_LIMIT = 64
+
 /**
  * The market's source operations. Never throws for a healthy idle market with
  * a message a caller can show; all failures carry stable wire codes.
  */
 export class MarketSourceOperations {
-  private readonly pending = new Map<PluginMarketKey, PendingDownload>()
+  /**
+   * Review confirmations, keyed by the derived plugin key: "may this review
+   * start a download?" (short window, single use).
+   */
+  private readonly reviews = new Map<PluginMarketKey, ReviewEntry>()
+  /**
+   * In-flight staged downloads, keyed by their handle token: "may this staged
+   * checkout still be classified/committed?" (own, longer window). Keyed by the
+   * HANDLE, not by the plugin key, so a new review of the same plugin can never
+   * clobber a download already in progress.
+   */
+  private readonly downloads = new Map<DownloadHandle, DownloadEntry>()
+  /**
+   * Handles whose staged download was swept or consumed. Kept only to explain a
+   * later call on that handle (`details.reason` distinguishes "expired" from
+   * "never prepared"); bounded by {@link EXPIRED_HANDLE_LIMIT}.
+   */
+  private readonly spentHandles = new Set<DownloadHandle>()
 
   constructor(private readonly deps: MarketSourceDeps) {}
 
   /**
-   * Drop pending entries that can no longer be used, and cancel the staging of
-   * any download they were holding. Called at the start of a review:
-   * - a review that was consumed by `prepareDownload` but never committed or
-   *   cancelled is swept once its (spent) confirmation window has passed, so
-   *   abandoned staging directories cannot pile up;
-   * - an unconsumed review is dropped once its confirmation expires.
+   * Drop the entries whose own deadline has passed, cancelling the staging of
+   * any download that is dropped. Called at the start of every review.
+   *
+   * The two registries have independent deadlines — that is the point of the
+   * split: a review expires after its confirmation window, while a download
+   * expires after {@link MarketSourceDeps.downloadTtlMs} counted from its
+   * successful prepare. The review window it already spent has no say over a
+   * download in progress.
    */
-  private async sweepStalePending(): Promise<void> {
-    if (this.pending.size === 0) return
+  private async sweepStale(): Promise<void> {
     const now = (this.deps.now ?? (() => new Date()))().getTime()
+    for (const [key, review] of [...this.reviews]) {
+      if (now >= review.expiresAt) this.reviews.delete(key)
+    }
+    for (const [token, download] of [...this.downloads]) {
+      if (now < download.expiresAt) continue
+      this.downloads.delete(token)
+      this.spentHandles.add(token)
+      await this.cancelStaging(download.key, token)
+    }
+    this.forgetSpentHandles()
+  }
+
+  /** Best-effort staging cleanup of one dropped download. */
+  private async cancelStaging(key: PluginMarketKey, token: DownloadHandle): Promise<void> {
     const repository = this.deps.repository()
-    for (const [key, entry] of [...this.pending]) {
-      if (now < entry.reviewExpiresAt) continue
-      this.pending.delete(key)
-      if (entry.downloadToken === undefined || repository === null) continue
-      try {
-        await this.deps.installer(repository).cancel(entry.downloadToken)
-      } catch (error) {
-        this.deps.logger?.warn(
-          `market download: could not clean up the abandoned staging of "${key}": ${error instanceof Error ? error.message : String(error)}`,
-        )
-      }
+    if (repository === null) return
+    try {
+      await this.deps.installer(repository).cancel(token)
+    } catch (error) {
+      this.deps.logger?.warn(
+        `market download: could not clean up the abandoned staging of "${key}": ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
   }
+
+  /** Keep the spent-handle bookkeeping from growing without bound. */
+  private forgetSpentHandles(): void {
+    if (this.spentHandles.size <= EXPIRED_HANDLE_LIMIT) return
+    const excess = this.spentHandles.size - EXPIRED_HANDLE_LIMIT
+    let dropped = 0
+    for (const token of this.spentHandles) {
+      this.spentHandles.delete(token)
+      if (++dropped >= excess) break
+    }
+  }
+
+  /** The in-flight download of one plugin key, when there is one. */
+  private downloadOf(key: PluginMarketKey): { readonly token: DownloadHandle; readonly entry: DownloadEntry } | undefined {
+    for (const [token, entry] of this.downloads) {
+      if (entry.key === key) return { token, entry }
+    }
+    return undefined
+  }
+
 
   /**
    * GitHub topic search. Requires a configured repository (market not idle).
@@ -628,7 +785,7 @@ export class MarketSourceOperations {
     version: string | null = null,
   ): Promise<PluginInstallReview> {
     const repository = this.requireRepository()
-    await this.sweepStalePending()
+    await this.sweepStale()
     const slug = parseRepositorySlug(repositoryRaw)
     const kind = normalizeRefKind(refKind)
     const ref = kind === undefined ? version : requireRefName(slug, kind, version)
@@ -645,12 +802,21 @@ export class MarketSourceOperations {
     const token = randomBytes(16).toString('hex')
     const now = (this.deps.now ?? (() => new Date()))()
     const ttl = this.deps.confirmTtlMs ?? REMOVE_CONFIRM_TTL_MS
-    this.pending.set(key, {
+    this.reviews.set(key, {
       token,
-      reviewExpiresAt: now.getTime() + ttl,
+      expiresAt: now.getTime() + ttl,
       version: ref,
       classification: review.classification,
       note: review.note,
+      // The recipe is known at review time; keeping it here is what lets a
+      // download be staged (and a failed commit re-staged) later.
+      recipe: {
+        repositoryRoot: repository.root,
+        key,
+        repository: slug,
+        refKind: kind,
+        ref: ref ?? null,
+      },
     })
     const entryNote = legacyEntryNoteOf(review.note)
     return {
@@ -691,15 +857,15 @@ export class MarketSourceOperations {
     const kind = normalizeRefKind(refKind)
     const ref = kind === undefined ? version : requireRefName(slug, kind, version)
     const key = deriveInstallKey(slug, kind, ref)
-    const pending = this.pending.get(key)
-    if (pending === undefined) {
+    const review = this.reviews.get(key)
+    if (review === undefined) {
       throw new MarketControlError(
         'market/confirm-required',
         `Downloading "${slug}" needs a previewInstall() confirmation for this ref first.`,
         { key },
       )
     }
-    if (pending.token !== confirmToken) {
+    if (review.token !== confirmToken) {
       throw new MarketControlError(
         'market/confirm-invalid',
         `The download confirmation token for "${slug}" does not match.`,
@@ -707,8 +873,8 @@ export class MarketSourceOperations {
       )
     }
     const now = (this.deps.now ?? (() => new Date()))()
-    if (now.getTime() >= pending.reviewExpiresAt) {
-      this.pending.delete(key)
+    if (now.getTime() >= review.expiresAt) {
+      this.reviews.delete(key)
       throw new MarketControlError(
         'market/confirm-expired',
         `The confirmation for "${slug}" expired; review the plugin again.`,
@@ -720,22 +886,39 @@ export class MarketSourceOperations {
     const existing = await repository.records.get(key)
     if (existing !== null) this.assertOverwriteAllowed(existing, repository)
 
+    // Downloading this plugin again supersedes an older in-flight download of
+    // the same key: its staged checkout is garbage by definition now.
+    const previous = this.downloadOf(key)
+    if (previous !== undefined) {
+      this.downloads.delete(previous.token)
+      this.spentHandles.add(previous.token)
+      this.deps.logger?.warn(
+        `market download: "${key}" is downloaded again; the previous staged checkout was discarded.`,
+      )
+      await this.cancelStaging(key, previous.token)
+    }
+
     const installer = this.deps.installer(repository)
     const prepared = await installer.prepare({
       repositoryRoot: repository.root,
       key,
       repository: slug,
       ...(kind === undefined ? {} : { refKind: kind }),
-      version: ref ?? pending.version ?? null,
+      version: ref ?? review.version ?? null,
     })
     // Single use: the confirmation is spent now that a download exists for it.
-    this.pending.set(key, {
-      token: confirmToken,
-      reviewExpiresAt: pending.reviewExpiresAt,
-      version: pending.version,
-      classification: pending.classification,
-      note: pending.note,
-      downloadToken: prepared.token,
+    // The download then gets its OWN deadline, counted from this successful
+    // prepare — the (now spent) review window no longer governs it.
+    const downloadTtl = this.deps.downloadTtlMs ?? DEFAULT_DOWNLOAD_TTL_MS
+    this.reviews.delete(key)
+    this.downloads.set(prepared.token, {
+      token: prepared.token,
+      key,
+      expiresAt: now.getTime() + downloadTtl,
+      recipe: {
+        ...review.recipe,
+        ref: prepared.ref ?? ref ?? review.version ?? null,
+      },
     })
     return {
       token: prepared.token,
@@ -759,70 +942,121 @@ export class MarketSourceOperations {
    * `classification: 'other'` and a stable `errorCode`, so the UI can show the
    * reason and let the user either retry, correct the tag manually
    * (`setClassification`) or commit the conservative label. The only failure
-   * this method raises is an unknown/expired handle (`record/not-found`).
+   * this method raises is an unknown/expired handle (`record/not-found`, with
+   * `details.reason` telling the two apart).
    */
   async classifyDownload(token: string): Promise<DownloadClassification> {
     const repository = this.requireRepository()
-    const entry = this.requireDownload(token)
+    const entry = await this.requireDownload(token)
     const installer = this.deps.installer(repository)
-    return await installer.classify(entry.downloadToken)
+    return await installer.classify(entry.token)
   }
 
   /**
    * Phase 3 of the download channel — swap the staged checkout into place and
    * file the record under the classification the caller chose.
    *
-   * Post-rename inconsistency: the host swaps the checkout in before it writes
-   * the record, so a failure between the two leaves the new checkout on disk
-   * with the previous record (or none) still in `plugins.json`. That cannot be
-   * repaired automatically here, so the failure is surfaced with
-   * `details.repair = 'checkout-committed-record-missing'` and logged loudly:
-   * the operator can fix it by re-running the download (idempotent) or by
-   * removing the checkout by hand. Every other commit failure leaves the
-   * previous checkout/record untouched (see the host phase contract).
+   * Failure routing follows the host's authoritative swap fact
+   * (`details.swapCompleted`, attached to every commit failure):
+   *
+   * - **before the swap** (false/absent): the checkout never moved. The host
+   *   dropped its own handle, so this call keeps the handle **retryable** on the
+   *   control side and records the recipe: the next `commitDownload` with the
+   *   same token re-stages from that recipe and commits. The wire failure
+   *   carries `details.reason = 'commit-before-swap'`.
+   * - **after the swap** (true): the new checkout is already in place and only
+   *   the record write failed, so this is a repair situation, not a retry. The
+   *   two forms are distinguished for the user:
+   *   - no record existed before the commit → `'repair:checkout-committed-no-record'`
+   *     — the fresh checkout must be removed by hand;
+   *   - the previous record is still in place → `'repair:checkout-committed-record-stale'`
+   *     — the download can simply be run again (idempotent overwrite).
+   *   Both carry the host's `checkoutDir` as the wire `path`.
+   *
+   * A handle is consumable ONCE: a successful commit retires both the handle it
+   * committed with and, on a retried commit, the original token that was
+   * re-staged — so repeating the call can never silently clone the repository a
+   * second time.
    */
   async commitDownload(token: string, classification: string): Promise<DownloadCommit> {
     const repository = this.requireRepository()
-    const entry = this.requireDownload(token)
+    const entry = await this.requireDownload(token)
+    const key = entry.key
     const label = requireClassification(classification)
-    const before = await repository.records.get(entry.key)
+    const before = await repository.records.get(key)
     const installer = this.deps.installer(repository)
-    let committed: CommittedDownloadFacts
-    try {
-      committed = await installer.commit({ token: entry.downloadToken, classification: label })
-    } catch (error) {
-      this.abandonDownload(entry.key, entry.downloadToken)
-      await this.reportCommitInconsistency(entry.key, before, error)
-      throw error
+
+    // A retry after a pre-swap failure: the host forgot the old handle, so the
+    // checkout is staged again from the recipe before the commit is attempted.
+    let handle = entry.token
+    if (entry.restage) {
+      const staged = await installer.prepare({
+        repositoryRoot: entry.recipe.repositoryRoot,
+        key: entry.recipe.key,
+        repository: entry.recipe.repository,
+        ...(entry.recipe.refKind === undefined ? {} : { refKind: entry.recipe.refKind }),
+        version: entry.recipe.ref,
+      })
+      handle = staged.token
+      this.deps.logger?.warn(
+        `market download: re-staged "${key}" for a retried commit after a pre-swap failure.`,
+      )
     }
-    this.pending.delete(entry.key)
-    await this.deps.syncRecord(committed.record)
-    return {
-      key: entry.key,
-      overwritten: committed.overwritten,
-      record: committed.record,
-      checkoutDir: committed.checkoutDir,
-      classification: committed.classification,
-      entry: committed.entry,
-      dependenciesInstalled: committed.dependenciesInstalled,
-      note: committed.note,
+
+    try {
+      const committed = await installer.commit({ token: handle, classification: label })
+      this.downloads.delete(handle)
+      this.spentHandles.add(handle)
+      // A retried commit staged a SECOND handle; the original token is retired
+      // with it, so one download stays a single consumable handle instead of
+      // accepting yet another commit (which would clone the repository again).
+      if (handle !== entry.token) {
+        this.downloads.delete(entry.token)
+        this.spentHandles.add(entry.token)
+      }
+      await this.deps.syncRecord(committed.record)
+      return {
+        key,
+        overwritten: committed.overwritten,
+        record: committed.record,
+        checkoutDir: committed.checkoutDir,
+        classification: committed.classification,
+        entry: committed.entry,
+        dependenciesInstalled: committed.dependenciesInstalled,
+        note: committed.note,
+      }
+    } catch (error) {
+      if (swapFactOf(error) === true) {
+        // The checkout is in place and only the record write failed: this is a
+        // repair, not a retry.
+        this.downloads.delete(handle)
+        this.spentHandles.add(handle)
+        throw this.repairFailure(error, key, before)
+      }
+      // Pre-swap failure: nothing moved. Keep the download registered (marked
+      // for a re-stage) so the same token can retry.
+      this.markRestage(handle)
+      throw this.preSwapFailure(error, key)
     }
   }
 
   /**
    * Cancel a staged download (the "取消并清理暂存" action): the host removes the
-   * staging directory — zero residue — and forgets the handle, and the pending
+   * staging directory — zero residue — and forgets the handle, and the download
    * entry is dropped. Idempotent: an unknown, already-cancelled or committed
    * handle resolves to `false` without touching the filesystem.
    */
   async cancelDownload(token: string): Promise<boolean> {
     const repository = this.deps.repository()
-    const entry = this.findDownload(token)
+    const entry = this.downloads.get(token)
     if (entry === undefined) return false
     const cancelled = repository === null
       ? false
-      : await this.deps.installer(repository).cancel(entry.downloadToken)
-    if (cancelled) this.pending.delete(entry.key)
+      : await this.deps.installer(repository).cancel(entry.token)
+    if (cancelled) {
+      this.downloads.delete(entry.token)
+      this.spentHandles.add(entry.token)
+    }
     return cancelled
   }
 
@@ -837,74 +1071,86 @@ export class MarketSourceOperations {
     return repository
   }
 
-  /** The pending entry a download handle belongs to, or undefined. */
-  private findDownload(token: string): { readonly key: PluginMarketKey; readonly downloadToken: DownloadHandle } | undefined {
-    for (const [key, entry] of this.pending) {
-      if (entry.downloadToken === token) return { key, downloadToken: token as DownloadHandle }
+  /**
+   * Resolve a download handle or fail with the stable not-found code.
+   *
+   * A handle whose own deadline has passed is expired here and now (its staging
+   * is cancelled and it is remembered as spent), so the failure reason is
+   * accurate even when no review sweep happened in between.
+   */
+  private async requireDownload(token: string): Promise<DownloadEntry> {
+    const entry = this.downloads.get(token)
+    if (entry === undefined) throw this.handleLost(token)
+    const now = (this.deps.now ?? (() => new Date()))().getTime()
+    if (now >= entry.expiresAt) {
+      this.downloads.delete(token)
+      this.spentHandles.add(token)
+      await this.cancelStaging(entry.key, token)
+      throw this.handleLost(token)
     }
-    return undefined
-  }
-
-  /** Resolve a download handle or fail with the stable not-found code. */
-  private requireDownload(token: string): {
-    readonly key: PluginMarketKey
-    readonly downloadToken: DownloadHandle
-  } {
-    const found = this.findDownload(token)
-    if (found === undefined) {
-      throw new MarketControlError('record/not-found', DOWNLOAD_HANDLE_LOST, { path: token })
-    }
-    return found
-  }
-
-  /** Drop the in-memory handle of one download (after commit/cancel/failure). */
-  private abandonDownload(key: PluginMarketKey, token: DownloadHandle): void {
-    const entry = this.pending.get(key)
-    if (entry === undefined || entry.downloadToken !== token) return
-    this.pending.set(key, {
-      token: entry.token,
-      reviewExpiresAt: entry.reviewExpiresAt,
-      version: entry.version,
-      classification: entry.classification,
-      note: entry.note,
-    })
+    return entry
   }
 
   /**
-   * Detect and report the post-rename inconsistency of a failed commit: the
-   * record no longer matches the checkout the host swapped in. The detection is
-   * evidence-based (the record we read before the commit is gone or different),
-   * so a failure that happened BEFORE the swap — the common case, where the old
-   * record is untouched — is not misreported.
-   *
-   * The refusal carries `details.reason = 'repair:checkout-committed-record-missing'`
-   * so a consumer can tell this state apart from an ordinary `install/io`
-   * failure and route it to manual repair.
+   * The stable failure of a handle that cannot be used. `details.reason`
+   * distinguishes the two cases a consumer must treat differently:
+   * `download-expired` (the staged checkout was swept, so any staging is gone)
+   * versus `download-unknown` (never prepared in this process — a stale handle
+   * from a previous run, or a client-side mistake).
    */
-  private async reportCommitInconsistency(
-    key: PluginMarketKey,
-    before: PluginMarketRecord | null,
-    error: unknown,
-  ): Promise<void> {
-    if (errorCodeOf(error) !== 'install/io') return
-    const repository = this.deps.repository()
-    if (repository === null) return
-    let after: PluginMarketRecord | null
-    try {
-      after = await repository.records.get(key)
-    } catch {
-      return
-    }
-    const sameRecord = before !== null && after !== null && after.installedAt === before.installedAt
-    const recordMissing = before === null && after === null
-    if (sameRecord || recordMissing) return
-    this.deps.logger?.error(
-      `market download: "${key}" was swapped into place but its record could not be written — the checkout on disk no longer matches the record. Re-run the download (idempotent) or remove the checkout manually.`,
+  private handleLost(token: string): MarketControlError {
+    const expired = this.spentHandles.has(token)
+    return new MarketControlError(
+      'record/not-found',
+      expired
+        ? 'This download handle is no longer usable: its staged checkout was cleaned up. Start the download again (handles are process-local and never survive a restart).'
+        : 'This download handle is unknown in this process; start the download again (handles are never persisted and never survive a restart).',
+      { path: token, reason: expired ? DOWNLOAD_REASON_EXPIRED : DOWNLOAD_REASON_UNKNOWN },
     )
-    throw new MarketControlError(
+  }
+
+  /** Mark one download retryable: the next commit re-stages from its recipe. */
+  private markRestage(token: DownloadHandle): void {
+    const entry = this.downloads.get(token)
+    if (entry === undefined) return
+    this.downloads.set(token, { ...entry, restage: true })
+  }
+
+  /**
+   * Wrap a commit failure that happened BEFORE the swap: nothing moved, the host
+   * already cleaned its staging and dropped its handle, and the control side kept
+   * the recipe so the same token can be retried.
+   */
+  private preSwapFailure(error: unknown, key: PluginMarketKey): MarketControlError {
+    return new MarketControlError(
+      errorCodeOf(error) === 'install/io' ? 'install/io' : wireCodeOf(error),
+      `${error instanceof Error ? error.message : String(error)} Nothing was swapped: the staged checkout was cleaned up and the previous checkout/record (if any) are unchanged. Retry the commit with the same download handle.`,
+      { key, reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+      { cause: error },
+    )
+  }
+
+  /**
+   * Wrap a commit failure that happened AFTER the swap: the new checkout is in
+   * place and only the record write failed. Two forms are distinguished for the
+   * operator — no record at all (the fresh checkout must be removed by hand)
+   * versus the previous record still in place (the download can simply be run
+   * again, it is an idempotent overwrite).
+   */
+  private repairFailure(error: unknown, key: PluginMarketKey, before: PluginMarketRecord | null): MarketControlError {
+    const checkoutDir = swapCheckoutDirOf(error)
+    const noRecord = before === null
+    const reason = noRecord ? DOWNLOAD_REASON_REPAIR_NO_RECORD : DOWNLOAD_REASON_REPAIR_RECORD_STALE
+    const guidance = noRecord
+      ? `The checkout is in place but no record was written for it, so it must be removed by hand${checkoutDir === undefined ? '' : ` (${checkoutDir})`} before the download can be retried cleanly.`
+      : 'The new checkout is in place while the previous record still describes the old one; run the download again (it is an idempotent overwrite) to bring the record back in sync.'
+    this.deps.logger?.error(
+      `market download: "${key}" was swapped into place but its record could not be written (${reason}) — ${guidance}`,
+    )
+    return new MarketControlError(
       'install/io',
-      `${error instanceof Error ? error.message : String(error)} The checkout was already swapped into place, so the record no longer matches it and needs manual repair (re-run the download or remove the checkout).`,
-      { key, reason: 'repair:checkout-committed-record-missing' },
+      `${error instanceof Error ? error.message : String(error)} ${guidance}`,
+      { key, reason, ...(checkoutDir === undefined ? {} : { path: checkoutDir }) },
       { cause: error },
     )
   }

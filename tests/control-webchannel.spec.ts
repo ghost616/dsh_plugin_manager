@@ -9,11 +9,15 @@
  * several specs bound sockets in parallel):
  * - every case serves on an EPHEMERAL port (`listen 0` → read the assigned
  *   port) and `serve()` waits until the listener really accepts connections
- *   (`OPTIONS` probe, 3 s bound) before any assertion runs;
+ *   (`OPTIONS` probe, 10 s bound) before any assertion runs;
  * - TEARDOWN actually used: `closeServer()` = destroy the tracked live sockets
  *   (`RouterServer.destroySockets()`, so a keep-alive connection can never make
  *   `close()` hang) → `server.closeIdleConnections()` → wait for `close` with a
  *   2 s bound. Nothing else terminates the listeners.
+ * - the HTTP CLIENT is raw `node:http` with `agent: false` (never global
+ *   `fetch`): undici keys pooled sockets by origin and an ephemeral port that
+ *   gets recycled keeps a dead pooled socket, which turns the readiness probe
+ *   into a hard `TypeError: fetch failed` (see `rawRequest` for the detail);
  * - REQUEST retries are method-aware and observable: `GET`/`OPTIONS` (the
  *   readiness probe and the raw 405 probe) may repeat freely, while a `POST`
  *   (state-mutating: download/remove/enable) is repeated ONLY when the
@@ -22,17 +26,28 @@
  *   `[control-webchannel] retry …` line, so a genuine defect surfaces as a
  *   failure instead of being masked by silent retries.
  */
-import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { MarketError } from '../src/host/market/errors.ts'
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
 import { FakeEngines, fakeAnalysisEngine, fakeDistribution, makeSourceOps, testbed } from './support/control-testbed.ts'
+import {
+  DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
+  DOWNLOAD_REASON_EXPIRED,
+  DOWNLOAD_REASON_REPAIR_RECORD_STALE,
+  DOWNLOAD_REASON_UNKNOWN,
+} from '../src/host/control/source.ts'
 
-/** Bound of one `serve()` readiness wait (ms). */
-const SERVE_READY_TIMEOUT_MS = 3_000
+/**
+ * Bound of one `serve()` readiness wait (ms). Generous on purpose: the probe is
+ * a real request, and a loaded machine (a parallel build, several spec workers)
+ * can take seconds to accept the first connection — that is scheduling jitter,
+ * not a defect, so the wait absorbs it instead of failing the case.
+ */
+const SERVE_READY_TIMEOUT_MS = 10_000
 /** Attempts of one request (initial try + retries) on a transient failure. */
 const REQUEST_ATTEMPTS = 4
 /** Idempotent methods: repeating them can never duplicate a state change. */
@@ -47,7 +62,11 @@ const TRANSIENT_CODES: readonly string[] = [...NOT_SERVED_CODES, 'ECONNRESET', '
 
 const contexts: Context[] = []
 const servers: RouterServer[] = []
-/** Every router this spec started (teardown validation reads them back). */
+// Every case here does real local HTTP round trips against a live listener, and
+// the file is also run several processes at a time during parallel verification.
+// A starved worker can stall one round trip for seconds, so the per-test budget
+// is raised above the suite default: that is scheduling jitter, not a defect.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })/** Every router this spec started (teardown validation reads them back). */
 const servedRouters: RouterServer[] = []
 /** Routers `closeServer()` really ran on (set semantics: one entry per router). */
 const closedRouters = new Set<RouterServer>()
@@ -108,6 +127,8 @@ class RouterServer {
   private readonly exact = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>()
   /** Origin of the running listener; set by {@link serve} once it is ready. */
   private origin: string | null = null
+  /** Assigned TCP port of the running listener (null before `serve`). */
+  private assignedPort: number | null = null
   /** Live sockets; teardown destroys them so `close()` can never hang. */
   private readonly sockets = new Set<Socket>()
 
@@ -136,6 +157,14 @@ class RouterServer {
     return this.origin
   }
 
+  /** Assigned port of the listening server; throws while it is not ready. */
+  get port(): number {
+    if (this.assignedPort === null) {
+      throw new Error('the test server is not listening yet — call serve(router) first')
+    }
+    return this.assignedPort
+  }
+
   /** Record the assigned port once the listener is up. */
   markReady(): void {
     const address = this.server.address()
@@ -143,6 +172,7 @@ class RouterServer {
       throw new Error('the test server has no bound TCP address')
     }
     this.origin = `http://127.0.0.1:${address.port}`
+    this.assignedPort = address.port
   }
 
   /**
@@ -191,7 +221,7 @@ async function serve(router: RouterServer): Promise<void> {
   const deadline = Date.now() + SERVE_READY_TIMEOUT_MS
   for (;;) {
     try {
-      await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, { method: 'OPTIONS' })
+      await rawRequest(router, { method: 'OPTIONS' })
       return
     } catch (error) {
       if (Date.now() >= deadline) {
@@ -206,8 +236,51 @@ function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => { setTimeout(resolve, ms) })
 }
 
-/** Transport code of a thrown fetch error (the `cause.code` Node attaches). */
+/**
+ * One raw HTTP round trip to the local test server.
+ *
+ * `node:http` with `agent: false` is used on purpose instead of `fetch`: the
+ * global undici pool keys connections by origin, and this spec creates (and
+ * closes) dozens of short-lived ephemeral-port origins per run. Under parallel
+ * load a later origin can be handed the very port a previous, now-dead listener
+ * used, and a pooled socket for that origin makes `fetch` fail with
+ * `TypeError: fetch failed` for as long as the entry lingers. Opening a fresh
+ * connection per request removes that failure mode entirely while still being a
+ * true HTTP round trip (the server side is a real `node:http` listener).
+ */
+function rawRequest(
+  router: RouterServer,
+  init: { method: string; body?: unknown },
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      host: '127.0.0.1',
+      port: router.port,
+      path: MARKET_WEB_ROUTE_PATH,
+      method: init.method.toUpperCase(),
+      agent: false,
+      headers: {
+        'content-type': 'application/json',
+        ...(init.body === undefined ? {} : { 'content-length': String(Buffer.byteLength(JSON.stringify(init.body))) }),
+      },
+    }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(chunk))
+      response.on('end', () => resolve({
+        status: response.statusCode ?? 0,
+        text: Buffer.concat(chunks).toString('utf8'),
+      }))
+      response.on('error', reject)
+    })
+    request.on('error', reject)
+    request.end(init.body === undefined ? undefined : JSON.stringify(init.body))
+  })
+}
+
+/** Transport code of a thrown request error (`code`, or its `cause`). */
 function transportCodeOf(error: unknown): string | undefined {
+  const direct = (error as { code?: unknown } | null)?.code
+  if (typeof direct === 'string') return direct
   const cause = (error as { cause?: { code?: string } } | null)?.cause
   return typeof cause?.code === 'string' ? cause.code : undefined
 }
@@ -244,12 +317,7 @@ async function request(
   for (;;) {
     attempt += 1
     try {
-      const response = await fetch(`${router.url}${MARKET_WEB_ROUTE_PATH}`, {
-        method,
-        headers: { 'content-type': 'application/json' },
-        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-      })
-      return { status: response.status, text: await response.text() }
+      return await rawRequest(router, { method, ...(init.body === undefined ? {} : { body: init.body }) })
     } catch (error) {
       // Not repeatable, or out of attempts: surface the real failure as-is.
       if (!mayRepeat(method, error) || attempt >= REQUEST_ATTEMPTS) throw error
@@ -301,6 +369,8 @@ function routeFor(options: {
   idle?: boolean
   analysis?: import('../src/host/control/source.ts').InstallAnalysisEngine
   previewResult?: import('../src/types.ts').PluginPreviewOutcome
+  now?: () => Date
+  downloadTtlMs?: number
 } = {}): {
   router: RouterServer
   bed: ReturnType<typeof testbed>
@@ -316,6 +386,8 @@ function routeFor(options: {
   if (options.previewResult !== undefined) engines.previewResult = options.previewResult
   const source = makeSourceOps(repository, bed.records, engines, {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
   })
   // Compiled-artifact gateway over `src/`-typed fakes (see control-gateway.spec.ts):
   // its `.d.ts` names a second nominal identity for every class-typed dep, so
@@ -810,6 +882,90 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(cancelled).toMatchObject({ ok: true, value: true })
     const twice = await call(router, 'cancelDownload', { token: secondHandle })
     expect(twice).toMatchObject({ ok: true, value: false })
+    dispose()
+  })
+
+  it('serves the commit swap facts and the download TTL reasons over HTTP', async () => {
+    let nowMs = 1_000
+    const { router, engines, dispose } = routeFor({ now: () => new Date(nowMs), downloadTtlMs: 60_000 })
+    await serve(router)
+
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const prepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: token })
+    const handle = (prepared as { ok: true; value: { token: string } }).value.token
+
+    // Pre-swap commit failure: retryable, and the reason says why.
+    engines.commitError = new MarketError('install/io', 'the records file is locked')
+    const retryable = await call(router, 'commitDownload', { token: handle, classification: 'other' })
+    expect(retryable.ok).toBe(false)
+    if (!retryable.ok) {
+      expect(retryable.error.code).toBe('install/io')
+      expect(retryable.error.details).toMatchObject({ reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP })
+      expect(retryable.error.message).toContain('Retry the commit with the same download handle')
+    }
+
+    // The same handle still works: control re-stages before committing again.
+    engines.commitError = undefined
+    const committed = await call(router, 'commitDownload', { token: handle, classification: 'other' })
+    expect(committed.ok).toBe(true)
+
+    // A post-swap failure is a repair and carries the checkout path.
+    const secondReview = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const secondToken = (secondReview as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const secondPrepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: secondToken })
+    const secondHandle = (secondPrepared as { ok: true; value: { token: string } }).value.token
+    engines.commitError = new MarketError('install/io', 'the records file is locked')
+    engines.commitFailsAfterSwap = true
+    const repair = await call(router, 'commitDownload', { token: secondHandle, classification: 'other' })
+    expect(repair.ok).toBe(false)
+    if (!repair.ok) {
+      expect(repair.error.details).toMatchObject({
+        reason: DOWNLOAD_REASON_REPAIR_RECORD_STALE,
+        path: '/repo/gh-octocat-demo-plugin',
+      })
+    }
+    engines.commitError = undefined
+    engines.commitFailsAfterSwap = false
+
+    // An expired download handle is swept and reported as expired…
+    const thirdReview = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const thirdToken = (thirdReview as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const thirdPrepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: thirdToken })
+    const thirdHandle = (thirdPrepared as { ok: true, value: { token: string } }).value.token
+    nowMs += 60_001
+    const expired = await call(router, 'classifyDownload', { token: thirdHandle })
+    expect(expired.ok).toBe(false)
+    if (!expired.ok) {
+      expect(expired.error.code).toBe('record/not-found')
+      expect(expired.error.details).toMatchObject({ reason: DOWNLOAD_REASON_EXPIRED, path: thirdHandle })
+    }
+    expect(engines.cancelledCalls).toContain(thirdHandle)
+
+    // …while a handle that was never prepared is reported as unknown.
+    const unknown = await call(router, 'classifyDownload', { token: 'dl-0123456789abcdef0123456789abcdef' })
+    expect(unknown.ok).toBe(false)
+    if (!unknown.ok) {
+      expect(unknown.error.details).toMatchObject({ reason: DOWNLOAD_REASON_UNKNOWN })
+    }
+    dispose()
+  })
+
+  it('keeps a staged download alive past its review window (independent TTLs)', async () => {
+    let nowMs = 1_000
+    const { router, engines, dispose } = routeFor({ now: () => new Date(nowMs), downloadTtlMs: 600_000 })
+    await serve(router)
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const prepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: token })
+    const handle = (prepared as { ok: true; value: { token: string } }).value.token
+
+    // Well past the review window: the in-flight download is untouched.
+    nowMs += 30_001
+    await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    expect(engines.cancelledCalls).toEqual([])
+    const committed = await call(router, 'commitDownload', { token: handle, classification: 'other' })
+    expect(committed.ok).toBe(true)
     dispose()
   })
 

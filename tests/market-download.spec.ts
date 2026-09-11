@@ -6,12 +6,14 @@
  * the subprocess calls and asserts `pnpm` is absent, so a regression that puts
  * the dependency step back into the download is caught immediately.
  */
-import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { PluginMarketKey } from '../src/types.ts'
 import { MarketError } from '../src/host/market/errors.ts'
+import { NodeFs, type FsLike } from '../src/host/market/fs.ts'
 import {
+  InMemoryDownloadStaging,
   PluginInstaller,
   installCheckoutDependencies,
   isDownloadToken,
@@ -20,10 +22,12 @@ import {
   type DownloadCompletion,
   type DownloadToken,
   type PrepareDownloadInput,
+  type StagedDownload,
 } from '../src/host/market/index.ts'
 import { parsePluginKey } from '../src/host/market/keys.ts'
 import { repositoryRecordsPath } from '../src/host/market/layout.ts'
 import { PluginRecordStore } from '../src/host/market/records.ts'
+import { errno } from './support/memory-fs.ts'
 import { makeSuiteTmp, removeTmp } from './support/tmpdir.ts'
 
 function key(value: string): PluginMarketKey {
@@ -101,6 +105,16 @@ const KIND_CASES = [
   [{ kind: 'tooling', reason: 'a CLI', entryHint: null }, 'other'],
   [{ kind: 'other', reason: 'docs only', entryHint: null }, 'other'],
 ] as const satisfies readonly (readonly [Record<string, unknown>, 'plugin' | 'skills' | 'other'])[]
+
+/** Await `promise` and return the thrown error, asserting it is a MarketError. */
+async function rejection(promise: Promise<unknown>): Promise<MarketError> {
+  const caught = await promise.then(
+    () => null,
+    (error: unknown) => error,
+  )
+  expect(caught).toBeInstanceOf(MarketError)
+  return caught as MarketError
+}
 
 const prepareBase = {
   ownerRepo: 'owner/sample-plugin',
@@ -289,6 +303,57 @@ describe('three-phase download: classifyDownload', () => {
     await expect(installer.classifyDownload('dl-nope-nope' as DownloadToken))
       .rejects.toMatchObject({ code: 'record/not-found' })
   })
+
+  it('resolves the entry hint from package.json exports, and that hint is what commit registers', async () => {
+    // `main` absent, only `exports['.']` points at a real file: the old hint path
+    // (main-only) would have missed it and the prompt would have disagreed with
+    // the record. Both now share one resolver over the raw manifest.
+    const { installer, handle } = await prepare('classify-exports', {
+      manifest: { name: 'exports-only', exports: { '.': './dist/entry.js' } },
+      files: ['dist/entry.js', 'README.md'],
+    })
+    const seen: { system: string; user: string }[] = []
+    const complete: DownloadCompletion = async (request) => {
+      seen.push({ system: request.system, user: request.user })
+      return JSON.stringify({ kind: 'plugin', reason: 'a plugin', entryHint: 'dist/entry.js' })
+    }
+    const result = await installer.classifyDownload(handle.token, { complete, provider: 'p', model: 'm' })
+    expect(result).toMatchObject({ outcome: 'classified', entryPresent: true, entryHint: 'dist/entry.js' })
+
+    // The prompt is the analyzer's own builder: system contract + the capped
+    // manifest fields and the listing.
+    expect(seen[0]?.system).toContain('EXACTLY ONE JSON object')
+    expect(seen[0]?.user).toContain('Candidate checkout analysis')
+    expect(seen[0]?.user).toContain('- dist/')
+    expect(seen[0]?.user).toContain('main: (none)')
+
+    // Commit without an explicit entry → the SAME resolved entry lands on the
+    // record (prompt hint and record can no longer drift apart).
+    const committed = await installer.commitDownload({
+      token: handle.token,
+      classification: result.classification,
+    })
+    expect(committed.entry).toBe('dist/entry.js')
+    expect(committed.record.entry).toBe('dist/entry.js')
+  })
+
+  it('caps long manifest fields in the prompt at 200 characters', async () => {
+    const longDescription = 'D'.repeat(400)
+    const { installer, handle } = await prepare('classify-cap', {
+      manifest: { name: 'capped', description: longDescription, main: 'index.js' },
+      files: ['index.js'],
+    })
+    const seen: string[] = []
+    const complete: DownloadCompletion = async (request) => {
+      seen.push(request.user)
+      return JSON.stringify({ kind: 'other', reason: 'docs', entryHint: null })
+    }
+    await installer.classifyDownload(handle.token, { complete, provider: 'p', model: 'm' })
+    const user = seen[0] ?? ''
+    // The full 400-char value must NOT appear; the capped form (200 + ellipsis) must.
+    expect(user).not.toContain(longDescription)
+    expect(user).toContain(`${'D'.repeat(200)}…`)
+  })
 })
 
 describe('three-phase download: commitDownload + cancelDownload', () => {
@@ -377,6 +442,72 @@ describe('three-phase download: commitDownload + cancelDownload', () => {
       .rejects.toMatchObject({ code: 'record/not-found' })
   })
 
+  it('reports swapCompleted=false and removes the staging dir when the swap itself fails', async () => {
+    const root = join(tmp, 'commit-swap-false')
+    await mkdir(root, { recursive: true })
+    const { run } = runner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+    // Fail only the SWAP rename: `failRenames` flips after prepareDownload
+    // finished, so the records store's own atomic write still works and the
+    // failure lands exactly in the commit window (before the swap).
+    let failRenames = false
+    const failingFs: FsLike = {
+      ...NodeFs,
+      rename: async (from: string, to: string) => {
+        if (failRenames) throw errno('EIO', 'rename denied')
+        return NodeFs.rename(from, to)
+      },
+    }
+    const installer = new PluginInstaller({ fs: failingFs, run })
+    const handle = await installer.prepareDownload({ repositoryRoot: root, ...prepareBase })
+    failRenames = true
+    const error = await rejection(installer.commitDownload({ token: handle.token, classification: 'plugin' }))
+
+    expect(error.code).toBe('install/io')
+    expect(error.details?.['swapCompleted']).toBe(false)
+    expect(error.details?.['checkoutDir']).toBe(handle.checkoutDir)
+    expect(error.message).toContain('The staged checkout was removed')
+    // Pre-swap: staging cleaned, nothing at the final path, no record.
+    expect((await readdir(root)).filter((name) => name.startsWith('.staged-'))).toEqual([])
+    expect(await readdir(root)).not.toContain('gh-owner-sample-plugin')
+    expect(await new PluginRecordStore(repositoryRecordsPath(root)).list()).toEqual([])
+    // Handle consumed: a second commit is refused.
+    await expect(installer.commitDownload({ token: handle.token, classification: 'plugin' }))
+      .rejects.toMatchObject({ code: 'record/not-found' })
+  })
+
+  it('reports swapCompleted=true, keeps the new checkout, and leaves the old record when the record write fails', async () => {
+    const root = join(tmp, 'commit-swap-true')
+    await mkdir(root, { recursive: true })
+    // First download commits cleanly and establishes a live record.
+    const first = new PluginInstaller({ run: runner({ manifest: { main: 'a.js' }, files: ['a.js'] }).run })
+    const firstHandle = await first.prepareDownload({ repositoryRoot: root, ...prepareBase })
+    const firstCommit = await first.commitDownload({ token: firstHandle.token, classification: 'plugin' })
+    expect(firstCommit.entry).toBe('a.js')
+
+    // Second download for the same key: the swap succeeds, the record write fails.
+    class FailingRegisterStore extends PluginRecordStore {
+      override async register(): Promise<never> {
+        throw new MarketError('install/io', 'injected record write failure')
+      }
+    }
+    const second = new PluginInstaller({
+      run: runner({ manifest: { main: 'b.js' }, files: ['b.js'] }).run,
+      store: new FailingRegisterStore(repositoryRecordsPath(root)),
+    })
+    const secondHandle = await second.prepareDownload({ repositoryRoot: root, ...prepareBase })
+    const error = await rejection(second.commitDownload({ token: secondHandle.token, classification: 'plugin' }))
+
+    expect(error.details?.['swapCompleted']).toBe(true)
+    expect(error.message).toContain('already in place')
+    // Post-swap: the NEW checkout is kept on disk (repairable by hand) …
+    expect(await readFile(join(root, 'gh-owner-sample-plugin', 'b.js'), 'utf8')).toContain('fixture')
+    // … while the record still holds the OLD value (the error says so instead of
+    // pretending the two agree): checkout is newer than the record.
+    const record = await new PluginRecordStore(repositoryRecordsPath(root)).get(prepareBase.key)
+    expect(record?.entry).toBe('a.js')
+    expect(record?.classification).toBe('plugin')
+  })
+
   it('never runs pnpm, and rejects an unknown token', async () => {
     const { installer, handle, calls } = await prepared('commit-no-pnpm', { manifest: {}, files: [] })
     expect(pnpmCalls(calls)).toEqual([])
@@ -395,6 +526,59 @@ describe('three-phase download: commitDownload + cancelDownload', () => {
     const handle = await installer.prepareDownload({ repositoryRoot: root, ...prepareBase })
     expect((await readdir(root)).filter((name) => name === '.staged-gh-owner-sample-plugin-999-0')).toEqual([])
     expect(handle.state).toBe('prepared')
+  })
+})
+
+describe('download handle hardening (crypto tokens + collision guard)', () => {
+  it('mints unpredictable tokens of the documented shape', async () => {
+    const tmp = await makeSuiteTmp('download-token-shape')
+    try {
+      const root = join(tmp, 'root')
+      await mkdir(root, { recursive: true })
+      const { run } = runner({ manifest: { main: 'index.js' }, files: ['index.js'] })
+      const installer = new PluginInstaller({ run })
+      const tokens = new Set<string>()
+      for (let i = 0; i < 10; i += 1) {
+        const handle = await installer.prepareDownload({ repositoryRoot: root, ...prepareBase })
+        // `dl-` + 32 lowercase hex chars (crypto.randomBytes(16)), never the old
+        // time-based guessable form.
+        expect(handle.token).toMatch(/^dl-[0-9a-f]{32}$/)
+        expect(isDownloadToken(handle.token)).toBe(true)
+        tokens.add(handle.token)
+      }
+      expect(tokens.size).toBe(10)
+      // Anything that is not the minted shape is refused by the guard.
+      for (const bad of ['', 'dl-', 'dl-xyz', 'dl-ABC', 'dl-0000', 'dl-00-11', 'xdl-00000000000000000000000000000000']) {
+        expect(isDownloadToken(bad)).toBe(false)
+      }
+    } finally {
+      await removeTmp(tmp)
+    }
+  })
+
+  it('refuses to silently replace a live handle (collision is rejected, not overwritten)', async () => {
+    const staging = new InMemoryDownloadStaging()
+    const base: StagedDownload = {
+      token: 'dl-0123456789abcdef0123456789abcdef' as DownloadToken,
+      key: key('gh-owner-sample-plugin'),
+      repository: 'owner/sample-plugin',
+      refKind: undefined,
+      ref: null,
+      stagedDir: '/root/.staged-one',
+      checkoutDir: '/root/gh-owner-sample-plugin',
+      localDirName: 'gh-owner-sample-plugin',
+      commit: null,
+      startedAt: new Date().toISOString(),
+      state: 'prepared',
+    }
+    staging.add(base)
+    const error = await rejection(Promise.resolve().then(() => staging.add({ ...base, stagedDir: '/root/.staged-two' })))
+    expect(error.code).toBe('install/io')
+    expect(error.message).toContain('already in use')
+    expect(error.details?.['token']).toBe(base.token)
+    // The original entry is untouched — no silent overwrite, no orphaned checkout.
+    expect(staging.get(base.token)?.stagedDir).toBe('/root/.staged-one')
+    expect(staging.list()).toHaveLength(1)
   })
 })
 

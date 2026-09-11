@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { MarketError } from '../src/host/market/errors.ts'
 import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
-import { ANALYSIS_UNAVAILABLE_NOTE } from '../src/host/control/source.ts'
+import {
+  ANALYSIS_UNAVAILABLE_NOTE,
+  DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
+  DOWNLOAD_REASON_EXPIRED,
+  DOWNLOAD_REASON_REPAIR_NO_RECORD,
+  DOWNLOAD_REASON_REPAIR_RECORD_STALE,
+  DOWNLOAD_REASON_UNKNOWN,
+} from '../src/host/control/source.ts'
 import type { DownloadCommit, MarketSourceOperations } from '../src/host/control/source.ts'
 import { fakeAnalysisEngine, fakeDistribution, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
 
@@ -47,7 +54,13 @@ type Bed = ReturnType<typeof testbed>
 /** One source over the shared fakes of a testbed. */
 function ops(
   bed: Bed,
-  options: { idle?: boolean; now?: () => Date; isProtectedKey?: (k: string) => boolean } = {},
+  options: {
+    idle?: boolean
+    now?: () => Date
+    isProtectedKey?: (k: string) => boolean
+    /** Download-stage TTL (from the successful prepare); default 10 min. */
+    downloadTtlMs?: number
+  } = {},
 ) {
   return makeSourceOps(
     options.idle === true ? null : bed.repository,
@@ -55,6 +68,7 @@ function ops(
     bed.engines,
     {
       ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
       ...(options.isProtectedKey === undefined ? {} : { isProtectedKey: options.isProtectedKey }),
     },
   )
@@ -612,18 +626,164 @@ describe('MarketSourceOperations download channel (phased, double confirmation)'
     expect(await bed.records.list()).toEqual([])
   })
 
-  it('sweeps an abandoned staging when its review window has passed', async () => {
+  it('keeps a staged download alive after its review window (independent download TTL)', async () => {
     let nowMs = 1_000
     const bed = testbed()
-    const source = ops(bed, { now: () => new Date(nowMs) })
+    // Review window: 30s. Download window: 10 minutes — the review window is
+    // spent by prepare and must have no say over a download in progress.
+    const source = ops(bed, { now: () => new Date(nowMs), downloadTtlMs: 600_000 })
     const review = await source.previewInstall(SLUG)
     const prepared = await source.prepareDownload(SLUG, review.confirmToken)
     expect(bed.engines.cancelledCalls).toEqual([])
 
-    // The next review (after the window) cleans up the abandoned staging.
+    // Well past the review window, still inside the download window: a new
+    // review sweeps the (spent) review bookkeeping but NOT the live download.
     nowMs += REMOVE_CONFIRM_TTL_MS + 1
     await source.previewInstall(SLUG)
+    expect(bed.engines.cancelledCalls).toEqual([])
+
+    // The download itself is still fully usable.
+    const classification = await source.classifyDownload(prepared.token)
+    expect(classification).toMatchObject({ outcome: 'classified', classification: 'plugin' })
+    const outcome = await source.commitDownload(prepared.token, classification.classification)
+    expect(outcome.key).toBe(key(GH_KEY))
+    expect(outcome.dependenciesInstalled).toBe(false)
+  })
+
+  it('sweeps a download only when its own deadline passes, and says so', async () => {
+    let nowMs = 1_000
+    const bed = testbed()
+    const source = ops(bed, { now: () => new Date(nowMs), downloadTtlMs: 60_000 })
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    // Inside the download window: nothing is swept.
+    nowMs += 30_000
+    await expect(source.classifyDownload(prepared.token)).resolves.toBeDefined()
+    expect(bed.engines.cancelledCalls).toEqual([])
+
+    // Past the download window the staging is cleaned up and the failure says
+    // "expired" (not "never prepared"), so the UI can explain the cleanup.
+    nowMs += 60_000
+    const error = await source.classifyDownload(prepared.token).catch((e: unknown) => e)
+    expect(error).toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_EXPIRED, path: prepared.token },
+    })
     expect(bed.engines.cancelledCalls).toEqual([prepared.token])
+    expect((error as Error).message).toContain('cleaned up')
+    // The same handle keeps reporting the expired (not the unknown) reason.
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({
+      details: { reason: DOWNLOAD_REASON_EXPIRED },
+    })
+  })
+
+  it('distinguishes a never-prepared handle from an expired one', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const error = await source.classifyDownload('dl-0123456789abcdef0123456789abcdef').catch((e: unknown) => e)
+    expect(error).toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_UNKNOWN },
+    })
+    expect((error as Error).message).toContain('unknown')
+    expect(bed.engines.cancelledCalls).toEqual([])
+  })
+
+  it('keeps a pre-swap commit failure retryable: the same token commits after a re-stage', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    // The host fails before the swap (nothing moved, its handle is dropped).
+    bed.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    const failure = await source.commitDownload(prepared.token, 'other').catch((e: unknown) => e)
+    expect(failure).toMatchObject({
+      code: 'install/io',
+      details: { reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP, key: GH_KEY },
+    })
+    expect((failure as Error).message).toContain('Retry the commit with the same download handle')
+
+    // Retry with the SAME token: control re-stages from the recipe first.
+    bed.engines.commitError = undefined
+    const outcome = await source.commitDownload(prepared.token, 'other')
+    expect(outcome.key).toBe(key(GH_KEY))
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(2)
+    expect(bed.engines.classifications).toEqual(['other', 'other'])
+
+    // A handle is consumable once: the successful retry retires BOTH the
+    // re-staged handle and the original token, so repeating the commit cannot
+    // clone the repository a third time.
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_EXPIRED },
+    })
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(2)
+  })
+
+  it('routes a post-swap failure to repair and names the two forms apart', async () => {
+    // Form 1: no record existed — the fresh checkout has to be removed by hand.
+    const fresh = testbed()
+    const freshSource = ops(fresh)
+    const freshReview = await freshSource.previewInstall(SLUG)
+    const freshPrepared = await freshSource.prepareDownload(SLUG, freshReview.confirmToken)
+    fresh.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    fresh.engines.commitFailsAfterSwap = true
+    const noRecord = await freshSource.commitDownload(freshPrepared.token, 'other').catch((e: unknown) => e)
+    expect(noRecord).toMatchObject({
+      code: 'install/io',
+      details: {
+        reason: DOWNLOAD_REASON_REPAIR_NO_RECORD,
+        key: GH_KEY,
+        path: `/repo/${GH_KEY}`,
+      },
+    })
+    expect((noRecord as Error).message).toContain('removed by hand')
+    // The handle is consumed by the failed commit.
+    await expect(freshSource.commitDownload(freshPrepared.token, 'other')).rejects.toMatchObject({
+      code: 'record/not-found',
+    })
+
+    // Form 2: the previous record is still in place — the download can be rerun.
+    const existing = testbed()
+    existing.records.seed(GH_KEY, { localDirName: GH_KEY, entry: 'index.js', classification: 'plugin' })
+    const existingSource = ops(existing)
+    const existingReview = await existingSource.previewInstall(SLUG)
+    const existingPrepared = await existingSource.prepareDownload(SLUG, existingReview.confirmToken)
+    existing.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    existing.engines.commitFailsAfterSwap = true
+    const stale = await existingSource.commitDownload(existingPrepared.token, 'other').catch((e: unknown) => e)
+    expect(stale).toMatchObject({
+      code: 'install/io',
+      details: { reason: DOWNLOAD_REASON_REPAIR_RECORD_STALE, key: GH_KEY },
+    })
+    expect((stale as Error).message).toContain('run the download again')
+    // The previous record is untouched, so a rerun is an idempotent overwrite.
+    expect((await existing.records.get(key(GH_KEY)))?.classification).toBe('plugin')
+  })
+
+  it('drops an unconsumed review when its confirmation window passes', async () => {
+    let nowMs = 1_000
+    const bed = testbed()
+    // No download TTL given: the default (10 min) applies, so the review window
+    // is the governing deadline only for entries that never reached prepare.
+    const source = ops(bed, { now: () => new Date(nowMs) })
+    const review = await source.previewInstall(SLUG)
+
+    // A new review of the same key replaces the confirmation: the stale token is
+    // no longer the key's review, so it is refused as invalid (not "required").
+    nowMs += REMOVE_CONFIRM_TTL_MS + 1
+    await source.previewInstall(SLUG)
+    await expect(source.prepareDownload(SLUG, review.confirmToken)).rejects.toMatchObject({
+      code: 'market/confirm-invalid',
+    })
+
+    // With no review at all for the ref, the refusal is the "required" one.
+    await expect(source.prepareDownload('other/repo', 'tok')).rejects.toMatchObject({
+      code: 'market/confirm-required',
+    })
+    expect(bed.engines.cancelledCalls).toEqual([])
   })
 
   it('pins the reviewed version on a legacy (no refKind) download', async () => {

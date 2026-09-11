@@ -28,6 +28,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {
+  DownloadClassification,
+  DownloadCommit,
+  DownloadPreparation,
   GitHubSearchPage,
   GithubRefKind,
   ManagedPluginList,
@@ -55,9 +58,6 @@ import {
   setEnabled,
   status as channelStatus,
   unwrap,
-  type DownloadClassification,
-  type DownloadCommit,
-  type DownloadPreparation,
 } from './channel.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import { en, zh } from './locales.ts'

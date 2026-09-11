@@ -74,6 +74,11 @@ export interface MarketErrorOptions {
   path?: string
   /** Underlying cause, appended for observability. */
   cause?: unknown
+  /**
+   * Machine-readable details for callers that branch on the failure (never
+   * rendered as the message). Mirrored onto {@link MarketError.details}.
+   */
+  details?: Readonly<Record<string, string | number | boolean | null>>
 }
 
 /**
@@ -82,6 +87,13 @@ export interface MarketErrorOptions {
  * boundaries reuse) plus the offending path and a human-readable message.
  */
 export class MarketError extends Error {
+  /**
+   * Machine-readable details of the failure (e.g. `swapCompleted` on a commit
+   * failure). Callers branch on these instead of parsing the message; the
+   * control layer forwards them on its wire error details.
+   */
+  readonly details: Readonly<Record<string, string | number | boolean | null>>
+
   constructor(
     readonly code: PluginMarketErrorCode,
     message?: string,
@@ -91,6 +103,7 @@ export class MarketError extends Error {
     const causeNote = describeCause(options.cause)
     super(`${message ?? DEFAULT_MESSAGE[code]}${pathNote}${causeNote}`)
     this.name = 'MarketError'
+    this.details = options.details ?? {}
   }
 }
 

@@ -10,6 +10,9 @@ import {
 } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
+  DownloadClassification,
+  DownloadCommit,
+  DownloadPreparation,
   GitHubSearchPage,
   GithubRefKind,
   ManagedPluginList,
@@ -32,11 +35,6 @@ import {
   DEFAULT_PLUGIN_MARKET_CLASSIFICATION,
   recordNotLoadableReason,
 } from '../types.ts'
-import type {
-  DownloadClassification,
-  DownloadCommit,
-  DownloadPreparation,
-} from './channel.ts'
 import { renderReadmeHtml } from './readme.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
@@ -1002,10 +1000,22 @@ function InstallDialog({
                 classification: t(CLASSIFICATION_KEYS[phase.outcome.classification]),
               })}
             </p>
-            {/* Downloading sources never installs dependencies: say so plainly. */}
+            {/*
+              Dependency state. The DOWNLOAD path never installs dependencies
+              (`DownloadCommit.dependenciesInstalled` is false by contract), so
+              this block is the concrete way out: the checkout directory is
+              shown and the user is told the exact command to run there.
+              FUTURE: this must be driven by the RECORD state of a freshly
+              fetched roster (a later explicit install action flips it), not by
+              the download path's constant false — when that action lands, gate
+              the hint on the reloaded record instead of on this commit answer.
+            */}
             {phase.outcome.dependenciesInstalled ? null : (
-              <p className={css.analysisGuide} data-no-deps-installed>{t('depsNotInstalledNotice')}</p>
+              <p className={css.analysisGuide} data-no-deps-installed>
+                {t('depsInstallHint')}
+              </p>
             )}
+            <code data-checkout-dir>{phase.outcome.checkoutDir}</code>
           </>
         ) : null}
 

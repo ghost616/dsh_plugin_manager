@@ -56,6 +56,17 @@ export interface Config {
   /** Removal/install confirmation validity window in milliseconds. */
   readonly confirmTtlMs?: number
   /**
+   * How long a prepared (cloned, not yet committed) download stays usable, in
+   * milliseconds; defaults to `DEFAULT_DOWNLOAD_TTL_MS` (ten minutes), counted
+   * from the successful prepare.
+   *
+   * Independent of {@link confirmTtlMs}: the review window only gates "may this
+   * review start a download?", while this one gates "may this staged checkout
+   * still be classified/committed?". Keep it at least as long as the review
+   * window.
+   */
+  readonly downloadTtlMs?: number
+  /**
    * Optional LLM endpoint of the smart-install analyzer. When both
    * `provider`/`model` are present the control wires an analysis engine over
    * the live `ctx.llm` service; otherwise an unconventional checkout is
@@ -81,6 +92,7 @@ export function apply(ctx: Context, config?: Config): void {
   const logger = ctx.logger(name)
   const protection = createProtectionPolicy(import.meta.url)
   const ttl = config?.confirmTtlMs
+  const downloadTtl = config?.downloadTtlMs
   let runtime: Runtime | null = null
 
   // Source engines (search/detail/preview) are context-independent; the
@@ -159,6 +171,7 @@ export function apply(ctx: Context, config?: Config): void {
       await runtime?.controller.syncRecordRow(record)
     },
     ...(ttl === undefined ? {} : { confirmTtlMs: ttl }),
+    ...(downloadTtl === undefined ? {} : { downloadTtlMs: downloadTtl }),
     logger: {
       warn: (message) => { logger.warn(message) },
       error: (message) => { logger.error(message) },
