@@ -9,7 +9,8 @@
  *   { "method": "status" | "listManaged" | "setEnabled" | "setClassification"
  *       | "requestRemove" | "confirmRemove" | "search" | "repositoryDetail"
  *       | "previewInstall" | "prepareDownload" | "classifyDownload"
- *       | "commitDownload" | "cancelDownload",
+ *       | "commitDownload" | "cancelDownload"
+ *       | "tokenStatus" | "saveGitHubToken" | "clearGitHubToken",
  *     "args": { ... } }
  *   200 → { "ok": true, "value": ... }
  *        | { "ok": false, "error": { "code", "message", "details" } }
@@ -24,6 +25,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   GitHubSearchPage,
+  GitHubTokenStatus,
+  GitHubTokenUpdateResult,
   ManagedPluginList,
   MarketStatus,
   PluginInstallReview,
@@ -93,17 +96,48 @@ const METHODS: Record<string, MethodMeta> = {
   },
   search: {
     parameters: [],
-    optional: ['keywords', 'perPage', 'page'],
+    optional: ['keywords', 'perPage', 'page', 'refresh'],
     call: (gateway, args) => {
       const keywords = optionalString(args.keywords)
       const perPage = optionalNumber(args.perPage)
       const page = optionalNumber(args.page)
-      return gateway.search(keywords, perPage, page)
+      const refresh = optionalBoolean(args.refresh)
+      return gateway.search(
+        keywords,
+        perPage,
+        page,
+        refresh === null ? undefined : { refresh },
+      )
     },
   },
   repositoryDetail: {
     parameters: ['repository'],
-    call: (gateway, args) => gateway.repositoryDetail(String(args.repository)),
+    optional: ['refresh'],
+    call: (gateway, args) => {
+      const refresh = optionalBoolean(args.refresh)
+      return gateway.repositoryDetail(
+        String(args.repository),
+        refresh === null ? undefined : { refresh },
+      )
+    },
+  },
+  tokenStatus: {
+    parameters: [],
+    call: (gateway) => gateway.tokenStatus(),
+  },
+  saveGitHubToken: {
+    parameters: ['value'],
+    // NOT `String(args.value)`: an unconditional coercion would turn `null`
+    // into the literal token "null" (and an object into "[object Object]"), so
+    // a single malformed request would leave the deployment "configured" with a
+    // bogus bearer header while the port's non-empty-string guard looked intact.
+    // Every no-value form (missing key included) is answered by the port's one
+    // stable `github/bad-request` with zero side effects — see `requiredToken`.
+    call: (gateway, args) => gateway.saveGitHubToken(requiredToken(args.value)),
+  },
+  clearGitHubToken: {
+    parameters: [],
+    call: (gateway) => gateway.clearGitHubToken(),
   },
   previewInstall: {
     parameters: ['repository'],
@@ -296,6 +330,34 @@ function optionalVersion(value: unknown): string | null {
   return value
 }
 
+/**
+ * Token argument of `saveGitHubToken`: only a real string is handed to the
+ * port, every other shape is answered as "no usable value" (null).
+ *
+ * NOT `String(args.value)`: an unconditional coercion turned `null` into the
+ * literal token "null" (an object into "[object Object]", an array into its
+ * first element), so one malformed request left the deployment "configured"
+ * with a bogus bearer header while the port's non-empty-string guard looked
+ * intact. Passing null instead keeps ONE stable answer for every no-value form
+ * (`github/bad-request`, zero side effects, no cache-clear report) and leaves
+ * the port as the single place that decides about token values. A missing key
+ * is still a transport-level 400 — it is a malformed request, not a value.
+ */
+function requiredToken(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * Optional boolean flag (the explicit-refresh arguments). `null` means "not
+ * given" — the caller then keeps the cached default behavior rather than
+ * sending an explicit `false`.
+ */
+function optionalBoolean(value: unknown): boolean | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'boolean') throw new HttpRefusal(400, 'The argument must be a boolean or null.')
+  return value
+}
+
 function optionalRefKind(value: unknown): string | null {
   if (value === undefined || value === null) return null
   if (value !== 'branch' && value !== 'tag') {
@@ -316,5 +378,7 @@ export type MarketChannelValue =
   | DownloadPreparation
   | DownloadClassification
   | DownloadCommit
+  | GitHubTokenStatus
+  | GitHubTokenUpdateResult
   | boolean
   | RepositoryDetail

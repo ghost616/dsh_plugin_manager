@@ -13,8 +13,14 @@
  *
  * The repository/record types below are owned by plugin-market-host. Keep
  * this file free of `node:*` imports so the browser half stays client-safe.
+ *
+ * Two external packages are referenced TYPE-ONLY, so neither reaches the
+ * browser bundle: `@deepseek-ai/dsh-typert-protocol` (whose
+ * `RemoteErrorDetailsMap` this file augments) and `@deepseek-ai/dsh-credentials`
+ * (whose branded `CredentialRef` names the GitHub access-token reference).
  */
 
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials/types'
 import type {} from '@deepseek-ai/dsh-typert-protocol'
 
 /** Runtime brand of a stable plugin-market record key. */
@@ -137,6 +143,14 @@ export type PluginMarketErrorCode =
   | 'harness/link-conflict'
   | 'harness/io'
   | 'github/auth'
+  /**
+   * This deployment has no credential seam mounted (`ctx.credentials` absent),
+   * so the GitHub access token can neither be read nor written: the token
+   * surface reports one stable code for both halves instead of inventing a
+   * second, and never silently degrades to the launch environment (that would
+   * make a "saved" token look lost).
+   */
+  | 'github/token-unavailable'
   | 'github/rate-limit'
   | 'github/network'
   | 'github/not-found'
@@ -334,6 +348,90 @@ export interface PluginManifestPreview {
 export type PluginPreviewOutcome =
   | { readonly status: 'ready'; readonly summary: PluginManifestPreview }
   | { readonly status: 'degraded'; readonly summary: PluginManifestPreview; readonly reason: string; readonly code: PluginMarketErrorCode }
+
+/* ------------------------------------------------------------------------ */
+/* GitHub access-token contract (credential seam)                            */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Source layer currently supplying the GitHub access token, as reported by the
+ * credential seam's `CredentialInfo.source`. It is provider-defined, hence an
+ * OPEN vocabulary: the four members below are what the shipped local provider
+ * reports, and a consumer renders a generic label for anything else (including
+ * a missing field) instead of failing on it — the same soft-branch discipline
+ * the wire error details follow.
+ *
+ * - `env` — the launch environment of the dsh process (`DSH_GITHUB_TOKEN` /
+ *   `GITHUB_TOKEN` exported before it started). Nothing a surface can write
+ *   replaces it, so it is the one read-only layer;
+ * - `file` — the credential store the active provider manages (writable);
+ * - `project-env` — the invoking project's `.env` file (writable: a stored
+ *   value becomes the effective one and shadows it);
+ * - `user-env` — the harness home `.env` file, ranked below the project one.
+ *
+ * Precedence belongs to the provider, not to this contract: `env` outranks the
+ * stored `file`, which outranks `project-env`, which outranks `user-env`.
+ */
+export type GitHubTokenSource = 'env' | 'file' | 'project-env' | 'user-env' | (string & {})
+
+/**
+ * Read-only status of the GitHub access token this deployment sends with its
+ * API requests — safe for a settings surface and for the wire, because it has
+ * no slot a secret could ride in.
+ *
+ * The three state facts mirror the credential seam (`ctx.credentials.describe`)
+ * instead of being re-derived here, so a provider change reaches the surface
+ * without a second source of truth; the effective reference is the one fact the
+ * seam cannot know, because preferring one name over the other is the market's
+ * own rule.
+ */
+export interface GitHubTokenStatus {
+  /** Whether resolving the effective reference would currently return a value. */
+  readonly configured: boolean
+  /**
+   * Layer currently supplying the token, absent while unconfigured (an absent
+   * field, never a placeholder string). See {@link GitHubTokenSource}.
+   */
+  readonly source?: GitHubTokenSource
+  /**
+   * Whether the active provider can write the effective reference. `false` is
+   * the read-only launch environment: a write there would appear to succeed
+   * while the shadowing value kept being resolved, so the surface offers no
+   * save action for it (clearing stays possible wherever a stored value exists
+   * beneath it).
+   */
+  readonly writable: boolean
+  /**
+   * The reference the market resolves: the first of the two names that
+   * currently has a value — `DSH_GITHUB_TOKEN` preferred, `GITHUB_TOKEN`
+   * second, so a deployment setting both is unambiguous — and the preferred
+   * head while neither has one, so even an unconfigured deployment reports the
+   * name a write would target. The name is the credential seam's branded
+   * reference and travels the wire as a plain string; it is what a surface
+   * renders next to the state ("configured, from DSH_GITHUB_TOKEN").
+   */
+  readonly ref: CredentialRef
+}
+
+/**
+ * Answer of one committed token write. Saving a value and clearing one share
+ * it: they differ only in the status reported afterwards (`configured`
+ * true/false), so a surface needs neither a second shape nor a re-read — the
+ * status is the post-write fact, never an echo of the caller's intent.
+ *
+ * No secret travels here, so the result may cross the Remote wire.
+ */
+export interface GitHubTokenUpdateResult {
+  /** Status re-read after the write committed. */
+  readonly status: GitHubTokenStatus
+  /**
+   * Whether the write dropped the token the market had memoized, so the next
+   * GitHub request resolves the new value. A REPORT, not a branch: a surface
+   * shows "saved" either way, and `false` means only that nothing was memoized
+   * at that moment — never that the previous value is still in effect.
+   */
+  readonly cacheCleared: boolean
+}
 
 /* ------------------------------------------------------------------------ */
 /* plugin-control-service cross-face contract (record-driven control)       */
@@ -758,6 +856,36 @@ export interface MarketAnalysisErrorDetails {
 }
 
 /**
+ * Structured payload of a `github/rate-limit` wire failure — what a consumer
+ * needs to render "wait N minutes" instead of a bare "try later".
+ *
+ * Both fields are OPTIONAL, so this is a widening of the details shape rather
+ * than a new requirement: the empty payload older hosts sent stays valid, and
+ * either field may be absent on its own, because GitHub reports a reset instant
+ * on `x-ratelimit-reset` and a wait duration on `retry-after` and a throttled
+ * response need not carry both. The inherited generic fields (`key`, `path`,
+ * `reason`) keep their meaning, so a consumer already branching on them is
+ * unaffected.
+ */
+export interface MarketGitHubRateLimitDetails extends MarketRemoteErrorDetails {
+  /**
+   * ISO-8601 instant at which the limit resets, when the response reported one
+   * (`x-ratelimit-reset`). The wire pins ONE representation deliberately: a raw
+   * epoch number would force every consumer to branch on `typeof` before it
+   * could format the instant, so a host holding epoch seconds converts once,
+   * here.
+   */
+  readonly resetAt?: string
+  /**
+   * Suggested wait before retrying, in milliseconds — the `retry-after`
+   * duration as reported, or one derived from the reset instant. This is the
+   * field a countdown reads; a consumer that finds neither field falls back to
+   * its generic "try later" copy.
+   */
+  readonly retryAfterMs?: number
+}
+
+/**
  * Wire failure vocabulary of the market control surface. The Host throws
  * {@link RemoteError} instances with these codes; consumers branch on `code`
  * and never instanceof. Repository/record/harness codes are the existing
@@ -940,7 +1068,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'harness/io': MarketRemoteErrorDetails
     'record/invalid': MarketRemoteErrorDetails
     'github/auth': {}
-    'github/rate-limit': {}
+    'github/token-unavailable': {}
+    'github/rate-limit': MarketGitHubRateLimitDetails
     'github/network': {}
     'github/not-found': {}
     'github/bad-response': {}

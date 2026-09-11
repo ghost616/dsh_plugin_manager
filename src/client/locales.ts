@@ -17,6 +17,18 @@ export const zh = {
   tabLocal: '本地仓库',
   /** In-page tab: GitHub search/download. */
   tabGithub: 'GitHub',
+  /** In-page tab: the GitHub access token (credential seam). */
+  tabToken: '访问令牌',
+  /** Access-token status: the token comes from the dsh launch environment. */
+  tokenSourceEnv: '启动环境',
+  /** Access-token status: the token comes from the credential store file. */
+  tokenSourceFile: '存储文件',
+  /** Access-token status: the invoking project's `.env` file supplies it. */
+  tokenSourceProjectEnv: '项目 .env',
+  /** Access-token status: the harness home `.env` file supplies it. */
+  tokenSourceUserEnv: '用户 .env',
+  /** Access-token status: the provider reported a layer this build does not name. */
+  tokenSourceOther: '其他来源',
   /** Whole-page/list loading state. */
   loading: '正在读取已管理插件…',
   /** Whole-list load failure (channel unreachable or a wire failure). */
@@ -103,6 +115,20 @@ export const zh = {
   searchFailed: '搜索失败。',
   /** GitHub rate-limit failure. */
   rateLimited: 'GitHub 限流，请稍后再试。',
+  /**
+   * Optional wait line appended to the rate-limit copy when the wire failure
+   * carries a suggested wait (`details.retryAfterMs`). `{wait}` is a duration
+   * phrase built from `rateLimitWaitSeconds`/`rateLimitWaitMinutes`/
+   * `rateLimitWaitHours`; a failure without that detail keeps `rateLimited`
+   * alone, so no other failure code's copy changes.
+   */
+  rateLimitWait: '还需等待 {wait}。',
+  /** Rate-limit wait unit: seconds. */
+  rateLimitWaitSeconds: '{count} 秒',
+  /** Rate-limit wait unit: minutes. */
+  rateLimitWaitMinutes: '{count} 分钟',
+  /** Rate-limit wait unit: hours. */
+  rateLimitWaitHours: '{count} 小时',
   /** Network/transport failure. */
   networkError: '网络错误，服务暂时不可达。',
   /** GitHub auth failure. */
@@ -318,6 +344,45 @@ export const zh = {
   removeStep2: '再次确认删除？此操作不可撤销。',
   /** Removal in-flight state. */
   removing: '正在删除…',
+  /** Refresh action of the GitHub result list (forces a cache-bypassing read). */
+  refreshButton: '刷新',
+  /** Refresh action of the open repository detail view. */
+  detailRefreshButton: '刷新详情',
+  /** Access-token panel state: no token is configured yet. */
+  tokenUnconfigured: '未配置',
+  /** Access-token panel state: a token is configured and writable. */
+  tokenConfigured: '已配置',
+  /** Access-token input label and placeholder. */
+  tokenInputLabel: 'GitHub 访问令牌',
+  /** Access-token save action. */
+  tokenSaveButton: '保存',
+  /** Access-token clear action. */
+  tokenClearButton: '清除',
+  /** Access-token panel in-flight state (read or write). */
+  tokenSaving: '正在更新令牌…',
+  /** Access-token panel load failure. */
+  tokenLoadFailed: '暂时无法读取访问令牌状态。',
+  /** Status line: which reference is effective, plus its layer and whether set. */
+  tokenStatusLine: '生效引用：{ref} · {source} · {state}',
+  /**
+   * State line of an UNCONFIGURED deployment. Deliberately spells out that a
+   * write targets this exact reference, and that setting GITHUB_TOKEN alone is
+   * not equivalent — otherwise a deployment resolving only GITHUB_TOKEN would
+   * look unconfigured while a request is in fact authenticated.
+   */
+  tokenSourceHint: '尚未配置令牌：可直接在下方填入，保存后会写入引用 {ref}；仅设置 GITHUB_TOKEN 时该引用不生效。',
+  /** Guidance of the read-only launch environment. */
+  tokenEnvHint: '令牌由启动环境提供且不可修改：请先在启动 dsh 的 shell 中解除环境变量 {ref} 并重启 dsh，之后才能在此保存或清除。',
+  /** Success line after a committed save. */
+  tokenSaved: '令牌已保存，后续 GitHub 请求立即生效。',
+  /** Success line after a committed clear. */
+  tokenCleared: '令牌已清除。',
+  /** Failure copy: the stored value cannot be used (empty or malformed). */
+  tokenErrorBadRequest: '令牌无效（不能为空）：请填入真实的访问令牌，或使用「清除」。',
+  /** Failure copy: no write/clear is possible in this deployment or layer. */
+  tokenErrorUnavailable: '当前令牌无法在此保存或清除：它来自只读层，或本部署未挂载凭据服务。',
+  /** Generic access-token failure with the wire code. */
+  tokenErrorWithCode: '访问令牌操作失败（{code}）。',
 } satisfies Record<string, string>
 
 /** Plugin-market UI locale key union (zh is the key source). */
@@ -329,6 +394,12 @@ export const en: Record<MarketManageLocaleKey, string> = {
   tabsLabel: 'Plugin market views',
   tabLocal: 'Local repository',
   tabGithub: 'GitHub',
+  tabToken: 'Access token',
+  tokenSourceEnv: 'launch environment',
+  tokenSourceFile: 'credential store',
+  tokenSourceProjectEnv: 'project .env',
+  tokenSourceUserEnv: 'user .env',
+  tokenSourceOther: 'another source',
   loading: 'Reading managed plugins…',
   error: 'Plugins are temporarily unavailable.',
   retry: 'Retry',
@@ -372,6 +443,14 @@ export const en: Record<MarketManageLocaleKey, string> = {
   searchEmpty: 'No matching plugins found.',
   searchFailed: 'Search failed.',
   rateLimited: 'GitHub rate limit reached; try again later.',
+  /**
+   * Optional wait line appended to the rate-limit copy when the wire failure
+   * carries a suggested wait (`details.retryAfterMs`).
+   */
+  rateLimitWait: 'About {wait} left to wait.',
+  rateLimitWaitSeconds: '{count} seconds',
+  rateLimitWaitMinutes: '{count} minutes',
+  rateLimitWaitHours: '{count} hours',
   networkError: 'Network error; the service is unreachable.',
   githubAuthError: 'GitHub request rejected (auth problem).',
   githubNotFound: 'The GitHub repository was not found or has been removed.',
@@ -480,4 +559,21 @@ export const en: Record<MarketManageLocaleKey, string> = {
   removeStep1: 'Removes {name} sources and record from the local repository and stops its running entry.',
   removeStep2: 'Remove again? This cannot be undone.',
   removing: 'Removing…',
+  refreshButton: 'Refresh',
+  detailRefreshButton: 'Refresh details',
+  tokenUnconfigured: 'Not configured',
+  tokenConfigured: 'Configured',
+  tokenInputLabel: 'GitHub access token',
+  tokenSaveButton: 'Save',
+  tokenClearButton: 'Clear',
+  tokenSaving: 'Updating the token…',
+  tokenLoadFailed: 'The access-token status is temporarily unavailable.',
+  tokenStatusLine: 'Effective reference: {ref} · {source} · {state}',
+  tokenSourceHint: 'No token is configured yet: enter one below and it is written to {ref}. Setting only GITHUB_TOKEN does not make that reference effective.',
+  tokenEnvHint: 'The token comes from the launch environment and cannot be modified: first unset {ref} in the shell that starts dsh and restart dsh, then you can save or clear a token here.',
+  tokenSaved: 'Token saved; the next GitHub request uses it.',
+  tokenCleared: 'Token cleared.',
+  tokenErrorBadRequest: 'The token is not usable (it must not be empty): enter a real access token, or use Clear.',
+  tokenErrorUnavailable: 'This token cannot be saved or cleared here: it comes from a read-only layer, or this deployment mounts no credential service.',
+  tokenErrorWithCode: 'The access-token operation failed ({code}).',
 }

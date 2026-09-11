@@ -8,7 +8,8 @@
  *   { "method": "status" | "listManaged" | "setEnabled" | "setClassification"
  *       | "requestRemove" | "confirmRemove" | "search" | "repositoryDetail"
  *       | "previewInstall" | "prepareDownload" | "classifyDownload"
- *       | "commitDownload" | "cancelDownload",
+ *       | "commitDownload" | "cancelDownload"
+ *       | "tokenStatus" | "saveGitHubToken" | "clearGitHubToken",
  *     "args": { ... } }
  *   → { "ok": true, "value": ... }
  *   | { "ok": false, "error": { "code", "message", "details" } }
@@ -25,6 +26,8 @@ import type {
   DownloadCommit,
   DownloadPreparation,
   GitHubSearchPage,
+  GitHubTokenSource,
+  GitHubTokenUpdateResult,
   GithubRefKind,
   ManagedPluginList,
   MarketStatus,
@@ -81,6 +84,27 @@ export function unwrap<T>(result: MarketCallResult<T>): T {
   throw new MarketCallFailure(result.error)
 }
 
+/**
+ * Read-only GitHub access-token status as the web channel transports it.
+ *
+ * The shared contract (`GitHubTokenStatus` in `src/types.ts`) types `ref` as the
+ * credential seam's branded `CredentialRef`; the wire carries the plain string
+ * the brand wraps (the seam's own wire rule), so this face pins the DECODED
+ * shape the browser half actually receives. Rendering and comparing the
+ * reference is therefore a plain string operation on this face, with no need to
+ * cross-face cast or to reach for the brand's runtime helper.
+ */
+export interface MarketTokenStatus {
+  /** Whether resolving the effective reference would currently return a value. */
+  readonly configured: boolean
+  /** Layer currently supplying the token; absent while unconfigured. */
+  readonly source?: GitHubTokenSource
+  /** Whether the active provider can write (and clear) the effective reference. */
+  readonly writable: boolean
+  /** Effective reference name (`DSH_GITHUB_TOKEN` preferred, then the raw one). */
+  readonly ref: string
+}
+
 /** Wire envelope as parsed from the HTTP body (typed locally, asserted below). */
 type WireEnvelope =
   | { readonly ok: true; readonly value: unknown }
@@ -134,16 +158,26 @@ export async function confirmRemove(
   return post<RemoveOutcome>('confirmRemove', { key, token })
 }
 
-/** GitHub topic search for dsh plugins. */
+/**
+ * GitHub topic search for dsh plugins.
+ *
+ * `refresh` is the page's EXPLICIT refresh: it is forwarded so the host engine
+ * bypasses its read-only TTL cache for this one call. Omitting it (the default)
+ * keeps the cached behavior exactly as before, page after page.
+ */
 export async function search(
   keywords: string | null,
   perPage?: number,
   page?: number,
+  refresh?: boolean,
 ): Promise<MarketCallResult<GitHubSearchPage>> {
   const args: Record<string, unknown> = {}
   if (keywords !== null && keywords !== undefined) args.keywords = keywords
   if (perPage !== undefined) args.perPage = perPage
   if (page !== undefined) args.page = page
+  // Only a real `true` travels: the legacy call serializes no `refresh` key at
+  // all, so an older host sees precisely the request it always saw.
+  if (refresh === true) args.refresh = true
   return post<GitHubSearchPage>('search', args)
 }
 
@@ -151,11 +185,17 @@ export async function search(
  * One aggregated repository detail read: repository metadata, branch/tag name
  * listings and the raw README, fetched by the Host in parallel (see
  * {@link RepositoryDetail}).
+ *
+ * `refresh` skips the host's read-only TTL cache for every query of the
+ * aggregation (the detail view's explicit refresh).
  */
 export async function repositoryDetail(
   repository: string,
+  refresh?: boolean,
 ): Promise<MarketCallResult<RepositoryDetail>> {
-  return post<RepositoryDetail>('repositoryDetail', { repository })
+  const args: { repository: string; refresh?: boolean } = { repository }
+  if (refresh === true) args.refresh = true
+  return post<RepositoryDetail>('repositoryDetail', args)
 }
 
 /**
@@ -231,6 +271,40 @@ export async function commitDownload(
  */
 export async function cancelDownload(token: string): Promise<MarketCallResult<boolean>> {
   return post<boolean>('cancelDownload', { token })
+}
+
+/**
+ * Read the GitHub access-token status of this deployment (configured / source /
+ * writable / effective reference). No secret is involved, so this is safe to
+ * call before any repository exists; a deployment with no credential seam
+ * mounted answers the stable `github/token-unavailable` code instead.
+ */
+export async function tokenStatus(): Promise<MarketCallResult<MarketTokenStatus>> {
+  return post<MarketTokenStatus>('tokenStatus', {})
+}
+
+/**
+ * Store one GitHub token in the credential seam's writable layer. The host
+ * refuses an empty value with `github/bad-request` (never writing a blank) and
+ * refuses a read-only launch environment with `github/token-unavailable`; the
+ * answer is the status re-read after a committed write, plus the cache report.
+ */
+export async function saveGitHubToken(
+  value: string | null,
+): Promise<MarketCallResult<GitHubTokenUpdateResult>> {
+  // The value is forwarded as-is: coercing it here would turn a missing value
+  // into the literal string "null" and store a bogus bearer token. The host's
+  // guard owns the refusal.
+  return post<GitHubTokenUpdateResult>('saveGitHubToken', { value })
+}
+
+/**
+ * Remove the effective GitHub token from the credential seam's writable layer
+ * and answer the status re-read. A read-only launch environment is refused
+ * exactly like a save (`github/token-unavailable`).
+ */
+export async function clearGitHubToken(): Promise<MarketCallResult<GitHubTokenUpdateResult>> {
+  return post<GitHubTokenUpdateResult>('clearGitHubToken', {})
 }
 
 async function post<T>(method: string, args: object): Promise<MarketCallResult<T>> {

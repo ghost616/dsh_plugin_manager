@@ -12,6 +12,9 @@
 
 import { vi } from 'vitest'
 import type {
+  GitHubTokenSource,
+  GitHubTokenStatus,
+  GitHubTokenUpdateResult,
   GithubRefKind,
   ManagedPluginPhase,
   ManagedPluginList,
@@ -653,6 +656,50 @@ export function makeRemoveRequest(key: string, token = 'rm-token') {
   return { key, token, expiresAt: '2026-01-02T00:00:00.000Z' }
 }
 
+/* ------------------------------------------------------------------------ */
+/* Access-token fixtures (credential seam)                                  */
+/* ------------------------------------------------------------------------ */
+
+export interface TokenStatusSeed {
+  /** Whether the effective reference currently resolves to a value. */
+  configured?: boolean
+  /** Layer supplying the token; omitted = configured through an unnamed layer. */
+  source?: GitHubTokenSource
+  /** Whether the active provider can write the effective reference. */
+  writable?: boolean
+  /** Effective reference name (the wire carries the plain string). */
+  ref?: string
+}
+
+/**
+ * Build one GitHubTokenStatus-shaped fixture.
+ *
+ * The shape is the SHARED contract from `src/types.ts`: only `ref` differs at
+ * the type level, because that face types it as the credential seam's branded
+ * `CredentialRef` while the wire carries the plain string the brand wraps. The
+ * brand is a compile-time phantom with no runtime marker (the seam's own wire
+ * rule), so a wire fixture is a structural object plus that one assertion —
+ * exactly how the browser half's channel face transports it.
+ */
+export function makeTokenStatus(seed: TokenStatusSeed = {}): GitHubTokenStatus {
+  return {
+    configured: seed.configured ?? false,
+    ...(seed.source === undefined ? {} : { source: seed.source }),
+    // An unconfigured status is writable by default (the head reference can be
+    // written); the read-only launch environment is the explicit `false`.
+    writable: seed.writable ?? true,
+    ref: (seed.ref ?? 'DSH_GITHUB_TOKEN') as GitHubTokenStatus['ref'],
+  }
+}
+
+/** Build one GitHubTokenUpdateResult-shaped wire fixture. */
+export function makeTokenUpdate(
+  seed: TokenStatusSeed = {},
+  cacheCleared = true,
+): GitHubTokenUpdateResult {
+  return { status: makeTokenStatus(seed), cacheCleared }
+}
+
 /**
  * Default prop mocks for the full settings page (each override-able).
  *
@@ -685,6 +732,16 @@ export function managePageHarness(overrides: Partial<ManagePluginsTabInjected> =
     classifyDownload: vi.fn(async () => makeVerdict({ outcome: 'classified', classification: 'plugin' })),
     commitDownload: vi.fn(async () => makeCommit({ repository: 'acme/helper' })),
     cancelDownload: vi.fn(async () => true),
+    // Token tab defaults: an unconfigured but writable deployment, so the tab
+    // renders its actionable state and a test that does not care about the
+    // credential seam still gets a clean panel.
+    tokenStatus: vi.fn(async () => makeTokenStatus()),
+    saveToken: vi.fn(async (value: string | null) => makeTokenUpdate({
+      configured: true,
+      source: 'file',
+      ref: 'DSH_GITHUB_TOKEN',
+    }, value !== null)),
+    clearToken: vi.fn(async () => makeTokenUpdate({ configured: false, ref: 'DSH_GITHUB_TOKEN' })),
   } satisfies ManagePluginsTabInjected & Pick<ManagePluginsTabProps, 't' | 'close'>
   const props: ManagePluginsTabProps = { ...mocks, ...overrides }
   return { props, mocks }

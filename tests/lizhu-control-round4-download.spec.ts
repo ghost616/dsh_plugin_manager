@@ -31,6 +31,7 @@ import {
   wireDetailsOf,
 } from '../src/host/control/source.ts'
 import type { MarketSourceDeps } from '../src/host/control/source.ts'
+import { unavailableTokenPort } from '../src/host/control/token.ts'
 import { toRemoteError } from '../lib/types/host/control/gateway.js'
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
 import { key as keyOf, makeSourceOps, testbed } from './support/control-testbed.ts'
@@ -83,6 +84,7 @@ function opsWithLogs(
     detailEngine: bed.engines.detailEngine,
     previewEngine: bed.engines.previewEngine,
     installer: () => port,
+    token: unavailableTokenPort(),
     protection: { isProtectedKey: () => false, isSelfModule: () => false },
     syncRecord: bed.engines.syncRecord,
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -197,11 +199,14 @@ describe('round4: wireDetailsOf normalization (host extras never reach the wire)
       .not.toHaveProperty('swapCompleted')
   })
 
-  it('the Gateway @Remote method set stays the same 13 methods in order', () => {
+  it('the Gateway @Remote method set stays the same methods in declaration order', () => {
     const { gateway } = gatewayWith()
+    // 13 download/control methods plus the three token-surface additions of the
+    // credential round (tokenStatus / saveGitHubToken / clearGitHubToken).
     expect(remoteMethods(gateway).map(entry => entry.method)).toEqual([
       'status', 'listManaged', 'setEnabled', 'requestRemove', 'confirmRemove',
-      'search', 'repositoryDetail', 'previewInstall', 'prepareDownload',
+      'search', 'repositoryDetail', 'tokenStatus', 'saveGitHubToken', 'clearGitHubToken',
+      'previewInstall', 'prepareDownload',
       'classifyDownload', 'commitDownload', 'cancelDownload', 'setClassification',
     ])
   })

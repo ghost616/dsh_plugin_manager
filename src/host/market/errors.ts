@@ -25,6 +25,11 @@ const DEFAULT_MESSAGE: Record<PluginMarketErrorCode, string> = {
   'harness/io': 'An I/O error occurred while preparing the shared harness links.',
   'github/auth':
     'The GitHub request was rejected for missing or invalid credentials.',
+  // Never a silent fallback to the launch environment: the token surface
+  // reports this one code for both the read and the write half instead of
+  // pretending a value was read or written.
+  'github/token-unavailable':
+    'This deployment has no credential seam, so the GitHub token cannot be read or written.',
   'github/rate-limit':
     'The GitHub API rate limit was exceeded. Retry later or configure a token.',
   'github/network':

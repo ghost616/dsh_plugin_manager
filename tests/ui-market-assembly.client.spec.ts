@@ -19,6 +19,7 @@ import {
   makeRepositoryDetail,
   makeSearchPage,
   makeStatus,
+  makeTokenStatus,
   resolveSlotLabel,
   type FakeStoredEntry,
 } from './support/client-platform.ts'
@@ -81,8 +82,8 @@ type InjectedFace = {
   setClassification: (key: string, classification: string) => Promise<unknown>
   requestRemove: (key: string) => Promise<unknown>
   confirmRemove: (key: string, token: string) => Promise<unknown>
-  search: (keywords: string, page: number) => Promise<unknown>
-  repositoryDetail: (repository: string) => Promise<unknown>
+  search: (keywords: string, page: number, refresh?: boolean) => Promise<unknown>
+  repositoryDetail: (repository: string, refresh?: boolean) => Promise<unknown>
   previewInstall: (repository: string, version?: string | null, refKind?: 'branch' | 'tag') => Promise<unknown>
   prepareDownload: (
     repository: string,
@@ -93,6 +94,9 @@ type InjectedFace = {
   classifyDownload: (token: string) => Promise<unknown>
   commitDownload: (token: string, classification: string) => Promise<unknown>
   cancelDownload: (token: string) => Promise<unknown>
+  tokenStatus: () => Promise<unknown>
+  saveToken: (value: string | null) => Promise<unknown>
+  clearToken: () => Promise<unknown>
 }
 
 function faceOf(entry: FakeStoredEntry): InjectedFace {
@@ -134,6 +138,7 @@ describe('plugin-market browser half assembly', () => {
       'status', 'list', 'setEnabled', 'requestRemove', 'confirmRemove',
       'search', 'repositoryDetail', 'previewInstall', 'prepareDownload', 'classifyDownload',
       'commitDownload', 'cancelDownload', 'setClassification',
+      'tokenStatus', 'saveToken', 'clearToken',
     ]) {
       expect(typeof (face as Record<string, unknown>)[member]).toBe('function')
     }
@@ -196,6 +201,25 @@ describe('plugin-market browser half assembly', () => {
         method: 'setClassification',
         args: { key: 'gh-octocat-demo', classification: 'other' },
       },
+      {
+        // Access-token status (never carried by a rejected call: no seam is
+        // simply the `github/token-unavailable` answer).
+        call: () => face.tokenStatus(),
+        method: 'tokenStatus',
+        args: {},
+      },
+      {
+        // Store one token in the credential seam's writable layer.
+        call: () => face.saveToken('ghp_secret'),
+        method: 'saveGitHubToken',
+        args: { value: 'ghp_secret' },
+      },
+      {
+        // Remove the effective token.
+        call: () => face.clearToken(),
+        method: 'clearGitHubToken',
+        args: {},
+      },
     ]
     for (const page of pages) {
       await page.call()
@@ -230,6 +254,71 @@ describe('plugin-market browser half assembly', () => {
       method: 'prepareDownload',
       args: { repository: 'octocat/demo', confirmToken: 'tok', version: 'main' },
     })
+  })
+
+  it('serializes the refresh flag only for an explicit refresh', async () => {
+    const { slots } = await bench()
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: makeSearchPage([]) }))
+    stubChannel(fetchMock)
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
+
+    // Ambient reads (the empty-keyword browse, paging, a retry) keep exactly the
+    // request an older host always saw: no `refresh` key at all.
+    await face.search('agents', 2)
+    await face.repositoryDetail('octocat/demo')
+    const [url, init] = fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(url).toBe(MARKET_CONTROL_WEB_PATH)
+    expect(JSON.parse(String(init.body))).toEqual({
+      method: 'repositoryDetail',
+      args: { repository: 'octocat/demo' },
+    })
+    const [, firstInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(firstInit.body))).toEqual({
+      method: 'search',
+      args: { keywords: 'agents', perPage: 10, page: 2 },
+    })
+
+    // The explicit refresh travels as `refresh: true`, so the host bypasses its
+    // read-only TTL cache for that one call.
+    await face.search('agents', 2, true)
+    await face.repositoryDetail('octocat/demo', true)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    const [, refreshedInit] = fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(String(refreshedInit.body))).toEqual({
+      method: 'repositoryDetail',
+      args: { repository: 'octocat/demo', refresh: true },
+    })
+    const [, refreshedSearch] = fetchMock.mock.calls[2] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(refreshedSearch.body))).toEqual({
+      method: 'search',
+      args: { keywords: 'agents', perPage: 10, page: 2, refresh: true },
+    })
+  })
+
+  it('forwards the token write value verbatim, including an empty one', async () => {
+    const { slots } = await bench()
+    const fetchMock = vi.fn(async () => jsonResponse({
+      ok: true,
+      value: { status: makeTokenStatus({ configured: false }), cacheCleared: false },
+    }))
+    stubChannel(fetchMock)
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
+
+    await face.saveToken('ghp_secret')
+    await face.saveToken('')
+    await face.saveToken(null)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const bodies = fetchMock.mock.calls.map(
+      (call) => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)),
+    )
+    // The channel never coerces: a blank or a missing value reaches the host's
+    // guard as-is, which answers the stable `github/bad-request` without writing
+    // anything (a coercion would store the literal token "null").
+    expect(bodies[0]).toEqual({ method: 'saveGitHubToken', args: { value: 'ghp_secret' } })
+    expect(bodies[1]).toEqual({ method: 'saveGitHubToken', args: { value: '' } })
+    expect(bodies[2]).toEqual({ method: 'saveGitHubToken', args: { value: null } })
   })
 
   it('translates wire failures into typed failures with the carrier code', async () => {

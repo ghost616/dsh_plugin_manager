@@ -7,12 +7,12 @@
  *   `locale` (LocaleRuntime); the row loads only while both are live.
  * - Registers its dictionaries under one namespace, then contributes one
  *   top-level `settings.section` page (id `market`) behind the settings
- *   shell's declaration. The page owns its own two tabs in-page (local
- *   repository / GitHub), so nothing is contributed to `settings.plugins.tab`
- *   and no second entry point appears under Plugins. Registration and unload
- *   are effects: the dictionaries are bound to this fiber and the page rides
- *   `ctx.slots.inject`, so a settings-shell remount re-registers the page and
- *   an unload removes it.
+ *   shell's declaration. The page owns its own three tabs in-page (local
+ *   repository / GitHub / access token), so nothing is contributed to
+ *   `settings.plugins.tab` and no second entry point appears under Plugins.
+ *   Registration and unload are effects: the dictionaries are bound to this
+ *   fiber and the page rides `ctx.slots.inject`, so a settings-shell remount
+ *   re-registers the page and an unload removes it.
  * - The channel is never touched at apply time: only closures are installed
  *   and the tab calls the control service lazily through the web channel
  *   (`src/client/channel.ts`), branching on `ok`/`code` at the call site.
@@ -32,6 +32,7 @@ import type {
   DownloadCommit,
   DownloadPreparation,
   GitHubSearchPage,
+  GitHubTokenUpdateResult,
   GithubRefKind,
   ManagedPluginList,
   MarketStatus,
@@ -43,9 +44,11 @@ import type {
   RemoveRequest,
   RepositoryDetail,
 } from '../types.ts'
+import type { MarketTokenStatus } from './channel.ts'
 import {
   cancelDownload as channelCancelDownload,
   classifyDownload as channelClassifyDownload,
+  clearGitHubToken as channelClearGitHubToken,
   commitDownload as channelCommitDownload,
   confirmRemove as channelConfirmRemove,
   listManaged,
@@ -53,10 +56,12 @@ import {
   previewInstall as channelPreviewInstall,
   repositoryDetail as channelRepositoryDetail,
   requestRemove as channelRequestRemove,
+  saveGitHubToken as channelSaveGitHubToken,
   search as channelSearch,
   setClassification as channelSetClassification,
   setEnabled,
   status as channelStatus,
+  tokenStatus as channelTokenStatus,
   unwrap,
 } from './channel.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
@@ -114,12 +119,12 @@ export function apply(ctx: Context): void {
       return unwrap(await channelConfirmRemove(key, token))
     }
   const searchRecord: ManagePluginsTabInjected['search'] =
-    async (keywords: string, page: number): Promise<GitHubSearchPage> => {
-      return unwrap(await channelSearch(keywords, SEARCH_PAGE_SIZE, page))
+    async (keywords: string, page: number, refresh?: boolean): Promise<GitHubSearchPage> => {
+      return unwrap(await channelSearch(keywords, SEARCH_PAGE_SIZE, page, refresh))
     }
   const repositoryDetailRecord: ManagePluginsTabInjected['repositoryDetail'] =
-    async (repository: string): Promise<RepositoryDetail> => {
-      return unwrap(await channelRepositoryDetail(repository))
+    async (repository: string, refresh?: boolean): Promise<RepositoryDetail> => {
+      return unwrap(await channelRepositoryDetail(repository, refresh))
     }
   const previewInstallRecord: ManagePluginsTabInjected['previewInstall'] =
     async (repository: string, version?: string | null, refKind?: GithubRefKind): Promise<PluginInstallReview> => {
@@ -146,6 +151,18 @@ export function apply(ctx: Context): void {
     async (token: string): Promise<boolean> => {
       return unwrap(await channelCancelDownload(token))
     }
+  const tokenStatusRecord: ManagePluginsTabInjected['tokenStatus'] =
+    async (): Promise<MarketTokenStatus> => {
+      return unwrap(await channelTokenStatus())
+    }
+  const saveTokenRecord: ManagePluginsTabInjected['saveToken'] =
+    async (value: string | null): Promise<GitHubTokenUpdateResult> => {
+      return unwrap(await channelSaveGitHubToken(value))
+    }
+  const clearTokenRecord: ManagePluginsTabInjected['clearToken'] =
+    async (): Promise<GitHubTokenUpdateResult> => {
+      return unwrap(await channelClearGitHubToken())
+    }
   const injected = (): ManagePluginsTabInjected => ({
     status,
     list,
@@ -160,6 +177,9 @@ export function apply(ctx: Context): void {
     classifyDownload: classifyDownloadRecord,
     commitDownload: commitDownloadRecord,
     cancelDownload: cancelDownloadRecord,
+    tokenStatus: tokenStatusRecord,
+    saveToken: saveTokenRecord,
+    clearToken: clearTokenRecord,
   })
 
   // One top-level settings page; it is the only entry point of this plugin

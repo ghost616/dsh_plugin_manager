@@ -135,7 +135,7 @@ describe('[离朱] 1. 整页高度自适应父容器', () => {
     expect(page.style.minHeight).toBe('0px')
 
     const panels = Array.from(host.querySelectorAll<HTMLElement>('[data-market-panel]'))
-    expect(panels.map(panel => panel.getAttribute('data-market-panel'))).toEqual(['local', 'github'])
+    expect(panels.map(panel => panel.getAttribute('data-market-panel'))).toEqual(['local', 'github', 'token'])
     for (const panel of panels) {
       expect(panel.style.flex).toBe('1 1 auto')
       expect(panel.style.minHeight).toBe('0px')

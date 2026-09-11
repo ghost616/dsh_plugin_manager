@@ -23,6 +23,8 @@ import {
 } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   GitHubSearchPage,
+  GitHubTokenStatus,
+  GitHubTokenUpdateResult,
   ManagedPluginList,
   MarketStatus,
   PluginInstallReview,
@@ -41,6 +43,22 @@ import { requireClassification, wireDetailsOf, type DownloadClassification, type
 /** The Cordis service key (and wire namespace) of the gateway. */
 export const MARKET_CONTROL_SERVICE_KEY = 'marketControl'
 
+/**
+ * Explicit read options of the browse/detail surface, as they cross the Remote
+ * wire (the host client's own `GitHubReadOptions` shape).
+ *
+ * They are declared here rather than imported from the host engine so the wire
+ * contract of the gateway is readable on its own; the fields are structurally
+ * identical, so a caller of either side compiles against both. `refresh` is the
+ * page's explicit "go to GitHub again" flag and `signal` is a caller-provided
+ * cancellation token (only meaningful across the in-process Remote carrier —
+ * a JSON transport cannot carry an `AbortSignal`).
+ */
+export interface GitHubReadWireOptions {
+  readonly refresh?: boolean
+  readonly signal?: AbortSignal
+}
+
 /** Live access the gateway needs from its activation context. */
 export interface MarketControllerGatewayDeps {
   /** The record-driven controller, or null while the market is idle. */
@@ -49,6 +67,19 @@ export interface MarketControllerGatewayDeps {
   readonly repository: () => MarketRepository | null
   /** Source operations (search / preview / install). */
   readonly source: MarketSourceOperations
+  /**
+   * Drop the host GitHub client's read-only TTL cache and report whether
+   * anything was actually dropped.
+   *
+   * REQUIRED, like `source.token`: every token write must invalidate what the
+   * market memoized, or the next GitHub call would keep answering from the
+   * cache while the surface claims the new token is live. The report is the
+   * boolean `cacheCleared` the wire carries — `false` only means nothing was
+   * memoized at that moment, never that the old token is still in effect. An
+   * assembly whose engine has no cache wires a `() => false` reporter instead
+   * of omitting it, so "forgot to clear" cannot be expressed.
+   */
+  readonly clearGitHubCache: () => boolean
 }
 
 /**
@@ -198,23 +229,88 @@ export class MarketControllerGateway extends TypertRemoteService {
 
   /** GitHub topic search (dsh-plugin); page is 1-based (null ⇒ page 1). */
   @Remote('search')
-  async search(keywords: string | null, perPage: number | null, page: number | null): Promise<GitHubSearchPage> {
+  async search(
+    keywords: string | null,
+    perPage: number | null,
+    page: number | null,
+    options?: GitHubReadWireOptions,
+  ): Promise<GitHubSearchPage> {
     try {
       return await this.deps.source.search({
         ...(keywords === null || keywords === undefined ? {} : { keywords }),
         ...(perPage === null || perPage === undefined ? {} : { perPage }),
         page: page === null || page === undefined ? 1 : page,
+        ...(options?.refresh === undefined ? {} : { refresh: options.refresh }),
       })
     } catch (error) {
       throw toRemoteError(error)
     }
   }
 
-  /** Aggregated detail (metadata + branches + tags + README) of one repository. */
+  /**
+   * Aggregated detail (metadata + branches + tags + README) of one repository.
+   * `options.refresh` skips the host's read-only TTL cache for all four queries
+   * (the detail page's explicit refresh); omitting it keeps the cached answer.
+   */
   @Remote('repositoryDetail')
-  async repositoryDetail(repository: string): Promise<RepositoryDetail> {
+  async repositoryDetail(
+    repository: string,
+    options?: GitHubReadWireOptions,
+  ): Promise<RepositoryDetail> {
     try {
-      return await this.deps.source.repositoryDetail(repository)
+      // exactOptionalPropertyTypes: never forward an explicit `undefined` key —
+      // an absent option has to stay absent so the engine keeps its default.
+      return await this.deps.source.repositoryDetail(repository, {
+        ...(options?.refresh === undefined ? {} : { refresh: options.refresh }),
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      })
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /**
+   * Read-only GitHub token status (configured / source / writable / effective
+   * reference). Deliberately answerable while the market is idle: the token is
+   * a deployment-wide fact, so a settings page can show it — and receive the
+   * stable `github/token-unavailable` when this deployment mounted no
+   * credential seam — before any repository exists.
+   */
+  @Remote('tokenStatus')
+  async tokenStatus(): Promise<GitHubTokenStatus> {
+    try {
+      return await this.deps.source.tokenStatus()
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /**
+   * Save one GitHub token through the credential seam and answer the status
+   * re-read after the write (plus the cache report). An empty value is
+   * `github/bad-request` and a read-only launch environment is
+   * `github/token-unavailable`; nothing is written in either case.
+   */
+  @Remote('saveGitHubToken')
+  async saveGitHubToken(value: string | null): Promise<GitHubTokenUpdateResult> {
+    try {
+      const status = await this.deps.source.saveGitHubToken(value)
+      return { status, cacheCleared: this.deps.clearGitHubCache() }
+    } catch (error) {
+      throw toRemoteError(error)
+    }
+  }
+
+  /**
+   * Clear the GitHub token through the credential seam and answer the status
+   * re-read after the removal (plus the cache report). A read-only launch
+   * environment is refused exactly like a save.
+   */
+  @Remote('clearGitHubToken')
+  async clearGitHubToken(): Promise<GitHubTokenUpdateResult> {
+    try {
+      const status = await this.deps.source.clearGitHubToken()
+      return { status, cacheCleared: this.deps.clearGitHubCache() }
     } catch (error) {
       throw toRemoteError(error)
     }

@@ -3,8 +3,13 @@ import { describe, expect, it } from 'vitest'
 import {
   ANALYSIS_OUTPUT_MAX_LENGTH,
   ANALYSIS_REASON_MAX_LENGTH,
+  CREDENTIALS_GITHUB_TOKEN_REFS,
+  GITHUB_CACHE_TTL_MS,
   GITHUB_LIST_MAX_PAGES,
   GITHUB_LIST_PAGE_SIZE,
+  GITHUB_RATE_LIMIT_MAX_BACKOFF_MS,
+  GITHUB_TOKEN_FALLBACK_REF,
+  GITHUB_TOKEN_REF,
   MARKET_CONFIG_DEFAULTS,
   MarketRepositoryService,
   GitHubMarket,
@@ -13,6 +18,10 @@ import {
   SNAPSHOT_ENTRY_LIMIT,
   buildAnalyzePrompt,
   collectCheckoutSnapshot,
+  credentialsTokenProvider,
+  envTokenProvider,
+  githubFetchWithRetry,
+  hasCredentialsSeam,
   isManagedLocalDirName,
   parseAnalysisOutput,
   parseRefSeg,
@@ -20,9 +29,11 @@ import {
   pluginKeyForGithubRef,
   probeCheckoutEntry,
   refSegOf,
+  requireCredentials,
   requireMarketLlm,
   resolveAnalysisDistribution,
   resolveAnalysisVerdict,
+  resolveGitHubToken,
   resolveInstallTarget,
   normalizeMarketConfig,
   openMarketRepository,
@@ -49,6 +60,24 @@ describe('plugin-market-host public export surface', () => {
     expect(typeof GitHubMarket).toBe('function')
     expect(GITHUB_LIST_PAGE_SIZE).toBe(100)
     expect(GITHUB_LIST_MAX_PAGES).toBe(5)
+  })
+
+  it('re-exports the cache/backoff knobs and the retrying fetch primitive', () => {
+    // Fixed deployment policy: a 10-minute reuse window and a 5-second backoff.
+    expect(GITHUB_CACHE_TTL_MS).toBe(10 * 60 * 1000)
+    expect(GITHUB_RATE_LIMIT_MAX_BACKOFF_MS).toBe(5_000)
+    expect(typeof githubFetchWithRetry).toBe('function')
+  })
+
+  it('re-exports the credential-driven token source and its seam gate', () => {
+    expect(typeof credentialsTokenProvider).toBe('function')
+    expect(typeof resolveGitHubToken).toBe('function')
+    expect(typeof requireCredentials).toBe('function')
+    expect(typeof hasCredentialsSeam).toBe('function')
+    // Precedence lives in the exported reference pair: DSH_GITHUB_TOKEN first.
+    expect([...CREDENTIALS_GITHUB_TOKEN_REFS]).toEqual([GITHUB_TOKEN_REF, GITHUB_TOKEN_FALLBACK_REF])
+    // The environment reader stays available as the harness-free default.
+    expect(typeof envTokenProvider).toBe('function')
   })
 
   it('re-exports the v2 directory/key helpers from the market index', () => {

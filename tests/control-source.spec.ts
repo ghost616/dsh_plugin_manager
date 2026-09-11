@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import { MarketError } from '../src/host/market/errors.ts'
 import { pluginKeyForGithubRef } from '../src/host/market/keys.ts'
 import { REMOVE_CONFIRM_TTL_MS } from '../src/host/control/controller.ts'
@@ -11,7 +12,19 @@ import {
   DOWNLOAD_REASON_UNKNOWN,
 } from '../src/host/control/source.ts'
 import type { DownloadCommit, MarketSourceOperations } from '../src/host/control/source.ts'
-import { fakeAnalysisEngine, fakeDistribution, key, makeSourceOps, refDirName, testbed } from './support/control-testbed.ts'
+import { buildCredentialTokenPort, type GitHubTokenPort } from '../src/host/control/token.ts'
+import {
+  FakeCredentialStore,
+  FakeTokenPort,
+  GITHUB_TOKEN_FALLBACK_REF_NAME,
+  GITHUB_TOKEN_REF_NAME,
+  fakeAnalysisEngine,
+  fakeDistribution,
+  key,
+  makeSourceOps,
+  refDirName,
+  testbed,
+} from './support/control-testbed.ts'
 
 /** Repository slug → derived key convention under test. */
 const SLUG = 'octocat/demo-plugin'
@@ -60,6 +73,8 @@ function ops(
     isProtectedKey?: (k: string) => boolean
     /** Download-stage TTL (from the successful prepare); default 10 min. */
     downloadTtlMs?: number
+    /** Token port; defaults to the assembly-without-credential-seam answer. */
+    token?: GitHubTokenPort
   } = {},
 ) {
   return makeSourceOps(
@@ -70,6 +85,7 @@ function ops(
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
       ...(options.isProtectedKey === undefined ? {} : { isProtectedKey: options.isProtectedKey }),
+      ...(options.token === undefined ? {} : { token: options.token }),
     },
   )
 }
@@ -93,7 +109,6 @@ describe('MarketSourceOperations search', () => {
     expect(page).toEqual({ totalCount: 0, items: [] })
     expect(bed.engines.searchCalls).toEqual([{ keywords: 'agents', perPage: 3, page: 2 }])
   })
-
   it('defaults an omitted page to 1', async () => {
     const bed = testbed()
     const source = ops(bed)
@@ -135,10 +150,27 @@ describe('MarketSourceOperations repositoryDetail', () => {
       readme: '# demo plugin\n',
     })
     expect(bed.engines.detailCalls).toEqual([
-      { kind: 'meta', slug: SLUG },
-      { kind: 'branches', slug: SLUG },
-      { kind: 'tags', slug: SLUG },
-      { kind: 'readme', slug: SLUG },
+      { kind: 'meta', slug: SLUG, options: {} },
+      { kind: 'branches', slug: SLUG, options: {} },
+      { kind: 'tags', slug: SLUG, options: {} },
+      { kind: 'readme', slug: SLUG, options: {} },
+    ])
+  })
+
+  it('forwards an explicit refresh to all four detail queries and omits it by default', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    // Default: no refresh key reaches the engine, so the host cache may serve.
+    await source.repositoryDetail(SLUG)
+    expect(bed.engines.detailCalls.every(call => call.options?.refresh === undefined)).toBe(true)
+
+    bed.engines.detailCalls.length = 0
+    await source.repositoryDetail(SLUG, { refresh: true })
+    expect(bed.engines.detailCalls.map(call => call.options)).toEqual([
+      { refresh: true },
+      { refresh: true },
+      { refresh: true },
+      { refresh: true },
     ])
   })
 
@@ -1046,5 +1078,225 @@ describe('MarketSourceOperations v2 refs (refKind)', () => {
     await expect(source.prepareDownload(SLUG, 'tok', 'release', 'v1')).rejects.toMatchObject({ code: 'market/bad-request' })
     expect(bed.engines.previewCalls).toHaveLength(0)
     expect(bed.engines.installCalls).toHaveLength(0)
+  })
+})
+describe('MarketSourceOperations GitHub token surface', () => {
+  /** A source whose token port reads the given credential store. */
+  function tokenSource(seam: FakeCredentialStore): MarketSourceOperations {
+    return ops(testbed(), { token: new FakeTokenPort(seam) })
+  }
+
+  it('answers anonymously-unconfigured while neither reference has a value', async () => {
+    const seam = new FakeCredentialStore()
+    const source = tokenSource(seam)
+    // No repository is configured here on purpose: the token is a
+    // deployment-wide fact, so the status does NOT answer market/idle.
+    await expect(source.tokenStatus()).resolves.toEqual({
+      configured: false,
+      writable: true,
+      ref: GITHUB_TOKEN_REF_NAME,
+    })
+  })
+
+  it('reports the stored file value as the effective reference', async () => {
+    const seam = new FakeCredentialStore()
+    seam.store.set(GITHUB_TOKEN_REF_NAME, 'stored-token')
+    const source = tokenSource(seam)
+    await expect(source.tokenStatus()).resolves.toEqual({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: GITHUB_TOKEN_REF_NAME,
+    })
+  })
+
+  it('prefers DSH_GITHUB_TOKEN over GITHUB_TOKEN and reports the environment as read-only', async () => {
+    const both = new FakeCredentialStore()
+    both.env.set(GITHUB_TOKEN_REF_NAME, 'env-head')
+    both.store.set(GITHUB_TOKEN_FALLBACK_REF_NAME, 'stored-fallback')
+    await expect(tokenSource(both).tokenStatus()).resolves.toEqual({
+      configured: true,
+      source: 'env',
+      writable: false,
+      ref: GITHUB_TOKEN_REF_NAME,
+    })
+
+    const onlyFallback = new FakeCredentialStore()
+    onlyFallback.store.set(GITHUB_TOKEN_FALLBACK_REF_NAME, 'stored-fallback')
+    await expect(tokenSource(onlyFallback).tokenStatus()).resolves.toEqual({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: GITHUB_TOKEN_FALLBACK_REF_NAME,
+    })
+  })
+
+  it('saves to the preferred head reference and answers the status re-read', async () => {
+    const seam = new FakeCredentialStore()
+    const source = tokenSource(seam)
+    const status = await source.saveGitHubToken('fresh-token')
+    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'fresh-token' }])
+    expect(status).toEqual({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: GITHUB_TOKEN_REF_NAME,
+    })
+  })
+
+  it('refuses an empty value (github/bad-request) without touching the seam', async () => {
+    const seam = new FakeCredentialStore()
+    const source = tokenSource(seam)
+    for (const value of ['', null, undefined]) {
+      await expect(source.saveGitHubToken(value)).rejects.toMatchObject({ code: 'github/bad-request' })
+    }
+    expect(seam.setCalls).toEqual([])
+  })
+
+  it('refuses a save while the launch environment supplies the token', async () => {
+    const seam = new FakeCredentialStore()
+    seam.env.set(GITHUB_TOKEN_REF_NAME, 'env-token')
+    const source = tokenSource(seam)
+    const error = await source.saveGitHubToken('ignored').catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'github/token-unavailable' })
+    expect((error as Error).message).toContain('launch environment')
+    // Nothing was written anywhere, and no shadowing copy was created.
+    expect(seam.setCalls).toEqual([])
+    expect(seam.store.has(GITHUB_TOKEN_REF_NAME)).toBe(false)
+  })
+
+  it('clears the effective reference and answers the status re-read', async () => {
+    const seam = new FakeCredentialStore()
+    seam.store.set(GITHUB_TOKEN_REF_NAME, 'stored-token')
+    const source = tokenSource(seam)
+    const status = await source.clearGitHubToken()
+    expect(seam.unsetCalls).toEqual([GITHUB_TOKEN_REF_NAME])
+    expect(status).toEqual({ configured: false, writable: true, ref: GITHUB_TOKEN_REF_NAME })
+  })
+
+  it('refuses a clear while the launch environment supplies the token', async () => {
+    const seam = new FakeCredentialStore()
+    seam.env.set(GITHUB_TOKEN_REF_NAME, 'env-token')
+    const source = tokenSource(seam)
+    await expect(source.clearGitHubToken()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    expect(seam.unsetCalls).toEqual([])
+  })
+
+  it('re-reads the seam on every operation instead of caching a status', async () => {
+    const seam = new FakeCredentialStore()
+    const source = tokenSource(seam)
+    await expect(source.tokenStatus()).resolves.toMatchObject({ configured: false })
+    seam.store.set(GITHUB_TOKEN_REF_NAME, 'appeared-later')
+    await expect(source.tokenStatus()).resolves.toMatchObject({ configured: true, source: 'file' })
+  })
+
+  it('maps a failing seam to github/token-unavailable for read, save and clear', async () => {
+    const seam = new FakeCredentialStore()
+    const port = new FakeTokenPort(seam)
+    const source = ops(testbed(), { token: port })
+    // The port owns the mapping: a seam failure never reaches a caller as the
+    // provider's own error, it becomes the one documented token code (the
+    // production mapping of the same rule is asserted by the assembly spec).
+    port.failure = new Error('credential store offline')
+    const read = await source.tokenStatus().catch((caught: unknown) => caught)
+    expect(read).toMatchObject({ code: 'github/token-unavailable' })
+    expect((read as Error).message).toContain('credential store offline')
+
+    port.failure = new Error('credential store offline')
+    await expect(source.saveGitHubToken('token')).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    port.failure = new Error('credential store offline')
+    await expect(source.clearGitHubToken()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+  })
+
+  it('answers github/token-unavailable when the assembly wired no token port', async () => {
+    // A headless deployment with no credential seam: every token call fails
+    // with the one documented code and the rest of the surface keeps working.
+    const bed = testbed()
+    const source = makeSourceOps(bed.repository, bed.records, bed.engines)
+    await expect(source.tokenStatus()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    await expect(source.saveGitHubToken('token')).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    await expect(source.clearGitHubToken()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    // The unrelated surface is unaffected.
+    await expect(source.search({ keywords: 'demo' })).resolves.toEqual({ totalCount: 0, items: [] })
+  })
+})
+
+describe('credential token port (real seam bridge)', () => {
+  /** A minimal Context double answering the inject-free credentials lookup. */
+  function ctxWith(store: FakeCredentialStore): Context {
+    return { get: (name: string) => (name === 'credentials' ? store : undefined) } as unknown as Context
+  }
+
+  it('refuses an empty value with github/bad-request and never calls the seam', async () => {
+    const store = new FakeCredentialStore()
+    const port = buildCredentialTokenPort(ctxWith(store))
+    for (const value of ['', null, undefined]) {
+      await expect(port.save(value)).rejects.toMatchObject({ code: 'github/bad-request' })
+    }
+    expect(store.setCalls).toEqual([])
+  })
+
+  it('saves into the head reference even while a shadowing fallback is stored', async () => {
+    // The trap this rule exists for: with only `GITHUB_TOKEN` stored, a save
+    // aimed at the EFFECTIVE reference would succeed while the value stayed
+    // effective forever. The write goes to the preferred head instead, so the
+    // store gains a value above the fallback and the status switches to it.
+    const store = new FakeCredentialStore()
+    store.store.set(GITHUB_TOKEN_FALLBACK_REF_NAME, 'stored-fallback')
+    const port = buildCredentialTokenPort(ctxWith(store))
+    const saved = await port.save('ghp_head')
+    expect(store.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_head' }])
+    expect(saved.status).toEqual({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: GITHUB_TOKEN_REF_NAME,
+    })
+    expect(saved.writeRefName).toBe(GITHUB_TOKEN_REF_NAME)
+  })
+
+  it('rejects a read-only provider that is not the launch environment', async () => {
+    // A provider-managed read-only layer (no `env` provenance): still the same
+    // stable code, with the generic read-only explanation.
+    const store = new FakeCredentialStore()
+    const readOnly = {
+      describe: async (ref: string) => (ref === GITHUB_TOKEN_REF_NAME
+        ? { configured: true, source: 'managed', writable: false }
+        : { configured: false, writable: true }),
+      set: async (ref: string, value: string) => { store.setCalls.push({ ref, value }) },
+      unset: async (ref: string) => { store.unsetCalls.push(ref) },
+    }
+    const port = buildCredentialTokenPort({ get: (name: string) => (name === 'credentials' ? readOnly : undefined) } as unknown as Context)
+    const status = await port.status()
+    expect(status.status).toEqual({ configured: true, source: 'managed', writable: false, ref: GITHUB_TOKEN_REF_NAME })
+    const error = await port.save('ghp_any').catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'github/token-unavailable' })
+    expect((error as Error).message).toContain('read-only')
+    await expect(port.clear()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    expect(store.setCalls).toEqual([])
+    expect(store.unsetCalls).toEqual([])
+  })
+
+  it('maps a failing seam onto github/token-unavailable and warns without a value', async () => {
+    const failing = {
+      describe: async () => { throw new Error('store offline') },
+      set: async () => { throw new Error('store offline') },
+      unset: async () => { throw new Error('store offline') },
+    }
+    const warns: string[] = []
+    const port = buildCredentialTokenPort(
+      { get: (name: string) => (name === 'credentials' ? failing : undefined) } as unknown as Context,
+      { logger: { warn: (message) => { warns.push(message) }, error: () => {} } },
+    )
+    const read = await port.status().catch((caught: unknown) => caught)
+    expect(read).toMatchObject({ code: 'github/token-unavailable', details: {} })
+    expect((read as Error).message).toContain('store offline')
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).not.toContain('ghp')
+    // A missing seam is the same stable code, not a crash.
+    const unavailable = buildCredentialTokenPort({ get: () => undefined } as unknown as Context)
+    await expect(unavailable.status()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    await expect(unavailable.save('ghp_any')).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    await expect(unavailable.clear()).rejects.toMatchObject({ code: 'github/token-unavailable' })
   })
 })

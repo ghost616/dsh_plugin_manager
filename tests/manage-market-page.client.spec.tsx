@@ -152,7 +152,7 @@ describe('ManagePluginsTab GitHub tab', () => {
     // On mount with an empty box the tab browses all dsh plugins once (empty
     // keyword); the default mock returns no hits.
     expect(mocks.search).toHaveBeenCalledTimes(1)
-    expect(mocks.search).toHaveBeenCalledWith('', 1)
+    expect(mocks.search).toHaveBeenCalledWith('', 1, undefined)
     expect(panel.querySelector('[data-market-empty]')).not.toBeNull()
     expect(panel.querySelector('[data-detail-back]')).toBeNull()
   })
@@ -173,7 +173,7 @@ describe('ManagePluginsTab GitHub tab', () => {
     const dialog = await openMarket(host)
 
     await searchIn(dialog, 'agents')
-    expect(search).toHaveBeenCalledWith('agents', 1)
+    expect(search).toHaveBeenCalledWith('agents', 1, undefined)
 
     const card = dialog.querySelector('[data-market-card]')
     expect(card).not.toBeNull()
@@ -206,14 +206,14 @@ describe('ManagePluginsTab GitHub tab', () => {
     expect(next.disabled).toBe(false)
 
     await click(next)
-    expect(search).toHaveBeenLastCalledWith('agents', 2)
+    expect(search).toHaveBeenLastCalledWith('agents', 2, undefined)
     count = dialog.querySelector('[data-page-count]')
     expect(count?.textContent).toContain(zh.pagination
       .replace('{current}', '2').replace('{total}', '3').replace('{count}', '25'))
     expect((dialog.querySelector('[data-page-prev]') as HTMLButtonElement).disabled).toBe(false)
 
     await click(dialog.querySelector('[data-page-prev]'))
-    expect(search).toHaveBeenLastCalledWith('agents', 1)
+    expect(search).toHaveBeenLastCalledWith('agents', 1, undefined)
   })
 
   it('shows empty and localized failure states of a search', async () => {
@@ -333,7 +333,7 @@ describe('ManagePluginsTab GitHub tab interactions', () => {
 
     await click(dialog.querySelector('[data-row-details]'))
     await flush()
-    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper')
+    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper', undefined)
 
     // One merged dropdown encodes every ref with its kind; nothing is chosen
     // on entry, so the single download action below stays disabled.
@@ -555,7 +555,7 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     let dialog = await openMarket(host)
 
     expect(search).toHaveBeenCalledTimes(1)
-    expect(search).toHaveBeenCalledWith('', 1)
+    expect(search).toHaveBeenCalledWith('', 1, undefined)
     expect(dialog.querySelector('[data-market-loading]')).toBeNull()
     expect(dialog.querySelector('[data-market-results]')).not.toBeNull()
     expect(dialog.textContent).toContain('helper')
@@ -584,7 +584,7 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     submitForm(input)
     await flush()
     expect(search).toHaveBeenCalledTimes(2)
-    expect(search).toHaveBeenLastCalledWith('agents', 1)
+    expect(search).toHaveBeenLastCalledWith('agents', 1, undefined)
 
     // Clearing must not resubmit: previous results stay and no call is added.
     await typeInto(input, '')
@@ -614,7 +614,7 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     await click(dialog.querySelector('[data-market-retry]'))
     await flush()
     expect(search).toHaveBeenCalledTimes(2)
-    expect(search).toHaveBeenLastCalledWith('', 1)
+    expect(search).toHaveBeenLastCalledWith('', 1, undefined)
     expect(dialog.querySelector('[data-market-error]')).toBeNull()
     expect(dialog.querySelector('[data-market-card]')).not.toBeNull()
   })
@@ -672,7 +672,7 @@ describe('ManagePluginsTab GitHub tab auto browse & scroll zones', () => {
     // No panel grows the page: each one owns the leftover height and may
     // shrink below its content (min-height 0).
     const panels = Array.from(host.querySelectorAll<HTMLElement>('[data-market-panel]'))
-    expect(panels).toHaveLength(2)
+    expect(panels.map(panel => panel.getAttribute('data-market-panel'))).toEqual(['local', 'github', 'token'])
     for (const panel of panels) {
       expect(panel.style.flexGrow).toBe('1')
       expect(panel.style.flexShrink).toBe('1')
@@ -827,7 +827,7 @@ describe('ManagePluginsTab GitHub tab page jump', () => {
     await pressEnter(input!)
     await flush()
 
-    expect(search).toHaveBeenLastCalledWith('agents', 3)
+    expect(search).toHaveBeenLastCalledWith('agents', 3, undefined)
     expect(dialog.querySelector('[data-page-count]')?.textContent)
       .toContain(zh.pagination.replace('{current}', '3').replace('{total}', '3').replace('{count}', '25'))
   })
@@ -844,7 +844,7 @@ describe('ManagePluginsTab GitHub tab page jump', () => {
     await typeInto(input, '99')
     await pressEnter(input)
     await flush()
-    expect(search).toHaveBeenLastCalledWith('agents', 3)
+    expect(search).toHaveBeenLastCalledWith('agents', 3, undefined)
     const expectedLast = zh.pagination.replace('{current}', '3').replace('{total}', '3').replace('{count}', '25')
     expect(dialog.querySelector('[data-page-count]')?.textContent).toContain(expectedLast)
 
@@ -853,7 +853,7 @@ describe('ManagePluginsTab GitHub tab page jump', () => {
     await typeInto(inputAfterJump, '0')
     await pressEnter(inputAfterJump)
     await flush()
-    expect(search).toHaveBeenLastCalledWith('agents', 1)
+    expect(search).toHaveBeenLastCalledWith('agents', 1, undefined)
     const expectedFirst = zh.pagination.replace('{current}', '1').replace('{total}', '3').replace('{count}', '25')
     expect(dialog.querySelector('[data-page-count]')?.textContent).toContain(expectedFirst)
 
@@ -877,7 +877,7 @@ describe('ManagePluginsTab GitHub tab page jump', () => {
     await typeInto(input, '2')
     await click(dialog.querySelector('[data-page-go]'))
     await flush()
-    expect(search).toHaveBeenLastCalledWith('agents', 2)
+    expect(search).toHaveBeenLastCalledWith('agents', 2, undefined)
 
     const single = vi.fn(async () => pageOf(1, seeded(1).slice(0, 10), 10))
     const singleProps = managePageHarness({ search: single })
@@ -913,7 +913,7 @@ describe('ManagePluginsTab GitHub repository detail view', () => {
     await flush()
 
     expect(repositoryDetail).toHaveBeenCalledTimes(1)
-    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper')
+    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper', undefined)
     // The detail view covers the list zone: search header and pagination hide.
     expect(dialog.querySelector('[data-market-search-input]')).toBeNull()
     expect(dialog.querySelector('[data-pagination]')).toBeNull()
@@ -2103,5 +2103,168 @@ describe('ManagePluginsTab dialog exits & keyboard affordances', () => {
     expect(host.querySelector('[data-dialog="install"]')).toBeNull()
     expect(panelOf(host).querySelector('[data-detail-view]')).not.toBeNull()
     expect(host.querySelector('[data-market-tab="github"]')?.getAttribute('aria-selected')).toBe('true')
+  })
+})
+
+describe('ManagePluginsTab explicit refresh & rate-limit wait', () => {
+  it('refreshes the current result page through a cache-bypassing read and then resumes the cache', async () => {
+    const search = vi.fn(async (keywords: string, page: number) =>
+      pageOf(page, [{ repository: `acme/${keywords === '' ? 'browse' : keywords}`, name: 'helper' }], 1))
+    const { props } = managePageHarness({ search })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openMarket(host)
+    await searchIn(panel, 'agents')
+    expect(search).toHaveBeenLastCalledWith('agents', 1, undefined)
+
+    const refresh = panel.querySelector<HTMLButtonElement>('[data-market-refresh]')!
+    expect(refresh.getAttribute('aria-label')).toBe(zh.refreshButton)
+    expect(refresh.disabled).toBe(false)
+    await click(refresh)
+    await flush()
+    // The forced read keeps the keywords and page it is refreshing; `true` is
+    // the refresh flag the channel forwards so the host skips its TTL cache.
+    expect(search).toHaveBeenLastCalledWith('agents', 1, true)
+    expect(refresh.disabled).toBe(false)
+
+    // Only the explicit refresh bypasses the cache: paging afterwards is an
+    // ordinary (cached) read again.
+    const pageOne = vi.fn(async (_keywords: string, page: number) =>
+      pageOf(page, [{ repository: 'acme/helper', name: 'helper' }], 25))
+    const second = managePageHarness({ search: pageOne })
+    const host2 = await renderInto(<ManagePluginsTab {...second.props} />)
+    await flush()
+    const panel2 = await openMarket(host2)
+    await searchIn(panel2, 'agents')
+    await click(panel2.querySelector('[data-page-next]'))
+    await flush()
+    expect(pageOne).toHaveBeenLastCalledWith('agents', 2, undefined)
+    expect(panel2.querySelector('[data-page-count]')?.textContent)
+      .toContain(zh.pagination.replace('{current}', '2').replace('{total}', '3').replace('{count}', '25'))
+  })
+
+  it('refreshes the open repository detail through a cache-bypassing read', async () => {
+    const repositoryDetail = vi.fn(async (repository: string) => makeRepositoryDetail({
+      repository,
+      branches: ['main'],
+      tags: [],
+    }))
+    const search = vi.fn(async () => makeSearchPage([{ repository: 'acme/helper', name: 'helper' }]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openMarket(host)
+    await searchIn(panel, 'helper')
+
+    await click(panel.querySelector('[data-row-details]'))
+    await flush()
+    // Opening the detail is an ordinary read: no refresh flag travels.
+    expect(repositoryDetail).toHaveBeenCalledWith('acme/helper', undefined)
+
+    const refresh = panel.querySelector<HTMLButtonElement>('[data-detail-refresh]')!
+    expect(refresh.getAttribute('aria-label')).toBe(zh.detailRefreshButton)
+    await click(refresh)
+    await flush()
+    expect(repositoryDetail).toHaveBeenCalledTimes(2)
+    expect(repositoryDetail).toHaveBeenLastCalledWith('acme/helper', true)
+
+    // The retry path stays cached: only the refresh control forces a read.
+    const failing = vi.fn(async (repository: string, _refresh?: boolean) => {
+      throw new MarketCallFailure({ code: 'github/network', message: 'down', details: {} })
+    })
+    const second = managePageHarness({ search, repositoryDetail: failing })
+    const host2 = await renderInto(<ManagePluginsTab {...second.props} />)
+    await flush()
+    const panel2 = await openMarket(host2)
+    await searchIn(panel2, 'helper')
+    await click(panel2.querySelector('[data-row-details]'))
+    await flush()
+    await click(panel2.querySelector('[data-detail-retry]'))
+    await flush()
+    expect(failing).toHaveBeenCalledTimes(2)
+    expect(failing).toHaveBeenLastCalledWith('acme/helper', undefined)
+  })
+
+  it('interpolates the wait of a throttled read and keeps the fixed copy without it', async () => {
+    const withWait = vi.fn(async () => {
+      throw new MarketCallFailure({
+        code: 'github/rate-limit',
+        message: 'limited',
+        details: { retryAfterMs: 120_000 },
+      })
+    })
+    const { props } = managePageHarness({ search: withWait })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openMarket(host)
+    await flush()
+    await click(panel.querySelector('[data-market-refresh]'))
+    await flush()
+
+    const error = panel.querySelector<HTMLElement>('[data-market-error]')!
+    expect(error.getAttribute('data-error-code')).toBe('github/rate-limit')
+    // The fixed line is intact; the suggested wait is a second, optional line.
+    expect(error.textContent).toContain(zh.rateLimited)
+    const wait = error.querySelector<HTMLElement>('[data-rate-limit-wait]')!
+    expect(wait.textContent).toBe(zh.rateLimitWait.replace('{wait}', zh.rateLimitWaitMinutes.replace('{count}', '2')))
+    expect(wait.textContent).toContain('2')
+  })
+
+  it('falls back to the plain rate-limit copy when the failure carries no wait', async () => {
+    const bare = vi.fn(async () => {
+      throw new MarketCallFailure({ code: 'github/rate-limit', message: 'limited', details: {} })
+    })
+    const { props } = managePageHarness({ search: bare })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openMarket(host)
+    await searchIn(panel, 'agents')
+
+    const error = panel.querySelector<HTMLElement>('[data-market-error]')!
+    expect(error.textContent).toContain(zh.rateLimited)
+    expect(error.querySelector('[data-rate-limit-wait]')).toBeNull()
+  })
+
+  it('never adds the wait line to a failure of another code', async () => {
+    const down = vi.fn(async () => {
+      throw new MarketCallFailure({
+        code: 'github/network',
+        message: 'down',
+        // A foreign payload carrying the same field must not leak into the copy.
+        details: { retryAfterMs: 120_000 },
+      })
+    })
+    const { props } = managePageHarness({ search: down })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openMarket(host)
+    await searchIn(panel, 'agents')
+
+    const error = panel.querySelector<HTMLElement>('[data-market-error]')!
+    expect(error.textContent).toContain(zh.networkError)
+    expect(error.querySelector('[data-rate-limit-wait]')).toBeNull()
+  })
+
+  it('shows the throttled wait inside the open detail view as well', async () => {
+    const repositoryDetail = vi.fn(async () => {
+      throw new MarketCallFailure({
+        code: 'github/rate-limit',
+        message: 'limited',
+        details: { retryAfterMs: 90_000 },
+      })
+    })
+    const search = vi.fn(async () => makeSearchPage([{ repository: 'acme/helper', name: 'helper' }]))
+    const { props } = managePageHarness({ search, repositoryDetail })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openMarket(host)
+    await searchIn(panel, 'helper')
+    await click(panel.querySelector('[data-row-details]'))
+    await flush()
+
+    const error = panel.querySelector<HTMLElement>('[data-detail-error]')!
+    expect(error.textContent).toContain(zh.rateLimited)
+    expect(error.querySelector('[data-rate-limit-wait]')?.textContent)
+      .toBe(zh.rateLimitWait.replace('{wait}', zh.rateLimitWaitMinutes.replace('{count}', '2')))
   })
 })

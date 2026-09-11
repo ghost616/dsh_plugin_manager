@@ -31,6 +31,7 @@ import {
   wireDetailsOf,
 } from '../src/host/control/source.ts'
 import type { InstallerPort, MarketSourceDeps } from '../src/host/control/source.ts'
+import { unavailableTokenPort } from '../src/host/control/token.ts'
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
 import { key as keyOf, makeSourceOps, testbed } from './support/control-testbed.ts'
 import type { Testbed } from './support/control-testbed.ts'
@@ -57,6 +58,7 @@ function sourceOverPort(
     detailEngine: bed.engines.detailEngine,
     previewEngine: bed.engines.previewEngine,
     installer: () => port,
+    token: unavailableTokenPort(),
     protection: { isProtectedKey: () => false, isSelfModule: () => false },
     syncRecord: bed.engines.syncRecord,
     ...(options.now === undefined ? {} : { now: options.now }),

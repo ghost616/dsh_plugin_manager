@@ -1,7 +1,9 @@
-/** Full plugin-market settings page: one top-level settings section with two
+/** Full plugin-market settings page: one top-level settings section with three
  *  in-page tabs — the local plugin source repository (status header, managed
- *  roster, enable switches, two-step removal) and GitHub (paginated search,
- *  repository detail with a branch/tag picker, README, download review). */
+ *  roster, enable switches, two-step removal), GitHub (paginated search with an
+ *  explicit cache-bypassing refresh, repository detail with a branch/tag picker,
+ *  README, download review) and the access token (credential seam status, save,
+ *  clear). */
 
 import {
   useEffect, useId, useMemo, useRef, useState,
@@ -14,6 +16,8 @@ import type {
   DownloadCommit,
   DownloadPreparation,
   GitHubSearchPage,
+  GitHubTokenSource,
+  GitHubTokenUpdateResult,
   GithubRefKind,
   ManagedPluginList,
   ManagedPluginPhase,
@@ -37,6 +41,7 @@ import {
   recordNotLoadableReason,
 } from '../types.ts'
 import { renderReadmeHtml } from './readme.ts'
+import type { MarketTokenStatus } from './channel.ts'
 import type { MarketManageLocaleKey } from './locales.ts'
 import css from './ManagePluginsTab.module.css'
 
@@ -63,10 +68,13 @@ export interface ManagePluginsTabInjected {
   requestRemove: (key: PluginMarketKey) => Promise<RemoveRequest>
   /** Removal step 2: confirm and run the removal. */
   confirmRemove: (key: PluginMarketKey, token: string) => Promise<RemoveOutcome>
-  /** One GitHub search page (1-based page, fixed page size). */
-  search: (keywords: string, page: number) => Promise<GitHubSearchPage>
-  /** Aggregated repository detail (metadata, refs, README). */
-  repositoryDetail: (repository: string) => Promise<RepositoryDetail>
+  /** One GitHub search page (1-based page, fixed page size). `refresh` marks
+   *  the page's explicit refresh: it bypasses the host's read-only TTL cache for
+   *  that one call, while every other call keeps the cached behavior. */
+  search: (keywords: string, page: number, refresh?: boolean) => Promise<GitHubSearchPage>
+  /** Aggregated repository detail (metadata, refs, README). `refresh` is the
+   *  detail view's explicit refresh and skips the host's TTL cache. */
+  repositoryDetail: (repository: string, refresh?: boolean) => Promise<RepositoryDetail>
   /** Review one repository ref and mint its single-use download confirmation.
    *  `version` null/omitted + no `refKind` reviews the default branch the
    *  legacy way; a v2 per-ref review pairs `version` with `refKind`. */
@@ -97,6 +105,22 @@ export interface ManagePluginsTabInjected {
   ) => Promise<DownloadCommit>
   /** Cancel a staged download and delete its staging directory (idempotent). */
   cancelDownload: (token: string) => Promise<boolean>
+  /**
+   * Read the GitHub access-token status (configured / source / writable /
+   * effective reference). Never rejects for "not configured": that is a state
+   * of the answer. A deployment with no credential seam mounted answers the
+   * stable `github/token-unavailable` code instead.
+   */
+  tokenStatus: () => Promise<MarketTokenStatus>
+  /**
+   * Store one token in the credential seam's writable layer. The value travels
+   * as-is (including an empty string): the host owns the refusal, answering
+   * `github/bad-request` for a blank and `github/token-unavailable` for a
+   * read-only layer, and never writes a placeholder.
+   */
+  saveToken: (value: string | null) => Promise<GitHubTokenUpdateResult>
+  /** Remove the effective token from the credential seam's writable layer. */
+  clearToken: () => Promise<GitHubTokenUpdateResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -200,6 +224,52 @@ export function isAnalysisFailureCode(code: string): boolean {
   return code === 'market/llm-unconfigured'
     || code === 'market/llm-failed'
     || code === 'market/llm-bad-output'
+}
+
+/**
+ * Suggested wait of a `github/rate-limit` failure, in milliseconds, or null.
+ *
+ * `details` is untrusted wire shape, so only a finite positive number is
+ * accepted; anything else (missing, zero, negative, NaN, a string) degrades to
+ * null and the failure keeps the plain dictionary copy.
+ */
+export function failureRetryAfterMs(failure: ManageUiFailure): number | null {
+  const value = failure.details.retryAfterMs
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null
+  return value
+}
+
+/**
+ * Localized duration phrase of one wait ("30 seconds" / "5 minutes" / "2 hours"
+ * in the active language for the zh/en pair this build ships).
+ *
+ * The three unit templates live in the dictionary like every other visible
+ * string, so the phrase is localized instead of being assembled from a raw
+ * number. Rounding is UP with a one-unit floor: a countdown that reads "0
+ * seconds" says there is no wait, which is exactly what a throttled answer is
+ * not.
+ */
+export function rateLimitWaitText(ms: number, t: Translate): string {
+  const seconds = Math.max(1, Math.ceil(ms / 1000))
+  if (seconds < 60) return t('rateLimitWaitSeconds', { count: String(seconds) })
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return t('rateLimitWaitMinutes', { count: String(minutes) })
+  return t('rateLimitWaitHours', { count: String(Math.ceil(minutes / 60)) })
+}
+
+/**
+ * Optional second line of a rate-limit failure: "wait X" when the wire carried
+ * a `retryAfterMs`, otherwise null.
+ *
+ * Only the RATE-LIMIT code gets this line — every other failure code keeps its
+ * existing copy untouched, and a rate-limit failure without the detail renders
+ * the plain line as before.
+ */
+export function rateLimitWaitLine(failure: ManageUiFailure, t: Translate): string | null {
+  if (failure.code !== 'github/rate-limit') return null
+  const waitMs = failureRetryAfterMs(failure)
+  if (waitMs === null) return null
+  return t('rateLimitWait', { wait: rateLimitWaitText(waitMs, t) })
 }
 
 /**
@@ -1466,6 +1536,206 @@ function ClassificationDialog({ view, current, setClassification: apply, t, onCl
 }
 
 /* ------------------------------------------------------------------------ */
+/* Access-token tab (credential seam)                                       */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Load state of the access-token panel.
+ *
+ * `ready` carries the LAST KNOWN status, so a refresh keeps showing the
+ * previously read status instead of blanking the panel; `error` covers the read
+ * itself and is the only state in which the panel shows neither input nor
+ * actions (a `github/token-unavailable` answer lands here, with its own copy).
+ */
+type MarketTokenState =
+  | { readonly status: 'loading' }
+  | { readonly status: 'error'; readonly failure: ManageUiFailure }
+  | { readonly status: 'ready'; readonly token: MarketTokenStatus }
+
+/**
+ * Layer label of one {@link GitHubTokenSource}.
+ *
+ * `GitHubTokenSource` is an OPEN vocabulary (see `src/types.ts`): the four
+ * members below are what the shipped provider reports, and every other value —
+ * like a missing `source`, which means "configured through an unnamed layer" —
+ * falls back to a generic label instead of rendering the raw token or failing.
+ */
+const TOKEN_SOURCE_KEYS = {
+  env: 'tokenSourceEnv',
+  file: 'tokenSourceFile',
+  'project-env': 'tokenSourceProjectEnv',
+  'user-env': 'tokenSourceUserEnv',
+} satisfies Record<'env' | 'file' | 'project-env' | 'user-env', MarketManageLocaleKey>
+
+/** Localized label of a provider-defined token source (generic tail included). */
+export function tokenSourceText(source: GitHubTokenSource | undefined, t: Translate): string {
+  if (source === undefined) return t('tokenSourceOther')
+  const key = TOKEN_SOURCE_KEYS[source as keyof typeof TOKEN_SOURCE_KEYS]
+  return key === undefined ? t('tokenSourceOther') : t(key)
+}
+
+/**
+ * Localized copy of a token operation failure. Branches on the stable wire code
+ * only (never an instanceof check): the two codes the credential seam defines —
+ * `github/bad-request` for a value the host refuses to store, and
+ * `github/token-unavailable` for a deployment or layer that cannot write — get
+ * their own actionable lines, and anything else falls back to the code line.
+ */
+export function tokenFailureText(failure: ManageUiFailure, t: Translate): string {
+  switch (failure.code) {
+    case 'github/bad-request': return t('tokenErrorBadRequest')
+    case 'github/token-unavailable': return t('tokenErrorUnavailable')
+    default: return t('tokenErrorWithCode', { code: failure.code })
+  }
+}
+
+/**
+ * The access-token tab: a status line naming the effective reference plus the
+ * three-way state, a password input, and the save/clear pair.
+ *
+ * The three states come from the status the host reports, never from local
+ * guesses: unconfigured (a write is possible and targets `ref`), stored
+ * (writable layer — the input and both actions are usable), and the launch
+ * environment (`writable: false`, read-only — the input and actions are
+ * disabled and the hint says which variable to unset in the dsh shell). The
+ * reference is rendered in every state precisely so a deployment whose only
+ * value is the second name does not look unconfigured.
+ */
+function AccessTokenPanel({ t, tokenStatus, saveToken, clearToken }: {
+  readonly t: Translate
+  readonly tokenStatus: ManagePluginsTabInjected['tokenStatus']
+  readonly saveToken: ManagePluginsTabInjected['saveToken']
+  readonly clearToken: ManagePluginsTabInjected['clearToken']
+}): ReactNode {
+  const mounted = useRef(true)
+  const [state, setState] = useState<MarketTokenState>({ status: 'loading' })
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<ManageUiFailure | null>(null)
+  /** Success line of the last committed write (cleared on the next attempt). */
+  const [notice, setNotice] = useState('')
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  useEffect(() => {
+    let current = true
+    void Promise.resolve()
+      .then(() => tokenStatus())
+      .then(
+        (token) => { if (current && mounted.current) setState({ status: 'ready', token }) },
+        (error: unknown) => {
+          if (current && mounted.current) setState({ status: 'error', failure: toUiFailure(error) })
+        },
+      )
+    return () => { current = false }
+  }, [tokenStatus])
+
+  const write = async (
+    operation: () => Promise<GitHubTokenUpdateResult>,
+    saved: 'tokenSaved' | 'tokenCleared',
+  ): Promise<void> => {
+    setBusy(true)
+    setFailure(null)
+    setNotice('')
+    try {
+      const result = await operation()
+      if (!mounted.current) return
+      setState({ status: 'ready', token: result.status })
+      // A committed save leaves the input empty: the value now lives in the
+      // credential layer, and a second save of the same string is not wanted.
+      setValue('')
+      setNotice(t(saved))
+    } catch (error) {
+      if (!mounted.current) return
+      setFailure(toUiFailure(error))
+    } finally {
+      if (mounted.current) setBusy(false)
+    }
+  }
+
+  const ready = state.status === 'ready' ? state.token : undefined
+  // A read-only layer offers no write action at all (the host would refuse it),
+  // while an unconfigured-but-writable deployment can set and later clear one.
+  const locked = ready !== undefined && !ready.writable
+  const canSave = ready !== undefined && ready.writable && !busy
+  const canClear = canSave && ready.configured
+
+  return (
+    <div className={css.tokenPanel} style={PANEL_FILL_STYLE} data-market-token-panel>
+      {state.status === 'loading' ? (
+        <p className={css.status} role="status" data-token-loading>{t('loading')}</p>
+      ) : null}
+      {state.status === 'error' ? (
+        <div className={css.marketError} role="alert" data-token-load-error data-error-code={state.failure.code}>
+          <p>{t('tokenLoadFailed')}</p>
+          <p className={css.hint}>{tokenFailureText(state.failure, t)}</p>
+        </div>
+      ) : null}
+
+      {ready === undefined ? null : (
+        <section className={css.section} data-token-body aria-busy={busy}>
+          <p className={css.tokenStatus} data-token-status data-token-configured={ready.configured ? 'true' : 'false'}>
+            {t('tokenStatusLine', {
+              ref: ready.ref,
+              source: tokenSourceText(ready.source, t),
+              state: ready.configured ? t('tokenConfigured') : t('tokenUnconfigured'),
+            })}
+          </p>
+          <p className={css.hint} data-token-hint data-token-readonly={locked ? 'true' : undefined}>
+            {locked ? t('tokenEnvHint', { ref: ready.ref }) : t('tokenSourceHint', { ref: ready.ref })}
+          </p>
+
+          <div className={css.tokenForm}>
+            <input
+              type="password"
+              className={css.tokenInput}
+              data-token-input
+              aria-label={t('tokenInputLabel')}
+              placeholder={t('tokenInputLabel')}
+              autoComplete="off"
+              spellCheck={false}
+              value={value}
+              disabled={locked || busy}
+              onChange={(event) => { setValue(event.currentTarget.value) }}
+            />
+            <button
+              type="button"
+              className={css.primaryButton}
+              data-token-save
+              disabled={!canSave}
+              onClick={() => { void write(() => saveToken(value), 'tokenSaved') }}
+            >
+              {busy ? t('tokenSaving') : t('tokenSaveButton')}
+            </button>
+            <button
+              type="button"
+              className={css.textButton}
+              data-token-clear
+              disabled={!canClear}
+              onClick={() => { void write(() => clearToken(), 'tokenCleared') }}
+            >
+              {t('tokenClearButton')}
+            </button>
+          </div>
+
+          {notice === '' ? null : (
+            <p className={css.tokenNotice} role="status" data-token-notice>{notice}</p>
+          )}
+          {failure === null ? null : (
+            <p className={css.failure} role="alert" data-token-error data-error-code={failure.code}>
+              {tokenFailureText(failure, t)}
+            </p>
+          )}
+        </section>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------------ */
 /* GitHub tab (search + pagination + repository detail)                     */
 /* ------------------------------------------------------------------------ */
 
@@ -1720,6 +1990,11 @@ function RepositoryDetailPane({ slug, state, t, onRetry, onInstall }: {
       {state.status === 'error' ? (
         <div className={css.marketError} role="alert" data-detail-error data-error-code={state.failure.code}>
           <p>{failureText(state.failure, t)}</p>
+          {rateLimitWaitLine(state.failure, t) === null ? null : (
+            <p className={css.hint} data-rate-limit-wait>
+              {rateLimitWaitLine(state.failure, t)}
+            </p>
+          )}
           <button type="button" className={css.textButton} data-detail-retry onClick={onRetry}>
             {t('retry')}
           </button>
@@ -1762,6 +2037,13 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
   const [jumpValue, setJumpValue] = useState('')
   /** One empty-keyword auto browse per mounted panel (never on later clears). */
   const autoBrowsed = useRef(false)
+  /**
+   * The NEXT detail read is the user's explicit refresh (bypasses the host's
+   * read-only TTL cache for that one aggregation). Set right before the tick
+   * that triggers the effect and consumed inside it, so the retry path and the
+   * ambient re-reads keep the cached behavior.
+   */
+  const detailRefresh = useRef(false)
 
   useEffect(() => {
     mounted.current = true
@@ -1776,10 +2058,12 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
   useEffect(() => {
     const slug = detailSlug
     if (slug === null) return
+    const refresh = detailRefresh.current
+    detailRefresh.current = false
     let current = true
     setDetailState({ status: 'loading' })
     void Promise.resolve()
-      .then(() => repositoryDetail(slug))
+      .then(() => repositoryDetail(slug, refresh ? true : undefined))
       .then(
         (detail) => { if (current && mounted.current) setDetailState({ status: 'ready', detail }) },
         (error: unknown) => { if (current && mounted.current) setDetailState({ status: 'error', failure: toUiFailure(error) }) },
@@ -1800,11 +2084,11 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
     onInstall({ repository, version: choice.name, refKind: choice.kind })
   }
 
-  const runSearch = (keywords: string, page: number): void => {
+  const runSearch = (keywords: string, page: number, refresh = false): void => {
     const gen = ++generation.current
     setSearchState({ phase: 'loading', keywords, page })
     void Promise.resolve()
-      .then(() => search(keywords, page))
+      .then(() => search(keywords, page, refresh ? true : undefined))
       .then(
         (pageData) => {
           if (!mounted.current || gen !== generation.current) return
@@ -1815,6 +2099,22 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
           setSearchState({ phase: 'error', failure: toUiFailure(error), keywords, page })
         },
       )
+  }
+
+  /**
+   * Explicit refresh of the result list: re-run the SAME keywords/page as a
+   * cache-bypassing read. It is the only path that passes `refresh` — submitting
+   * the form, changing pages and retrying a failure all keep the cached read, so
+   * the forced read is a user action and never an ambient one.
+   */
+  const refreshResults = (): void => {
+    const current = searchState
+    if (current.phase === 'loading') return
+    if (current.phase === 'ready' || current.phase === 'error') {
+      runSearch(current.keywords, current.page, true)
+      return
+    }
+    runSearch(query.trim(), 1, true)
   }
 
   // One-shot browse: on the very first mount with an empty search box, list
@@ -1888,6 +2188,20 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
             {t('detailBack')}
           </button>
           <strong data-detail-title>{t('detailTitle')}</strong>
+          <button
+            type="button"
+            className={css.textButton}
+            data-detail-refresh
+            aria-label={t('detailRefreshButton')}
+            title={t('detailRefreshButton')}
+            disabled={detailState.status === 'loading'}
+            onClick={() => {
+              detailRefresh.current = true
+              setDetailTick(value => value + 1)
+            }}
+          >
+            {t('detailRefreshButton')}
+          </button>
         </div>
       ) : (
         <form className={css.searchForm} data-github-search onSubmit={submit}>
@@ -1907,6 +2221,17 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
           >
             {searchState.phase === 'loading' ? t('searching') : t('searchButton')}
           </button>
+          <button
+            type="button"
+            className={css.textButton}
+            data-market-refresh
+            aria-label={t('refreshButton')}
+            title={t('refreshButton')}
+            disabled={searchState.phase === 'loading'}
+            onClick={refreshResults}
+          >
+            {t('refreshButton')}
+          </button>
         </form>
       )}
 
@@ -1918,6 +2243,11 @@ function GitHubPanel({ t, search, repositoryDetail, onInstall }: {
             {searchState.phase === 'error' ? (
               <div className={css.marketError} role="alert" data-market-error data-error-code={searchState.failure.code}>
                 <p>{failureText(searchState.failure, t)}</p>
+                {rateLimitWaitLine(searchState.failure, t) === null ? null : (
+                  <p className={css.hint} data-rate-limit-wait>
+                    {rateLimitWaitLine(searchState.failure, t)}
+                  </p>
+                )}
                 <button
                   type="button"
                   className={css.textButton}
@@ -2065,8 +2395,8 @@ const PAGE_FILL_STYLE = { height: '100%', minHeight: 0 } as const
 const PANEL_FILL_STYLE = { flex: '1 1 auto', minHeight: 0 } as const
 const PANEL_HIDDEN_STYLE = { ...PANEL_FILL_STYLE, display: 'none' } as const
 
-/** The page's own tab ids, in strip order (local repository, then GitHub). */
-const PAGE_TABS = ['local', 'github'] as const
+/** The page's own tab ids, in strip order (local repository, GitHub, token). */
+const PAGE_TABS = ['local', 'github', 'token'] as const
 
 /** One in-page tab of the settings page. */
 type PageTabId = typeof PAGE_TABS[number]
@@ -2075,6 +2405,7 @@ type PageTabId = typeof PAGE_TABS[number]
 const PAGE_TAB_KEYS = {
   local: 'tabLocal',
   github: 'tabGithub',
+  token: 'tabToken',
 } satisfies Record<PageTabId, MarketManageLocaleKey>
 
 /** Render the full GitHub-plugin settings page. */
@@ -2082,7 +2413,8 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
   const {
     status: readStatus, list, setEnabled, setClassification, requestRemove, confirmRemove,
     search, repositoryDetail, previewInstall,
-    prepareDownload, classifyDownload, commitDownload, cancelDownload, t,
+    prepareDownload, classifyDownload, commitDownload, cancelDownload,
+    tokenStatus, saveToken, clearToken, t,
   } = props
   const tabsId = useId()
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
@@ -2305,6 +2637,25 @@ export function ManagePluginsTab(props: ManagePluginsTabProps): ReactNode {
             search={search}
             repositoryDetail={repositoryDetail}
             onInstall={setInstallTarget}
+          />
+        ) : null}
+      </div>
+
+      <div
+        id={`${tabsId}-panel-token`}
+        className={css.panel}
+        style={activeTab === 'token' ? PANEL_FILL_STYLE : PANEL_HIDDEN_STYLE}
+        role="tabpanel"
+        aria-labelledby={`${tabsId}-tab-token`}
+        hidden={activeTab !== 'token'}
+        data-market-panel="token"
+      >
+        {visitedTabs.has('token') ? (
+          <AccessTokenPanel
+            t={t}
+            tokenStatus={tokenStatus}
+            saveToken={saveToken}
+            clearToken={clearToken}
           />
         ) : null}
       </div>

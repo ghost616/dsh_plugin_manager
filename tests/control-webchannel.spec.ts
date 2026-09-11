@@ -33,7 +33,16 @@ import { Context } from '@deepseek-ai/cordis'
 import { MarketError } from '../src/host/market/errors.ts'
 import { MARKET_WEB_ROUTE_PATH, registerMarketWebChannel } from '../lib/types/host/control/web-channel.js'
 import { MarketControllerGateway } from '../lib/types/host/control/gateway.js'
-import { FakeEngines, fakeAnalysisEngine, fakeDistribution, makeSourceOps, testbed } from './support/control-testbed.ts'
+import {
+  FakeCredentialStore,
+  FakeEngines,
+  FakeTokenPort,
+  GITHUB_TOKEN_REF_NAME,
+  fakeAnalysisEngine,
+  fakeDistribution,
+  makeSourceOps,
+  testbed,
+} from './support/control-testbed.ts'
 import {
   DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
   DOWNLOAD_REASON_EXPIRED,
@@ -371,10 +380,16 @@ function routeFor(options: {
   previewResult?: import('../src/types.ts').PluginPreviewOutcome
   now?: () => Date
   downloadTtlMs?: number
+  /** Token port of the source; defaults to the unavailable one. */
+  token?: import('../src/host/control/token.ts').GitHubTokenPort
+  /** Cache-clear report the gateway's deps answer with. */
+  cacheClearReport?: boolean
 } = {}): {
   router: RouterServer
   bed: ReturnType<typeof testbed>
   engines: FakeEngines
+  /** Cache-clear reports the gateway asked its deps for, in call order. */
+  cacheClears: boolean[]
   dispose(): void
 } {
   const ctx = new Context()
@@ -388,7 +403,9 @@ function routeFor(options: {
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
+    ...(options.token === undefined ? {} : { token: options.token }),
   })
+  const cacheClears: boolean[] = []
   // Compiled-artifact gateway over `src/`-typed fakes (see control-gateway.spec.ts):
   // its `.d.ts` names a second nominal identity for every class-typed dep, so
   // this single widening — the fakes ARE instances of the same classes — is the
@@ -397,11 +414,16 @@ function routeFor(options: {
     controller: () => controller,
     repository: () => repository,
     source,
+    clearGitHubCache: () => {
+      const report = options.cacheClearReport ?? true
+      cacheClears.push(report)
+      return report
+    },
   } as unknown as import('../lib/types/host/control/gateway.js').MarketControllerGatewayDeps
   const gateway = new MarketControllerGateway(ctx, deps)
   const router = new RouterServer()
   const dispose = registerMarketWebChannel(router, gateway)
-  return { router, bed, engines, dispose: () => { dispose() } }
+  return { router, bed, engines, cacheClears, dispose: () => { dispose() } }
 }
 
 describe('market control web channel (M1 source ops round trip)', () => {
@@ -1064,6 +1086,185 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(value.classification).toBe('plugin')
     expect(value.analysis).toBeUndefined()
     expect(analysis.calls).toHaveLength(0)
+    dispose()
+  })
+
+  it('serves the GitHub token surface over HTTP (status / save / clear)', async () => {
+    const seam = new FakeCredentialStore()
+    const { router, cacheClears, dispose } = routeFor({ token: new FakeTokenPort(seam) })
+    await serve(router)
+
+    // Unconfigured: the surface names the reference a write would target.
+    const initial = await call(router, 'tokenStatus', {})
+    expect(initial).toEqual({
+      ok: true,
+      value: { configured: false, writable: true, ref: GITHUB_TOKEN_REF_NAME },
+    })
+
+    const saved = await call(router, 'saveGitHubToken', { value: 'ghp_fresh' })
+    expect(saved).toEqual({
+      ok: true,
+      value: {
+        status: { configured: true, source: 'file', writable: true, ref: GITHUB_TOKEN_REF_NAME },
+        cacheCleared: true,
+      },
+    })
+    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_fresh' }])
+
+    const statusAfterSave = await call(router, 'tokenStatus', {})
+    expect(statusAfterSave).toMatchObject({ ok: true, value: { configured: true, source: 'file' } })
+
+    const cleared = await call(router, 'clearGitHubToken', {})
+    expect(cleared).toEqual({
+      ok: true,
+      value: {
+        status: { configured: false, writable: true, ref: GITHUB_TOKEN_REF_NAME },
+        cacheCleared: true,
+      },
+    })
+    expect(seam.unsetCalls).toEqual([GITHUB_TOKEN_REF_NAME])
+    // Both committed writes dropped the read-only cache.
+    expect(cacheClears).toEqual([true, true])
+    dispose()
+  })
+
+  it('rejects an empty token over HTTP and refuses to write in a read-only deployment', async () => {
+    const writable = new FakeCredentialStore()
+    const first = routeFor({ token: new FakeTokenPort(writable) })
+    await serve(first.router)
+    const empty = await call(first.router, 'saveGitHubToken', { value: '' })
+    expect(empty.ok).toBe(false)
+    if (!empty.ok) expect(empty.error.code).toBe('github/bad-request')
+    expect(writable.setCalls).toEqual([])
+    expect(first.cacheClears).toEqual([])
+    first.dispose()
+
+    const readOnly = new FakeCredentialStore()
+    readOnly.env.set(GITHUB_TOKEN_REF_NAME, 'env-token')
+    const second = routeFor({ token: new FakeTokenPort(readOnly) })
+    await serve(second.router)
+    const status = await call(second.router, 'tokenStatus', {})
+    expect(status).toMatchObject({ ok: true, value: { configured: true, source: 'env', writable: false } })
+
+    const save = await call(second.router, 'saveGitHubToken', { value: 'ignored' })
+    expect(save.ok).toBe(false)
+    if (!save.ok) {
+      expect(save.error.code).toBe('github/token-unavailable')
+      expect(save.error.message).toContain('launch environment')
+    }
+    const clear = await call(second.router, 'clearGitHubToken', {})
+    expect(clear.ok).toBe(false)
+    if (!clear.ok) expect(clear.error.code).toBe('github/token-unavailable')
+    expect(readOnly.setCalls).toEqual([])
+    expect(readOnly.unsetCalls).toEqual([])
+    expect(second.cacheClears).toEqual([])
+    second.dispose()
+  })
+
+  it('never coerces a null or non-string token argument into a stored token', async () => {
+    // Regression pin for a real defect: the channel used to run the argument
+    // through `String()`, so `{value: null}` stored the literal token "null"
+    // (an object became "[object Object]", an array its first element) and the
+    // deployment was left "configured" with a bogus bearer header. Every
+    // no-value form must keep the port's one stable answer instead.
+    const seam = new FakeCredentialStore()
+    const { router, cacheClears, dispose } = routeFor({ token: new FakeTokenPort(seam) })
+    await serve(router)
+
+    for (const value of [null, 123, true, { token: 'ghp_smuggled' }, ['ghp_x']]) {
+      const answer = await call(router, 'saveGitHubToken', { value })
+      expect(answer.ok).toBe(false)
+      if (!answer.ok) expect(answer.error.code).toBe('github/bad-request')
+    }
+
+    // Nothing was written and nothing claims to have been cleared.
+    expect(seam.setCalls).toEqual([])
+    expect(seam.store.size).toBe(0)
+    expect(cacheClears).toEqual([])
+    // The deployment is still unconfigured, so the state is honest.
+    const status = await call(router, 'tokenStatus', {})
+    expect(status).toMatchObject({ ok: true, value: { configured: false } })
+    dispose()
+  })
+
+  it('answers github/token-unavailable over HTTP when no credential seam is mounted', async () => {
+    const { router, dispose } = routeFor({ idle: true })
+    await serve(router)
+    for (const method of ['tokenStatus', 'clearGitHubToken']) {
+      const answer = await call(router, method, {})
+      expect(answer.ok).toBe(false)
+      if (!answer.ok) {
+        expect(answer.error.code).toBe('github/token-unavailable')
+        expect(answer.error.message).toContain('no credential seam')
+        expect(answer.error.details).toEqual({})
+      }
+    }
+    const save = await call(router, 'saveGitHubToken', { value: 'ghp_any' })
+    expect(save.ok).toBe(false)
+    if (!save.ok) expect(save.error.code).toBe('github/token-unavailable')
+    dispose()
+  })
+
+  it('keeps tokenStatus answerable while the market is idle', async () => {
+    const seam = new FakeCredentialStore()
+    const { router, dispose } = routeFor({ idle: true, token: new FakeTokenPort(seam) })
+    await serve(router)
+    // The token is a deployment-wide fact: no repository is required to read it.
+    const status = await call(router, 'tokenStatus', {})
+    expect(status).toMatchObject({ ok: true, value: { configured: false } })
+    // Repository-backed operations stay idle, as before.
+    const search = await call(router, 'search', { keywords: 'demo' })
+    expect(search.ok).toBe(false)
+    if (!search.ok) expect(search.error.code).toBe('market/idle')
+    dispose()
+  })
+
+  it('forwards the explicit refresh flag over HTTP and rejects a non-boolean one', async () => {
+    const { router, engines, dispose } = routeFor()
+    await serve(router)
+    await call(router, 'search', { keywords: 'demo' })
+    await call(router, 'search', { keywords: 'demo', refresh: true })
+    expect(engines.searchCalls).toEqual([
+      { keywords: 'demo', page: 1 },
+      { keywords: 'demo', page: 1, refresh: true },
+    ])
+
+    await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin' })
+    expect(engines.detailCalls.every(call => call.options?.refresh === undefined)).toBe(true)
+    engines.detailCalls.length = 0
+    await call(router, 'repositoryDetail', { repository: 'octocat/demo-plugin', refresh: true })
+    expect(engines.detailCalls.map(call => call.options)).toEqual([
+      { refresh: true },
+      { refresh: true },
+      { refresh: true },
+      { refresh: true },
+    ])
+
+    // A non-boolean flag is a transport-level refusal, not a silent coercion.
+    const refused = await post(router, { method: 'search', args: { refresh: 'yes' } }, 400)
+    expect(refused.body.ok).toBe(false)
+    if (!refused.body.ok) expect(refused.body.error.code).toBe('market/bad-request')
+    dispose()
+  })
+
+  it('carries the GitHub throttle wait over HTTP so the UI can count down', async () => {
+    const { router, engines, dispose } = routeFor()
+    await serve(router)
+    engines.searchError = new MarketError('github/rate-limit', 'The GitHub API rate limit was exceeded.', {
+      details: { retryAfterMs: 30_000, resetAt: '2026-01-01T00:30:00.000Z' },
+    })
+    const answer = await call(router, 'search', { keywords: 'demo' })
+    expect(answer.ok).toBe(false)
+    if (!answer.ok) {
+      expect(answer.error.code).toBe('github/rate-limit')
+      expect(answer.error.details).toEqual({ retryAfterMs: 30_000, resetAt: '2026-01-01T00:30:00.000Z' })
+    }
+
+    // A throttled response reporting neither fact keeps the payload empty.
+    engines.searchError = new MarketError('github/rate-limit', 'throttled')
+    const bare = await call(router, 'search', { keywords: 'demo' })
+    expect(bare.ok).toBe(false)
+    if (!bare.ok) expect(bare.error.details).toEqual({})
     dispose()
   })
 })

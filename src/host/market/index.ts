@@ -113,23 +113,41 @@ export { MarketRepositoryService } from './service.ts'
 export {
   GitHubMarket,
   githubFetch,
+  githubFetchWithRetry,
   envTokenProvider,
   defaultFetchLike,
   parseGitHubJson,
   parseRepositorySlug,
   isValidRepositorySlug,
+  GITHUB_CACHE_TTL_MS,
   GITHUB_LIST_PAGE_SIZE,
   GITHUB_LIST_MAX_PAGES,
+  GITHUB_RATE_LIMIT_MAX_BACKOFF_MS,
   type FetchLike,
   type FetchResponse,
-  type TokenProvider,
   type GitHubMarketOptions,
+  type GitHubReadOptions,
   type GitHubSearchOptions,
   type GitHubRepoMeta,
   type GitHubResponseHeaders,
   type GitHubRequestOptions,
+  type TokenProvider,
   SEARCH_EXCLUDED_REPOS,
 } from './github.ts'
+
+export {
+  CREDENTIALS_GITHUB_TOKEN_REFS,
+  GITHUB_TOKEN_FALLBACK_REF,
+  GITHUB_TOKEN_REF,
+  credentialsServiceOf,
+  credentialsTokenProvider,
+  gitHubTokenSourceOf,
+  hasCredentialsSeam,
+  requireCredentials,
+  resolveGitHubToken,
+  type CredentialsTokenProviderOptions,
+  type TokenResolveWarn,
+} from './token.ts'
 
 export {
   PluginPreviewer,

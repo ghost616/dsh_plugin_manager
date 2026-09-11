@@ -53,7 +53,11 @@ export class PluginPreviewer {
     const ownerRepo = parseRepositorySlug(slug)
     let meta
     try {
-      meta = await this.github.repositoryMeta(ownerRepo, signal)
+      meta = await this.github.repositoryMeta(
+        ownerRepo,
+        // exactOptionalPropertyTypes: attach the caller's signal only when set.
+        signal === undefined ? {} : { signal },
+      )
     } catch (error) {
       if (error instanceof MarketError) {
         return {

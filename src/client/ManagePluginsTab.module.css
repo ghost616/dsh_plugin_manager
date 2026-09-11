@@ -440,7 +440,9 @@
   padding-right: var(--dsh-scrollbar-width, 8px);
 }
 
-/* Detail-view header row: the back control sits before the detail title. */
+/* Detail-view header row: back control, detail title, explicit refresh. The
+   title takes the leftover width (and ellipsizes) so the refresh control stays
+   reachable in a narrow host instead of being pushed out of the row. */
 .detailToolbar {
   display: flex;
   align-items: center;
@@ -450,10 +452,16 @@
 }
 
 .detailToolbar strong {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 14px;
+}
+
+.detailToolbar [data-detail-refresh] {
+  flex: none;
 }
 
 .repoHeader {
@@ -1241,4 +1249,79 @@
   border: 0.5px solid var(--dsw-alias-border-l3);
   padding: 6px 10px;
   text-align: left;
+}
+
+/* --- access-token tab --- */
+
+/* Token tab body: the one scrolling row of that tab (a settings form can exceed
+   a short host, so it scrolls itself instead of stretching the page). It shares
+   the local panel's width and token set. */
+.tokenPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  width: 100%;
+  max-width: 760px;
+  padding-right: var(--dsh-scrollbar-width, 8px);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Status line: the effective reference plus its layer/state. Monospace on
+   purpose — every part of it is an identifier or a state word the user compares
+   against their own environment. */
+.tokenStatus {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.tokenForm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.tokenInput {
+  flex: 1 1 240px;
+  min-width: 0;
+  height: 36px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 10px;
+  padding: 0 12px;
+  outline: none;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.tokenInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.tokenInput:focus-visible {
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}
+
+.tokenInput:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* Success line of a committed token write. */
+.tokenNotice {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-state-success-primary);
 }

@@ -39,9 +39,10 @@ import type {
   DownloadPreparation,
   DownloadStageState,
   MarketDownloadFailureReason,
-  MarketRemoteErrorDetails,
+  MarketGitHubRateLimitDetails,
   MarketWireErrorCode,
   GitHubSearchPage,
+  GitHubTokenStatus,
   PluginInstallReview,
   PluginInstallReviewAnalysis,
   MarketInstallNote,
@@ -67,11 +68,12 @@ export type {
 
 import type { PluginAnalysisDistribution } from '../market/analyze.ts'
 import type { MarketRepository } from '../market/index.ts'
-import { parseRepositorySlug, type GitHubRepoMeta } from '../market/github.ts'
+import { parseRepositorySlug, type GitHubReadOptions, type GitHubRepoMeta } from '../market/github.ts'
 import { parsePluginKey, pluginKeyForGithubRef } from '../market/keys.ts'
 import { entryModuleName } from './entry-name.ts'
 import { REMOVE_CONFIRM_TTL_MS, MarketControlError, type ControlLogger } from './controller.ts'
 import type { ProtectionPolicy } from './protect.ts'
+import type { GitHubTokenPort } from './token.ts'
 
 /** Search engine surface of the host GitHub client. */
 export interface SearchEnginePort {
@@ -80,6 +82,12 @@ export interface SearchEnginePort {
     readonly perPage?: number
     /** 1-based page; the host layer clamps out-of-range values. */
     readonly page?: number
+    /**
+     * Skip the client's read-only TTL cache for this call (the browse page's
+     * explicit refresh). Forwarded verbatim; an engine that ignores it keeps
+     * serving cached answers, which is the pre-refresh behavior.
+     */
+    readonly refresh?: boolean
   }): Promise<GitHubSearchPage>
 }
 
@@ -88,20 +96,28 @@ export interface PreviewEnginePort {
   preview(repository: string, signal?: AbortSignal): Promise<PluginPreviewOutcome>
 }
 
-/** Detail engine surface of the host GitHub client (repository detail page). */
+/**
+ * Detail engine surface of the host GitHub client (repository detail page).
+ *
+ * Each method takes the client's own explicit read options as its last
+ * parameter, so the control layer can forward a page's refresh request
+ * (`{ refresh: true }`) without knowing anything about caching. The host
+ * implementation accepts the same options; an engine that ignores them (or a
+ * test double with fewer parameters) stays assignable.
+ */
 export interface RepositoryDetailPort {
   /** Repository metadata, resolving its default branch too. */
-  repositoryMeta(slug: string, signal?: AbortSignal): Promise<GitHubRepoMeta>
+  repositoryMeta(slug: string, options?: GitHubReadOptions): Promise<GitHubRepoMeta>
   /** Branch names of the repository (may be empty). */
-  branches(slug: string, signal?: AbortSignal): Promise<readonly string[]>
+  branches(slug: string, options?: GitHubReadOptions): Promise<readonly string[]>
   /** Tag names of the repository (may be empty). */
-  tags(slug: string, signal?: AbortSignal): Promise<readonly string[]>
+  tags(slug: string, options?: GitHubReadOptions): Promise<readonly string[]>
   /**
    * Raw Markdown of the repository README, or null when the repository has no
    * README (a GitHub 404 for the endpoint). Engines that map that 404 into a
    * thrown `github/not-found` are tolerated here as well.
    */
-  readme(slug: string, signal?: AbortSignal): Promise<string | null>
+  readme(slug: string, options?: GitHubReadOptions): Promise<string | null>
 }
 
 /** Install engine surface of the host installer (the three-phase download). */
@@ -224,6 +240,16 @@ export interface MarketSourceDeps {
    * bed); building a fresh engine per call would lose every handle.
    */
   readonly installer: (repository: MarketRepository) => InstallerPort
+  /**
+   * The GitHub access-token port of the control surface (read status / save /
+   * clear). A REQUIRED dependency on purpose: every market assembly has to
+   * state the token story explicitly — the production wiring hands the
+   * credential-seam port, an assembly without the seam hands
+   * {@link unavailableTokenPort} (every token call then answers the stable
+   * `github/token-unavailable`), so a missing wiring can never silently look
+   * like "this deployment has no credential seam".
+   */
+  readonly token: GitHubTokenPort
   readonly protection: ProtectionPolicy
   /** Post-install loader-row sync (production: controller.syncRecordRow). */
   readonly syncRecord: (record: PluginMarketRecord) => Promise<void>
@@ -625,7 +651,7 @@ const WIRE_CODES = new Set<string>([
  * `previousRemoved` are only ever expressed through the failure message and the
  * `reason` vocabulary, and the host's `checkoutDir` is what `path` receives.
  */
-export function wireDetailsOf(error: unknown): MarketRemoteErrorDetails {
+export function wireDetailsOf(error: unknown): MarketGitHubRateLimitDetails {
   const details = detailsOf(error)
   const detailsKey = typeof details.key === 'string' ? details.key : undefined
   const detailsPath = typeof details.path === 'string'
@@ -635,6 +661,13 @@ export function wireDetailsOf(error: unknown): MarketRemoteErrorDetails {
     ...(detailsKey === undefined ? {} : { key: detailsKey }),
     ...(detailsPath === undefined ? {} : { path: detailsPath }),
     ...(typeof details.reason === 'string' ? { reason: details.reason } : {}),
+    // The GitHub throttle carries two read-only facts a client renders as
+    // "wait N minutes" (`retryAfterMs`) / "resets at …" (`resetAt`). They are
+    // the only host-attached numbers that travel: the type says the payload may
+    // carry them and nothing else, so a consumer still cannot read a value the
+    // wire declaration does not promise.
+    ...(typeof details.retryAfterMs === 'number' ? { retryAfterMs: details.retryAfterMs } : {}),
+    ...(typeof details.resetAt === 'string' ? { resetAt: details.resetAt } : {}),
   }
 }
 
@@ -750,15 +783,23 @@ export class MarketSourceOperations {
    * GitHub topic search. Requires a configured repository (market not idle).
    * `page` is 1-based and defaults to 1; range clamping of oversized pages is
    * the host GitHubMarket's responsibility, so this layer forwards it as-is.
+   * `refresh` skips the host's read-only TTL cache for this call (a page's
+   * explicit refresh); omitting it keeps the cached behavior.
    */
   async search(
-    options: { readonly keywords?: string; readonly perPage?: number; readonly page?: number } = {},
+    options: {
+      readonly keywords?: string
+      readonly perPage?: number
+      readonly page?: number
+      readonly refresh?: boolean
+    } = {},
   ): Promise<GitHubSearchPage> {
     this.requireRepository()
     return this.deps.searchEngine.search({
       ...(options.keywords === undefined ? {} : { keywords: options.keywords }),
       ...(options.perPage === undefined ? {} : { perPage: options.perPage }),
       page: options.page ?? 1,
+      ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
     })
   }
 
@@ -770,16 +811,21 @@ export class MarketSourceOperations {
    * tolerated whether the engine mapped it to null or threw
    * `github/not-found`; any other failure of the four queries fails the whole
    * call with its stable `github/*` code.
+   *
+   * `options.refresh` skips the host's read-only TTL cache for every query of
+   * the aggregation (the detail page's explicit refresh), and `options.signal`
+   * cancels all four requests. Without them the call behaves exactly as before.
    */
-  async repositoryDetail(slugRaw: string): Promise<RepositoryDetail> {
+  async repositoryDetail(slugRaw: string, options: GitHubReadOptions = {}): Promise<RepositoryDetail> {
     this.requireRepository()
     const slug = parseRepositorySlug(slugRaw)
     const detail = this.deps.detailEngine
+    const read = { ...options }
     const [meta, branches, tags, readme] = await Promise.all([
-      detail.repositoryMeta(slug),
-      detail.branches(slug),
-      detail.tags(slug),
-      detail.readme(slug).catch((error: unknown) => {
+      detail.repositoryMeta(slug, read),
+      detail.branches(slug, read),
+      detail.tags(slug, read),
+      detail.readme(slug, read).catch((error: unknown) => {
         if (isGithubNotFound(error)) return null
         throw error
       }),
@@ -797,6 +843,43 @@ export class MarketSourceOperations {
       tags: [...tags],
       readme,
     }
+  }
+
+  /**
+   * Read-only status of the deployment's GitHub access token: whether one is
+   * configured, which layer supplies it, whether it can be written here, and
+   * which reference the market actually resolves.
+   *
+   * Deliberately NOT gated on a configured repository (`market/idle`): the
+   * token is a deployment-wide fact, and a settings page must be able to show
+   * it — and report `github/token-unavailable` — before any repository exists.
+   * The shape carries no secret slot, so it may cross the wire as-is.
+   */
+  async tokenStatus(): Promise<GitHubTokenStatus> {
+    return (await this.requireToken().status()).status
+  }
+
+  /**
+   * Store one GitHub token in the credential seam's writable layer and report
+   * the status re-read afterwards.
+   *
+   * Rejections are stable and deliberate: an empty value is `github/bad-request`
+   * (nothing is written — a blank is "absent" everywhere), and a read-only
+   * launch environment is `github/token-unavailable` (the write would be
+   * shadowed and never take effect, so no silent no-op is allowed).
+   */
+  async saveGitHubToken(value: string | null | undefined): Promise<GitHubTokenStatus> {
+    return (await this.requireToken().save(value)).status
+  }
+
+  /**
+   * Remove the effective GitHub token reference from the credential seam's
+   * writable layer and report the status re-read afterwards. Removing an
+   * absent reference is a no-op (the seam's own rule); a read-only launch
+   * environment is refused exactly like a save.
+   */
+  async clearGitHubToken(): Promise<GitHubTokenStatus> {
+    return (await this.requireToken().clear()).status
   }
 
   /**
@@ -1105,6 +1188,19 @@ export class MarketSourceOperations {
       )
     }
     return repository
+  }
+
+  /**
+   * The token port of this assembly.
+   *
+   * No defensive fallback: `MarketSourceDeps.token` is a REQUIRED member, so
+   * "this assembly forgot to state its token story" is a compile error rather
+   * than a runtime surprise. An assembly that genuinely has no credential seam
+   * wires {@link unavailableTokenPort}, which answers the documented
+   * `github/token-unavailable` failure.
+   */
+  private requireToken(): GitHubTokenPort {
+    return this.deps.token
   }
 
   /**

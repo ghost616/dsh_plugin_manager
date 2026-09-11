@@ -35,6 +35,7 @@ import { createInstallerPort } from './installer-port.ts'
 import { createLoaderAdapter } from './loader-adapter.ts'
 import { createProtectionPolicy } from './protect.ts'
 import { MarketSourceOperations, type DownloadClassifyOptions, type InstallAnalysisEngine, type InstallerPort } from './source.ts'
+import { buildCredentialTokenPort, controlTokenProvider } from './token.ts'
 import { registerMarketWebChannel } from './web-channel.ts'
 import { createLlmCompletion, runCheckoutAnalysis, snapshotFromPreview, type LlmStreamService } from './analysis.ts'
 import type {} from '../market/service.ts'
@@ -98,7 +99,14 @@ export function apply(ctx: Context, config?: Config): void {
   // Source engines (search/detail/preview) are context-independent; the
   // installer is bound to the current repository per install so it shares the
   // records store instance (one serialized writer per records file).
-  const github = new GitHubMarket()
+  //
+  // The token source is the credential seam, not the launch environment: the
+  // provider re-resolves the effective reference on EVERY request (no token is
+  // memoized here or in the engine), so a token saved through the surface
+  // reaches the very next GitHub call. A deployment without the seam keeps
+  // working anonymously — only the token surface reports
+  // `github/token-unavailable`.
+  const github = new GitHubMarket({ tokenProvider: controlTokenProvider(ctx) })
 
   // Smart-install analysis assembly: present only when the market Config
   // configured both llm.provider and llm.model (requireMarketLlm validates at
@@ -166,6 +174,16 @@ export function apply(ctx: Context, config?: Config): void {
       ports.set(repository.root, port)
       return port
     },
+    // Credential-seam bridge of the token surface. The port re-reads the seam on
+    // every call, so a provider mounted after this row is picked up; with no
+    // seam mounted it reports a deployment-wide `github/token-unavailable` and
+    // the rest of the page keeps working.
+    token: buildCredentialTokenPort(ctx, {
+      logger: {
+        warn: (message) => { logger.warn(message) },
+        error: (message) => { logger.error(message) },
+      },
+    }),
     protection,
     syncRecord: async (record) => {
       await runtime?.controller.syncRecordRow(record)
@@ -183,6 +201,12 @@ export function apply(ctx: Context, config?: Config): void {
     controller: () => runtime?.controller ?? null,
     repository: () => runtime?.repository ?? null,
     source,
+    // Every committed token write drops the engine's read-only TTL cache, so the
+    // next GitHub read resolves the new value instead of replaying a cached
+    // answer authorized by the old one. The engine reports how many entries it
+    // dropped; the wire carries only whether anything was dropped (the
+    // `cacheCleared` report the surface shows).
+    clearGitHubCache: () => github.clearCache() > 0,
   })
 
   // Record-driven controller lifecycle: (re)built whenever the composer

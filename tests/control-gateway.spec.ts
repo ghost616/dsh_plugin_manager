@@ -22,6 +22,9 @@ import {
   DOWNLOAD_REASON_UNKNOWN,
 } from '../src/host/control/source.ts'
 import {
+  FakeCredentialStore,
+  FakeTokenPort,
+  GITHUB_TOKEN_REF_NAME,
   fakeAnalysisEngine,
   fakeDistribution,
   key,
@@ -59,12 +62,16 @@ function gatewayWith(
     previewResult?: import('../src/types.ts').PluginPreviewOutcome
     now?: () => Date
     downloadTtlMs?: number
+    /** Token port of the source; defaults to the unavailable one. */
+    token?: import('../src/host/control/token.ts').GitHubTokenPort
   } = {},
 ): {
   ctx: Context
   gateway: MarketControllerGateway
   engines: import('./support/control-testbed.ts').FakeEngines
   records: import('./support/control-testbed.ts').FakeRecords
+  /** Cache-clear reports the gateway handed to its deps, in call order. */
+  cacheClears: boolean[]
 } {
   const ctx = new Context()
   contexts.push(ctx)
@@ -76,6 +83,7 @@ function gatewayWith(
     ...(options.analysis === undefined ? {} : { analysis: options.analysis }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.downloadTtlMs === undefined ? {} : { downloadTtlMs: options.downloadTtlMs }),
+    ...(options.token === undefined ? {} : { token: options.token }),
   })
   // This spec imports the tsc-emitted gateway artifact, so its `.d.ts` names a
   // second nominal identity for every class-typed dep (`MarketControllerGateway`
@@ -86,13 +94,21 @@ function gatewayWith(
   // and the source layer share is still checked: the controller is built through
   // `testbed().deps()` (`MarketControllerDeps`), `makeSourceOps` through
   // `MarketSourceDeps`, and the assertions below run the real behavior.
+  const cacheClears: boolean[] = []
   const deps = {
     controller: () => controller,
     repository: () => repository,
     source,
+    // The production deps call `GitHubMarket.clearCache()`; this spec records the
+    // report the gateway asks for (`false` models "nothing was memoized").
+    clearGitHubCache: () => {
+      const report = bed.engines.cacheClearReport
+      cacheClears.push(report)
+      return report
+    },
   } as unknown as import('../lib/types/host/control/gateway.js').MarketControllerGatewayDeps
   const gateway = new MarketControllerGateway(ctx, deps)
-  return { ctx, gateway, engines: bed.engines, records: bed.records }
+  return { ctx, gateway, engines: bed.engines, records: bed.records, cacheClears }
 }
 
 describe('MarketControllerGateway host Remote surface', () => {
@@ -110,6 +126,9 @@ describe('MarketControllerGateway host Remote surface', () => {
       { method: 'confirmRemove', invocation: { kind: 'direct' } },
       { method: 'search', invocation: { kind: 'direct' } },
       { method: 'repositoryDetail', invocation: { kind: 'direct' } },
+      { method: 'tokenStatus', invocation: { kind: 'direct' } },
+      { method: 'saveGitHubToken', invocation: { kind: 'direct' } },
+      { method: 'clearGitHubToken', invocation: { kind: 'direct' } },
       { method: 'previewInstall', invocation: { kind: 'direct' } },
       { method: 'prepareDownload', invocation: { kind: 'direct' } },
       { method: 'classifyDownload', invocation: { kind: 'direct' } },
@@ -433,5 +452,135 @@ describe('MarketControllerGateway host Remote surface', () => {
     expect(review.analysis).toBeUndefined()
     expect(analysis.calls).toHaveLength(0)
     expect(engines.previewCalls).toEqual(['octocat/demo-plugin'])
+  })
+
+  it('reports the token status while the market is idle and caches nothing', async () => {
+    const seam = new FakeCredentialStore()
+    const { gateway } = gatewayWith({ idle: true, token: new FakeTokenPort(seam) })
+    await expect(gateway.tokenStatus()).resolves.toEqual({
+      configured: false,
+      writable: true,
+      ref: GITHUB_TOKEN_REF_NAME,
+    })
+    seam.store.set(GITHUB_TOKEN_REF_NAME, 'stored-later')
+    // A second read reflects the change: no status is memoized anywhere.
+    await expect(gateway.tokenStatus()).resolves.toMatchObject({ configured: true, source: 'file' })
+  })
+
+  it('answers github/token-unavailable for every token method without a token port', async () => {
+    const { gateway, cacheClears } = gatewayWith({ idle: true })
+    const read = await gateway.tokenStatus().catch((error: unknown) => error)
+    expect(remoteErrorOf(read)).toMatchObject({ code: 'github/token-unavailable', details: {} })
+    const save = await gateway.saveGitHubToken('token').catch((error: unknown) => error)
+    expect(remoteErrorOf(save)).toMatchObject({ code: 'github/token-unavailable' })
+    const clear = await gateway.clearGitHubToken().catch((error: unknown) => error)
+    expect(remoteErrorOf(clear)).toMatchObject({ code: 'github/token-unavailable' })
+    // A refused write never claims to have cleared anything.
+    expect(cacheClears).toEqual([])
+  })
+
+  it('saves a token, clears the read-only cache and reports the post-write status', async () => {
+    const seam = new FakeCredentialStore()
+    const { gateway, cacheClears } = gatewayWith({ token: new FakeTokenPort(seam) })
+    const result = await gateway.saveGitHubToken('ghp_fresh')
+    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_fresh' }])
+    expect(result).toEqual({
+      status: { configured: true, source: 'file', writable: true, ref: GITHUB_TOKEN_REF_NAME },
+      cacheCleared: true,
+    })
+    expect(cacheClears).toEqual([true])
+  })
+
+  it('reports cacheCleared false when the engine had nothing memoized', async () => {
+    const seam = new FakeCredentialStore()
+    const { gateway, engines } = gatewayWith({ token: new FakeTokenPort(seam) })
+    engines.cacheClearReport = false
+    const result = await gateway.saveGitHubToken('ghp_fresh')
+    expect(result.cacheCleared).toBe(false)
+    // The save itself still committed and still reports the new status.
+    expect(result.status).toMatchObject({ configured: true, source: 'file' })
+  })
+
+  it('clears a token, drops the cache and returns the unconfigured status', async () => {
+    const seam = new FakeCredentialStore()
+    seam.store.set(GITHUB_TOKEN_REF_NAME, 'ghp_stored')
+    const { gateway, cacheClears } = gatewayWith({ token: new FakeTokenPort(seam) })
+    const result = await gateway.clearGitHubToken()
+    expect(seam.unsetCalls).toEqual([GITHUB_TOKEN_REF_NAME])
+    expect(result).toEqual({
+      status: { configured: false, writable: true, ref: GITHUB_TOKEN_REF_NAME },
+      cacheCleared: true,
+    })
+    expect(cacheClears).toEqual([true])
+  })
+
+  it('rejects an empty token save with github/bad-request and clears nothing', async () => {
+    const seam = new FakeCredentialStore()
+    const { gateway, cacheClears } = gatewayWith({ token: new FakeTokenPort(seam) })
+    const caught = await gateway.saveGitHubToken('').catch((error: unknown) => error)
+    expect(remoteErrorOf(caught)).toMatchObject({ code: 'github/bad-request' })
+    expect(seam.setCalls).toEqual([])
+    expect(cacheClears).toEqual([])
+  })
+
+  it('refuses a save and a clear while the launch environment supplies the token', async () => {
+    const seam = new FakeCredentialStore()
+    seam.env.set(GITHUB_TOKEN_REF_NAME, 'env-token')
+    const { gateway, cacheClears } = gatewayWith({ token: new FakeTokenPort(seam) })
+    const save = await gateway.saveGitHubToken('ignored').catch((error: unknown) => error)
+    expect(remoteErrorOf(save)).toMatchObject({ code: 'github/token-unavailable', details: {} })
+    expect((save as { message?: string }).message).toContain('launch environment')
+    const clear = await gateway.clearGitHubToken().catch((error: unknown) => error)
+    expect(remoteErrorOf(clear)).toMatchObject({ code: 'github/token-unavailable' })
+    expect(seam.setCalls).toEqual([])
+    expect(seam.unsetCalls).toEqual([])
+    expect(cacheClears).toEqual([])
+  })
+
+  it('forwards the explicit refresh flag on search and repositoryDetail only when given', async () => {
+    const { gateway, engines } = gatewayWith()
+    await gateway.search('agents', null, null)
+    await gateway.search('agents', null, null, { refresh: true })
+    expect(engines.searchCalls).toEqual([
+      { keywords: 'agents', page: 1 },
+      { keywords: 'agents', page: 1, refresh: true },
+    ])
+
+    await gateway.repositoryDetail('octocat/demo-plugin')
+    expect(engines.detailCalls.every(call => call.options?.refresh === undefined)).toBe(true)
+    engines.detailCalls.length = 0
+    await gateway.repositoryDetail('octocat/demo-plugin', { refresh: true })
+    expect(engines.detailCalls.map(call => call.options)).toEqual([
+      { refresh: true },
+      { refresh: true },
+      { refresh: true },
+      { refresh: true },
+    ])
+  })
+
+  it('forwards the GitHub throttle wait (retryAfterMs / resetAt) on the wire', async () => {
+    const { gateway, engines } = gatewayWith()
+    engines.searchError = new MarketError('github/rate-limit', 'The GitHub API rate limit was exceeded.', {
+      details: { retryAfterMs: 30_000, resetAt: '2026-01-01T00:30:00.000Z' },
+    })
+    const caught = remoteErrorOf(await gateway.search('demo', null, null).catch((error: unknown) => error))
+    expect(caught).toMatchObject({
+      code: 'github/rate-limit',
+      details: { retryAfterMs: 30_000, resetAt: '2026-01-01T00:30:00.000Z' },
+    })
+  })
+
+  it('omits an unjudgeable throttle wait instead of inventing one', async () => {
+    const { gateway, engines } = gatewayWith()
+    // A throttled response that reported neither `x-ratelimit-reset` nor
+    // `retry-after`: the payload stays empty and no field is fabricated.
+    engines.searchError = new MarketError('github/rate-limit', 'The GitHub API rate limit was exceeded.')
+    const caught = remoteErrorOf(await gateway.search('demo', null, null).catch((error: unknown) => error))
+    expect(caught).toMatchObject({ code: 'github/rate-limit', details: {} })
+
+    // Only one of the two facts: the other must stay absent, not become 0/null.
+    engines.searchError = new MarketError('github/rate-limit', 'throttled', { details: { retryAfterMs: 15_000 } })
+    const partial = remoteErrorOf(await gateway.search('demo', null, null).catch((error: unknown) => error))
+    expect(partial?.details).toEqual({ retryAfterMs: 15_000 })
   })
 })

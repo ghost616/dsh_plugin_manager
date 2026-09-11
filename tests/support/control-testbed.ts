@@ -15,11 +15,12 @@ import type {
   PluginPreviewOutcome,
 } from '../../src/types.ts'
 import { parsePluginKey } from '../../src/host/market/keys.ts'
-import type { GitHubRepoMeta } from '../../src/host/market/github.ts'
+import type { GitHubReadOptions, GitHubRepoMeta } from '../../src/host/market/github.ts'
 import type { PluginAnalysisDistribution } from '../../src/host/market/analyze.ts'
 import { refSegOf } from '../../src/host/market/paths.ts'
 import {
   MarketPluginController,
+  MarketControlError,
   type MarketControllerDeps,
   type RecordsPort,
 } from '../../src/host/control/controller.ts'
@@ -43,6 +44,13 @@ import {
   type SearchEnginePort,
 } from '../../src/host/control/source.ts'
 import type { PluginMarketSource } from '../../src/types.ts'
+import {
+  CREDENTIALS_GITHUB_TOKEN_REFS,
+  GITHUB_TOKEN_FALLBACK_REF,
+  GITHUB_TOKEN_REF,
+} from '../../src/host/market/token.ts'
+import { unavailableTokenPort, type GitHubTokenPort, type TokenStatusReport } from '../../src/host/control/token.ts'
+import type { CredentialInfo, CredentialRef } from '@deepseek-ai/dsh-credentials'
 
 /** Scripted loader adapter with real create/update/remove/rollback shape. */
 export class FakeLoader implements LoaderAdapter {
@@ -227,11 +235,28 @@ export function fakeRepository(records: FakeRecords, root = '/repo'): MarketRepo
   }
 }
 
+/** One search-engine call as the fake recorded it. */
+export interface FakeSearchCall {
+  readonly keywords?: string
+  readonly perPage?: number
+  readonly page?: number
+  /** Explicit cache bypass the caller asked for (absent = cached behavior). */
+  readonly refresh?: boolean
+}
+
+/** One detail-engine call as the fake recorded it. */
+export interface FakeDetailCall {
+  readonly kind: 'meta' | 'branches' | 'tags' | 'readme'
+  readonly slug: string
+  /** Explicit read options the caller forwarded (absent when it passed none). */
+  readonly options?: GitHubReadOptions
+}
+
 /** Scriptable source engines for source-operation and channel specs. */
 export class FakeEngines {
   searchResult: GitHubSearchPage = { totalCount: 0, items: [] }
   searchError: unknown = undefined
-  searchCalls: { keywords?: string; perPage?: number }[] = []
+  searchCalls: FakeSearchCall[] = []
   previewResult: PluginPreviewOutcome = {
     status: 'ready',
     summary: { name: 'demo-plugin', version: '1.0.0', dependencies: { dependencies: ['@deepseek-ai/cordis'], peerDependencies: [] } },
@@ -267,7 +292,7 @@ export class FakeEngines {
   }
 
   /** Detail-engine script: metadata/branches/tags/readme stubs + recording. */
-  detailCalls: { kind: 'meta' | 'branches' | 'tags' | 'readme'; slug: string }[] = []
+  detailCalls: FakeDetailCall[] = []
   metaResult: GitHubRepoMeta = {
     slug: 'octocat/demo-plugin',
     name: 'demo-plugin',
@@ -287,23 +312,23 @@ export class FakeEngines {
   readmeError: unknown = undefined
 
   detailEngine: RepositoryDetailPort = {
-    repositoryMeta: async (slug) => {
-      this.detailCalls.push({ kind: 'meta', slug })
+    repositoryMeta: async (slug, options) => {
+      this.detailCalls.push({ kind: 'meta', slug, ...(options === undefined ? {} : { options }) })
       if (this.metaError !== undefined) throw this.metaError
       return { ...this.metaResult, slug }
     },
-    branches: async (slug) => {
-      this.detailCalls.push({ kind: 'branches', slug })
+    branches: async (slug, options) => {
+      this.detailCalls.push({ kind: 'branches', slug, ...(options === undefined ? {} : { options }) })
       if (this.branchesError !== undefined) throw this.branchesError
       return this.branchesResult
     },
-    tags: async (slug) => {
-      this.detailCalls.push({ kind: 'tags', slug })
+    tags: async (slug, options) => {
+      this.detailCalls.push({ kind: 'tags', slug, ...(options === undefined ? {} : { options }) })
       if (this.tagsError !== undefined) throw this.tagsError
       return this.tagsResult
     },
-    readme: async (slug) => {
-      this.detailCalls.push({ kind: 'readme', slug })
+    readme: async (slug, options) => {
+      this.detailCalls.push({ kind: 'readme', slug, ...(options === undefined ? {} : { options }) })
       if (this.readmeError !== undefined) throw this.readmeError
       return this.readmeResult
     },
@@ -448,6 +473,12 @@ export class FakeEngines {
   /** Injected classification-phase failure (a real port never fails the phase). */
   classifyError: unknown = undefined
   /**
+   * Report a cache-clear returns to its caller. `true` models a real
+   * `GitHubMarket.clearCache()` that had entries to drop; `false` models "there
+   * was nothing memoized" (the `cacheCleared: false` report).
+   */
+  cacheClearReport = true
+  /**
    * Injected commit failure. The fake mirrors the host: it drops the handle,
    * attaches `details.swapCompleted` (see {@link commitFailsAfterSwap}),
    * `details.previousRemoved` (see {@link commitRemovedPrevious}) and
@@ -536,6 +567,13 @@ export function makeSourceOps(
      * (`buildRequired`) observable.
      */
     analysisEntryProbe?: (repository: string, relativeEntry: string) => boolean | Promise<boolean>
+    /**
+     * Token port of this source. Defaults to {@link unavailableTokenPort} —
+     * the assembly-without-credential-seam answer (`github/token-unavailable`),
+     * which is what the non-token specs would see in a headless deployment.
+     * Token specs inject {@link FakeTokenPort}.
+     */
+    token?: GitHubTokenPort
   } = {},
 ): MarketSourceOperations {
   // One port per source: the staged-download handle lives in the port's own
@@ -548,6 +586,7 @@ export function makeSourceOps(
     detailEngine: engines.detailEngine,
     previewEngine: engines.previewEngine,
     installer: () => port,
+    token: options.token ?? unavailableTokenPort(),
     protection: {
       isProtectedKey: options.isProtectedKey ?? isProtectedRecordKey,
       isSelfModule: options.isSelfModule ?? (() => false),
@@ -710,6 +749,157 @@ export function makeRecord(keyRaw: string, partial: Partial<PluginMarketRecord> 
     trustedAt: partial.trustedAt ?? null,
   }
 }
+
+/**
+ * Scriptable credential seam over two value layers, mirroring the shipped
+ * provider's precedence:
+ *
+ * - `env` — read-only launch environment values (`writable: false`), resolved
+ *   BEFORE the store, exactly like the real seam's `env` layer;
+ * - `store` — the writable layer `set`/`unset` touch, reported as `file`.
+ *
+ * The layering is what the token surface is about, so the fake reproduces it
+ * instead of a flat "configured/writable" switch: a token may be configured
+ * from the environment AND writable underneath at the same time, which is the
+ * case a naive fake cannot express. The fake is structurally cast where a
+ * `CredentialProvider` is required (its abstract class members are nominally
+ * unassignable to a plain double, and the production seam is a `Service`).
+ */
+export class FakeCredentialStore {
+  /** Read-only launch-environment values, by reference name. */
+  readonly env = new Map<string, string>()
+  /** Writable store values, by reference name. */
+  readonly store = new Map<string, string>()
+  /** Every `set` the code under test performed, in call order. */
+  readonly setCalls: { ref: string; value: string }[] = []
+  /** Every `unset` the code under test performed, in call order. */
+  readonly unsetCalls: string[] = []
+  /** Every `describe` the code under test performed, in call order. */
+  readonly described: string[] = []
+
+  /** Effective value of one reference (environment first, then the store). */
+  valueOf(ref: string): string | undefined {
+    const env = this.env.get(ref)
+    if (env !== undefined && env.length > 0) return env
+    const stored = this.store.get(ref)
+    return stored !== undefined && stored.length > 0 ? stored : undefined
+  }
+
+  async describe(ref: string): Promise<CredentialInfo> {
+    this.described.push(ref)
+    const env = this.env.get(ref)
+    if (env !== undefined && env.length > 0) return { configured: true, source: 'env', writable: false }
+    const stored = this.store.get(ref)
+    if (stored !== undefined && stored.length > 0) return { configured: true, source: 'file', writable: true }
+    // Unconfigured: still writable, which is what lets a surface offer "save".
+    return { configured: false, writable: true }
+  }
+
+  async set(ref: string, value: string): Promise<void> {
+    this.setCalls.push({ ref, value })
+    this.store.set(ref, value)
+  }
+
+  async unset(ref: string): Promise<void> {
+    this.unsetCalls.push(ref)
+    this.store.delete(ref)
+  }
+}
+
+/**
+ * The control token port over a {@link FakeCredentialStore}, resolving the SAME
+ * reference order the market host half uses (`DSH_GITHUB_TOKEN` first) and
+ * writing to the same head reference a real save targets.
+ */
+export class FakeTokenPort implements GitHubTokenPort {
+  /**
+   * Injected failure of the next port call, mapped to the stable
+   * `github/token-unavailable` exactly as the production port maps a failing
+   * seam (the port contract, not the seam's own error, is what callers see).
+   * Cleared after it fires once.
+   */
+  failure: unknown = undefined
+
+  constructor(private readonly seam: FakeCredentialStore) {}
+
+  async status(): Promise<TokenStatusReport> {
+    return await this.read()
+  }
+
+  async save(value: string | null | undefined): Promise<TokenStatusReport> {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new MarketControlError(
+        'github/bad-request',
+        'Refusing to store an empty GitHub token: pass a non-empty value, or clear the token instead.',
+      )
+    }
+    const current = await this.read()
+    this.assertWritable(current.status.writable, current.status.ref)
+    await this.guarded('saved', () => this.seam.set(GITHUB_TOKEN_REF, value))
+    return await this.read()
+  }
+
+  async clear(): Promise<TokenStatusReport> {
+    const current = await this.read()
+    this.assertWritable(current.status.writable, current.status.ref)
+    await this.guarded('cleared', () => this.seam.unset(current.status.ref))
+    return await this.read()
+  }
+
+  /** Run one seam call, mapping any failure onto the port's stable code. */
+  private async guarded(action: string, call: () => Promise<void>): Promise<void> {
+    if (this.failure !== undefined) {
+      const error = this.failure
+      this.failure = undefined
+      throw new MarketControlError(
+        'github/token-unavailable',
+        `The GitHub token could not be ${action}: the credential seam failed (${error instanceof Error ? error.message : String(error)}).`,
+      )
+    }
+    await call()
+  }
+
+  private async read(): Promise<TokenStatusReport> {
+    if (this.failure !== undefined) {
+      const error = this.failure
+      this.failure = undefined
+      throw new MarketControlError(
+        'github/token-unavailable',
+        `The GitHub token could not be read: the credential seam failed (${error instanceof Error ? error.message : String(error)}).`,
+      )
+    }
+    // Branded references are plain strings at runtime; resolving the list is
+    // exactly what the production port does.
+    const refs = CREDENTIALS_GITHUB_TOKEN_REFS.map(ref => ref as unknown as string)
+    const effectiveName = refs.find(name => this.seam.valueOf(name) !== undefined)
+    const ref = (effectiveName ?? refs[0] ?? GITHUB_TOKEN_REF_NAME) as unknown as CredentialRef
+    const info = await this.seam.describe(ref as unknown as string)
+    const status = {
+      ...(info.configured ? { configured: true, source: info.source } : { configured: false }),
+      writable: info.writable,
+      ref,
+    }
+    return {
+      status: status as unknown as TokenStatusReport['status'],
+      writeRefName: GITHUB_TOKEN_REF_NAME,
+    }
+  }
+
+  /** Same refusal the production port makes (see `src/host/control/token.ts`). */
+  private assertWritable(writable: boolean, ref: CredentialRef): void {
+    if (writable) return
+    throw new MarketControlError(
+      'github/token-unavailable',
+      `The GitHub token comes from the launch environment (${String(ref)}), which is read-only: a token written here would be shadowed by it and never take effect.`,
+    )
+  }
+}
+
+/** The second reference of the list, for specs about the fallback layer. */
+export const GITHUB_TOKEN_FALLBACK_REF_NAME = GITHUB_TOKEN_FALLBACK_REF as unknown as string
+
+/** The head reference name (what a save targets), for specs. */
+export const GITHUB_TOKEN_REF_NAME = GITHUB_TOKEN_REF as unknown as string
 
 /**
  * Global activation log shared by every module copy of a demo fixture (native

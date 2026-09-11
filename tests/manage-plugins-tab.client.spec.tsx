@@ -9,13 +9,15 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import type { ManagedPluginList, PluginMarketKey, PluginMarketRecord } from '../src/types.ts'
+import type { GitHubTokenUpdateResult, ManagedPluginList, PluginMarketKey, PluginMarketRecord } from '../src/types.ts'
 import { zh } from '../src/client/locales.ts'
 import { MarketCallFailure } from '../src/client/channel.ts'
 import { ManagePluginsTab } from '../src/client/ManagePluginsTab.tsx'
 import {
   makeList,
   makeSearchPage,
+  makeTokenStatus,
+  makeTokenUpdate,
   makeTranslator,
   makeView,
   managePageHarness,
@@ -75,7 +77,7 @@ function toggles(host: HTMLElement): NodeListOf<HTMLButtonElement> {
 }
 
 describe('ManagePluginsTab page tabs', () => {
-  it('renders the two localized tabs over the panels, landing on the local repository', async () => {
+  it('renders the three localized tabs over the panels, landing on the local repository', async () => {
     const { props } = managePageHarness({
       list: vi.fn(async () => makeList([{ key: 'gh-a', repository: 'octocat/demo-plugin', enabled: false }])),
     })
@@ -85,24 +87,28 @@ describe('ManagePluginsTab page tabs', () => {
     const tablist = host.querySelector('[role="tablist"]')
     expect(tablist?.getAttribute('aria-label')).toBe(zh.tabsLabel)
     const tabs = Array.from(host.querySelectorAll<HTMLButtonElement>('[data-market-tab]'))
-    expect(tabs.map(tab => tab.getAttribute('data-market-tab'))).toEqual(['local', 'github'])
-    expect(tabs.map(tab => tab.textContent)).toEqual([zh.tabLocal, zh.tabGithub])
+    expect(tabs.map(tab => tab.getAttribute('data-market-tab'))).toEqual(['local', 'github', 'token'])
+    expect(tabs.map(tab => tab.textContent)).toEqual([zh.tabLocal, zh.tabGithub, zh.tabToken])
     expect(tabs[0]!.getAttribute('aria-selected')).toBe('true')
     expect(tabs[1]!.getAttribute('aria-selected')).toBe('false')
+    expect(tabs[2]!.getAttribute('aria-selected')).toBe('false')
     // Only the selected tab is in the tab order (arrow keys move between them).
     expect(tabs[0]!.tabIndex).toBe(0)
     expect(tabs[1]!.tabIndex).toBe(-1)
+    expect(tabs[2]!.tabIndex).toBe(-1)
 
     const panels = Array.from(host.querySelectorAll<HTMLElement>('[data-market-panel]'))
-    expect(panels.map(panel => panel.getAttribute('data-market-panel'))).toEqual(['local', 'github'])
+    expect(panels.map(panel => panel.getAttribute('data-market-panel'))).toEqual(['local', 'github', 'token'])
     expect(panels[0]!.hidden).toBe(false)
     expect(panels[1]!.hidden).toBe(true)
+    expect(panels[2]!.hidden).toBe(true)
     expect(panels[0]!.getAttribute('aria-labelledby')).toBe(tabs[0]!.id)
-    // The inactive panel is a REPLACEMENT, not a stacked sibling: it is taken
-    // out of the layout outright rather than left as an invisible block below
-    // the active one. The rule is pinned inline, so no host stylesheet can
-    // re-introduce a display value for the hidden panel.
+    // The inactive panels are REPLACEMENTS, not stacked siblings: they are taken
+    // out of the layout outright rather than left as invisible blocks below the
+    // active one. The rule is pinned inline, so no host stylesheet can
+    // re-introduce a display value for a hidden panel.
     expect(panels[1]!.style.display).toBe('none')
+    expect(panels[2]!.style.display).toBe('none')
     expect(panels[0]!.style.display).toBe('')
     expect(panels.filter(panel => panel.style.display !== 'none')).toHaveLength(1)
     // The local repository owns the landed panel: its roster is up.
@@ -149,7 +155,9 @@ describe('ManagePluginsTab page tabs', () => {
     await flush()
 
     expect(search).toHaveBeenCalledTimes(1)
-    expect(search).toHaveBeenCalledWith('', 1)
+    // The ambient read carries no refresh: only the explicit refresh button asks
+    // for a cache-bypassing read (the third argument is the refresh flag).
+    expect(search).toHaveBeenCalledWith('', 1, undefined)
     expect(tab('github').getAttribute('aria-selected')).toBe('true')
     expect(host.querySelector<HTMLElement>('[data-market-panel="github"]')!.hidden).toBe(false)
     expect(host.querySelector<HTMLElement>('[data-market-panel="local"]')!.hidden).toBe(true)
@@ -176,13 +184,23 @@ describe('ManagePluginsTab page tabs', () => {
 
     const local = host.querySelector<HTMLButtonElement>('[data-market-tab="local"]')!
     const github = host.querySelector<HTMLButtonElement>('[data-market-tab="github"]')!
+    const token = host.querySelector<HTMLButtonElement>('[data-market-tab="token"]')!
     await pressKey(local, 'ArrowRight')
     expect(github.getAttribute('aria-selected')).toBe('true')
     expect(document.activeElement).toBe(github)
+    // The strip runs local → github → token, so ArrowRight wraps around.
+    await pressKey(github, 'ArrowRight')
+    expect(token.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(token)
+    await pressKey(token, 'ArrowRight')
+    expect(local.getAttribute('aria-selected')).toBe('true')
     await pressKey(github, 'Home')
     expect(local.getAttribute('aria-selected')).toBe('true')
     expect(document.activeElement).toBe(local)
     await pressKey(local, 'End')
+    expect(token.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(token)
+    await pressKey(token, 'ArrowLeft')
     expect(github.getAttribute('aria-selected')).toBe('true')
     await pressKey(github, 'ArrowLeft')
     expect(local.getAttribute('aria-selected')).toBe('true')
@@ -582,5 +600,276 @@ describe('ManagePluginsTab managed roster', () => {
     await flush()
     expect(host.querySelector('[data-dialog="remove"]')).toBeNull()
     expect(rows(host)).toHaveLength(1)
+  })
+})
+
+describe('ManagePluginsTab access-token tab', () => {
+  /** Open the page's third tab (lazily mounted, like the GitHub one). */
+  async function openTokenTab(host: HTMLElement): Promise<HTMLElement> {
+    await click(host.querySelector('[data-market-tab="token"]'))
+    await flush()
+    return host.querySelector<HTMLElement>('[data-market-token-panel]')!
+  }
+
+  /** The known sources and their dictionary keys (the closed part of the union). */
+  const KNOWN_SOURCES = {
+    env: 'tokenSourceEnv',
+    file: 'tokenSourceFile',
+    'project-env': 'tokenSourceProjectEnv',
+    'user-env': 'tokenSourceUserEnv',
+  } as const
+
+  /** The expected status line of one status seed (zh dictionary templates). */
+  function statusLine(
+    seed: { configured?: boolean; source?: keyof typeof KNOWN_SOURCES; ref?: string },
+  ): string {
+    const configured = seed.configured ?? false
+    const sourceKey = seed.source === undefined ? undefined : KNOWN_SOURCES[seed.source]
+    const source = sourceKey === undefined ? zh.tokenSourceOther : zh[sourceKey]
+    return zh.tokenStatusLine
+      .replace('{ref}', seed.ref ?? 'DSH_GITHUB_TOKEN')
+      .replace('{source}', source)
+      .replace('{state}', configured ? zh.tokenConfigured : zh.tokenUnconfigured)
+  }
+
+  it('mounts the panel lazily and reads the token status only once it is selected', async () => {
+    const harness = managePageHarness()
+    const host = await renderInto(<ManagePluginsTab {...harness.props} />)
+    await flush()
+    // The override-able spies live on `props`: `harness.mocks` only holds the
+    // harness defaults, which an override replaces.
+    const tokenStatus = harness.props.tokenStatus
+    await flush()
+    expect(tokenStatus).not.toHaveBeenCalled()
+    expect(host.querySelector('[data-market-token-panel]')).toBeNull()
+
+    const panel = await openTokenTab(host)
+    expect(tokenStatus).toHaveBeenCalledTimes(1)
+    expect(panel.querySelector('[data-market-panel="token"]')).toBeNull()
+    expect(panel.querySelector('[data-token-loading]')).toBeNull()
+
+    // Switching away hides the panel without unmounting it: the status it read
+    // survives the round trip (and no second read is issued).
+    await click(host.querySelector('[data-market-tab="local"]'))
+    await flush()
+    await click(host.querySelector('[data-market-tab="token"]'))
+    await flush()
+    expect(tokenStatus).toHaveBeenCalledTimes(1)
+    expect(host.querySelector('[data-market-token-panel] [data-token-input]')).not.toBeNull()
+  })
+
+  it('renders the unconfigured state with a usable input and no clear action', async () => {
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({ configured: false, writable: true })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    // The effective reference is rendered even while unconfigured: a deployment
+    // that would write GITHUB_TOKEN must not read as "nothing is configured".
+    expect(status.textContent).toBe(statusLine({ configured: false }))
+    expect(status.getAttribute('data-token-configured')).toBe('false')
+
+    const input = panel.querySelector<HTMLInputElement>('[data-token-input]')!
+    expect(input.type).toBe('password')
+    expect(input.disabled).toBe(false)
+    expect(input.getAttribute('aria-label')).toBe(zh.tokenInputLabel)
+    const save = panel.querySelector<HTMLButtonElement>('[data-token-save]')!
+    expect(save.disabled).toBe(false)
+    expect(save.textContent).toContain(zh.tokenSaveButton)
+    // Nothing is stored yet, so a clear has no target.
+    expect(panel.querySelector<HTMLButtonElement>('[data-token-clear]')!.disabled).toBe(true)
+    // The guidance names the reference a write targets instead of the raw env name.
+    expect(panel.querySelector('[data-token-hint]')?.textContent)
+      .toBe(zh.tokenSourceHint.replace('{ref}', 'DSH_GITHUB_TOKEN'))
+    expect(panel.querySelector('[data-token-hint]')?.getAttribute('data-token-readonly')).toBeNull()
+  })
+
+  it('reports a stored token as configured and shows the effective reference name', async () => {
+    const tokenStatus = vi.fn(async () => makeTokenStatus({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: 'GITHUB_TOKEN',
+    }))
+    const { props } = managePageHarness({ tokenStatus })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    // Only the second name resolves here: the line must name THAT reference
+    // rather than the preferred head, otherwise a live token reads as missing.
+    expect(status.textContent).toBe(statusLine({ configured: true, source: 'file', ref: 'GITHUB_TOKEN' }))
+    expect(status.textContent).toContain('GITHUB_TOKEN')
+    expect(status.getAttribute('data-token-configured')).toBe('true')
+    expect(panel.querySelector<HTMLInputElement>('[data-token-input]')!.disabled).toBe(false)
+    expect(panel.querySelector<HTMLButtonElement>('[data-token-clear]')!.disabled).toBe(false)
+    expect(tokenStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('locks the input and both actions when the launch environment supplies the token', async () => {
+    const saveToken = vi.fn(async () => makeTokenUpdate({ configured: true, source: 'file' }))
+    const clearToken = vi.fn(async () => makeTokenUpdate({ configured: false }))
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'env',
+        writable: false,
+      })),
+      saveToken,
+      clearToken,
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    expect(panel.querySelector<HTMLInputElement>('[data-token-input]')!.disabled).toBe(true)
+    expect(panel.querySelector<HTMLButtonElement>('[data-token-save]')!.disabled).toBe(true)
+    expect(panel.querySelector<HTMLButtonElement>('[data-token-clear]')!.disabled).toBe(true)
+    const hint = panel.querySelector<HTMLElement>('[data-token-hint]')!
+    expect(hint.getAttribute('data-token-readonly')).toBe('true')
+    // The way out is environmental: unset the variable in the shell that starts
+    // dsh instead of writing a value the launch environment would shadow.
+    expect(hint.textContent).toBe(zh.tokenEnvHint.replace('{ref}', 'DSH_GITHUB_TOKEN'))
+    expect(panel.querySelector('[data-token-status]')?.textContent)
+      .toBe(statusLine({ configured: true, source: 'env' }))
+
+    // Clicking a disabled switch is a no-op: nothing is written.
+    await click(panel.querySelector('[data-token-save]'))
+    await click(panel.querySelector('[data-token-clear]'))
+    expect(saveToken).not.toHaveBeenCalled()
+    expect(clearToken).not.toHaveBeenCalled()
+  })
+
+  it('saves the typed token, clears the input and re-reads the status from the answer', async () => {
+    const tokenStatus = vi.fn(async () => makeTokenStatus({ configured: false, writable: true }))
+    const saveToken = vi.fn(async () => makeTokenUpdate({ configured: true, source: 'file', ref: 'DSH_GITHUB_TOKEN' }))
+    const { props } = managePageHarness({ tokenStatus, saveToken })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const input = panel.querySelector<HTMLInputElement>('[data-token-input]')!
+    await typeInto(input, 'ghp_secret_value')
+    await click(panel.querySelector('[data-token-save]'))
+    await flush()
+
+    expect(saveToken).toHaveBeenCalledTimes(1)
+    // The value travels as typed: the host owns the "never store a blank" rule.
+    expect(saveToken).toHaveBeenCalledWith('ghp_secret_value')
+    expect(input.value).toBe('')
+    expect(panel.querySelector('[data-token-notice]')?.textContent).toBe(zh.tokenSaved)
+    expect(panel.querySelector<HTMLElement>('[data-token-status]')!.textContent)
+      .toBe(statusLine({ configured: true, source: 'file' }))
+    // The answer IS the post-write status: no second read is needed.
+    expect(tokenStatus).toHaveBeenCalledTimes(1)
+    expect(panel.querySelector<HTMLButtonElement>('[data-token-clear]')!.disabled).toBe(false)
+  })
+
+  it('clears the stored token and reports the status the host answered with', async () => {
+    const clearToken = vi.fn(async () => makeTokenUpdate({ configured: false, ref: 'DSH_GITHUB_TOKEN' }))
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({ configured: true, source: 'file', writable: true })),
+      clearToken,
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    await click(panel.querySelector('[data-token-clear]'))
+    await flush()
+
+    expect(clearToken).toHaveBeenCalledTimes(1)
+    expect(panel.querySelector('[data-token-notice]')?.textContent).toBe(zh.tokenCleared)
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    expect(status.textContent).toBe(statusLine({ configured: false }))
+    expect(status.getAttribute('data-token-configured')).toBe('false')
+    expect(panel.querySelector<HTMLButtonElement>('[data-token-clear]')!.disabled).toBe(true)
+  })
+
+  it('branches on the stable error codes of a refused write without instanceof checks', async () => {
+    const { props } = managePageHarness({
+      saveToken: vi.fn(async () => {
+        throw new MarketCallFailure({ code: 'github/bad-request', message: 'empty token', details: {} })
+      }),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    let panel = await openTokenTab(host)
+
+    await typeInto(panel.querySelector<HTMLInputElement>('[data-token-input]')!, '')
+    await click(panel.querySelector('[data-token-save]'))
+    await flush()
+    let error = panel.querySelector<HTMLElement>('[data-token-error]')!
+    expect(error.getAttribute('data-error-code')).toBe('github/bad-request')
+    expect(error.textContent).toBe(zh.tokenErrorBadRequest)
+    // The refused write changed nothing locally: the status still reads as it did.
+    expect(panel.querySelector('[data-token-notice]')).toBeNull()
+    expect(panel.querySelector('[data-token-status]')?.getAttribute('data-token-configured')).toBe('false')
+
+    const root = roots.pop()!
+    await act(async () => { root.unmount() })
+    host.remove()
+
+    // A deployment with no credential seam answers the one stable code for both
+    // halves; the panel says so instead of rendering a bare code line.
+    const second = managePageHarness({
+      tokenStatus: vi.fn(async () => {
+        throw new MarketCallFailure({ code: 'github/token-unavailable', message: 'no seam', details: {} })
+      }),
+    })
+    const host2 = await renderInto(<ManagePluginsTab {...second.props} />)
+    await flush()
+    panel = await openTokenTab(host2)
+    const loadError = panel.querySelector<HTMLElement>('[data-token-load-error]')!
+    expect(loadError.getAttribute('data-error-code')).toBe('github/token-unavailable')
+    expect(loadError.textContent).toContain(zh.tokenLoadFailed)
+    expect(loadError.textContent).toContain(zh.tokenErrorUnavailable)
+    expect(panel.querySelector('[data-token-input]')).toBeNull()
+
+    // A code this build does not know falls back to the code line (soft branch).
+    const third = managePageHarness({
+      saveToken: vi.fn(async () => {
+        throw new MarketCallFailure({ code: 'repository/io', message: 'write failed', details: {} })
+      }),
+    })
+    const host3 = await renderInto(<ManagePluginsTab {...third.props} />)
+    await flush()
+    panel = await openTokenTab(host3)
+    await typeInto(panel.querySelector<HTMLInputElement>('[data-token-input]')!, 'ghp_x')
+    await click(panel.querySelector('[data-token-save]'))
+    await flush()
+    expect(panel.querySelector('[data-token-error]')?.textContent)
+      .toBe(zh.tokenErrorWithCode.replace('{code}', 'repository/io'))
+  })
+
+  it('disables the input and actions while a write is in flight and ignores a late answer', async () => {
+    let settle: (value: GitHubTokenUpdateResult) => void = () => {}
+    const { props } = managePageHarness({
+      saveToken: vi.fn(() => new Promise<GitHubTokenUpdateResult>(resolve => { settle = resolve })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const input = panel.querySelector<HTMLInputElement>('[data-token-input]')!
+    await typeInto(input, 'ghp_secret')
+    await click(panel.querySelector('[data-token-save]'))
+
+    expect(input.disabled).toBe(true)
+    expect(panel.querySelector('[data-token-body]')?.getAttribute('aria-busy')).toBe('true')
+    expect(panel.querySelector('[data-token-save]')?.textContent).toContain(zh.tokenSaving)
+
+    // Unmounting while the write is in flight: the late answer must not write
+    // into a component that is gone.
+    const root = roots.pop()!
+    await act(async () => { root.unmount() })
+    await act(async () => { settle(makeTokenUpdate({ configured: true, source: 'file' })) })
+    await flush()
+    expect(host.textContent).toBe('')
+    host.remove()
   })
 })
