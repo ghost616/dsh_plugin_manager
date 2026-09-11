@@ -18,7 +18,12 @@ import type { ReactElement } from 'react'
 import type { GitHubSearchPage, PluginInstallReview } from '../src/types.ts'
 import { zh } from '../src/client/locales.ts'
 import { MarketCallFailure, type MarketClientWireCode } from '../src/client/channel.ts'
-import { ManagePluginsTab, type ManagePluginsTabInjected, type ManagePluginsTabProps } from '../src/client/ManagePluginsTab.tsx'
+import {
+  DOWNLOAD_FAILURE_REASONS,
+  ManagePluginsTab,
+  type ManagePluginsTabInjected,
+  type ManagePluginsTabProps,
+} from '../src/client/ManagePluginsTab.tsx'
 import {
   makeCommit,
   makeInstallReview,
@@ -1555,8 +1560,37 @@ describe('ManagePluginsTab download classification', () => {
   }
 
   it('localizes every download-family failure code the UI can actually receive', async () => {
-    // One test, several codes: the primary line of a failed stage always comes
-    // from this tab's dictionary, never from the host's message.
+    /*
+     * One test, several codes: the primary line of a failed stage always comes
+     * from this tab's dictionary, never from the host's message.
+     *
+     * The list below is the UI half of the stage-failure inventory; the host
+     * half is plugin-control-service > `current_spec.md` >
+     * 「下载三阶段与错误码」>「阶段错误码一览（供 UI 分支）」. That inventory is
+     * per phase, and the correspondence is:
+     *
+     * - prepareDownload: `gate/consent-required`, `record/key-invalid`,
+     *   `record/invalid`, `github/bad-request`, `install/dir-exists`,
+     *   `install/dir-in-use`, `install/git-failed`, `install/io`,
+     *   `market/confirm-required`, `market/confirm-invalid`,
+     *   `market/confirm-expired`, `market/idle` (not activated);
+     * - classifyDownload: `record/not-found` (the only code it throws);
+     * - commitDownload: `record/not-found`, `record/invalid`,
+     *   `install/io` (carries the `repair:`/`commit-before-swap` reasons),
+     *   `market/bad-request` (illegal classification label);
+     * - cancelDownload: never throws (always answers `false`).
+     *
+     * Codes the UI renders through an EXISTING generic key rather than a
+     * download-family key are therefore absent here and covered elsewhere:
+     * `market/confirm-required` -> `confirmRequired` and
+     * `market/confirm-expired` -> `confirmExpired` come from the shared
+     * preview/confirm family (`failureText`), which the confirm-expired
+     * survival cases in this file already exercise.
+     *
+     * `record/io` and `record/corrupt` are listed for completeness of the
+     * records-file family even though the three download phases mostly surface
+     * them via the control layer's record store.
+     */
     const codes: Array<[MarketClientWireCode, string]> = [
       ['market/idle', zh.failureMarketIdle],
       ['record/not-found', zh.failureDownloadHandleLost],
@@ -1566,6 +1600,12 @@ describe('ManagePluginsTab download classification', () => {
       ['gate/consent-required', zh.failureConsentRequired],
       ['record/invalid', zh.failureRecordInvalid],
       ['market/bad-request', zh.failureBadRequest],
+      ['install/git-failed', zh.failureGitCloneFailed],
+      ['github/bad-request', zh.failureGithubBadRequest],
+      ['record/key-invalid', zh.failureRecordKeyInvalid],
+      ['market/confirm-invalid', zh.failureConfirmInvalid],
+      ['record/io', zh.failureRecordIo],
+      ['record/corrupt', zh.failureRecordCorrupt],
     ]
     for (const [code, expected] of codes) {
       const { host, error } = await stageFailure({ code })
@@ -1574,6 +1614,45 @@ describe('ManagePluginsTab download classification', () => {
       // The host's prose never reaches the visible line (carried as title only).
       expect(error?.textContent).not.toContain('HOST PROSE')
       expect(host.querySelector('[data-dialog="install"]')).not.toBeNull()
+      await act(async () => { host.remove() })
+    }
+  })
+
+  it('keeps the download codes that share a shape on distinct copy', async () => {
+    // Three near-neighbour pairs the dictionary must NOT collapse: the same
+    // sentence for both halves would send the user to the wrong remedy.
+    const pairs: Array<[MarketClientWireCode, MarketClientWireCode]> = [
+      // install-path I/O vs the records file's own I/O.
+      ['install/io', 'record/io'],
+      // A malformed market request vs a malformed GitHub slug.
+      ['market/bad-request', 'github/bad-request'],
+      // A structurally broken records file vs a single invalid record.
+      ['record/corrupt', 'record/invalid'],
+    ]
+    for (const [left, right] of pairs) {
+      const a = await stageFailure({ code: left })
+      const leftCopy = a.error?.textContent ?? ''
+      const b = await stageFailure({ code: right })
+      const rightCopy = b.error?.textContent ?? ''
+      expect(leftCopy.length).toBeGreaterThan(0)
+      expect(rightCopy.length).toBeGreaterThan(0)
+      expect(leftCopy).not.toBe(rightCopy)
+      await act(async () => {
+        a.host.remove()
+        b.host.remove()
+      })
+    }
+  })
+
+  it('localizes every `record/*` failure without falling back to the code line', async () => {
+    // The generic fallback (`failedWithCode`) embeds the raw wire code. A code
+    // that reaches it while the dictionary HAS copy is a missing wiring, so the
+    // wire code must never appear in the visible line.
+    const codes: readonly MarketClientWireCode[] = ['record/key-invalid', 'record/corrupt', 'record/io']
+    for (const code of codes) {
+      const { host, error } = await stageFailure({ code })
+      expect(error?.textContent).not.toContain(code)
+      expect(error?.textContent).not.toContain('{code}')
       await act(async () => { host.remove() })
     }
   })
@@ -1588,6 +1667,37 @@ describe('ManagePluginsTab download classification', () => {
   })
 
   it('soft-branches on details.reason and degrades on an unknown value', async () => {
+    // Every reason this build recognizes comes from the page's own closed set
+    // (`DOWNLOAD_FAILURE_REASONS`, pinned to `MarketDownloadFailureReason`), and
+    // the cases below are driven BY that list: dropping or renaming a member
+    // fails here instead of silently losing the guidance.
+    expect([...DOWNLOAD_FAILURE_REASONS]).toEqual([
+      'download-expired',
+      'download-unknown',
+      'commit-before-swap',
+      'repair:checkout-committed-no-record',
+      'repair:checkout-committed-record-stale',
+    ])
+    /** Every recognized reason must render SOME secondary line, never none. */
+    const rendered = new Map<string, string>()
+    for (const reason of DOWNLOAD_FAILURE_REASONS) {
+      // NOTE: the helper's fields are destructured under DIFFERENT names so they
+      // cannot shadow the loop's reason literal; the marker attribute lives on
+      // the `[data-stage-error]` node while the guidance text has its own node.
+      const { host, error: errorNode, reason: reasonNode } = await stageFailure({
+        code: 'install/io',
+        details: { reason, path: '/repo/gh-acme-helper' },
+      })
+      const copy = reasonNode?.textContent ?? ''
+      expect(errorNode?.getAttribute('data-error-reason')).toBe(reason)
+      expect(copy.length).toBeGreaterThan(0)
+      rendered.set(reason, copy)
+      await act(async () => { host.remove() })
+    }
+    // The five recognized reasons produce five DISTINCT lines: the `repair:`
+    // pair and the two handle-loss values are the whole point of the branch.
+    expect(new Set(rendered.values()).size).toBe(DOWNLOAD_FAILURE_REASONS.length)
+
     // The two handle-loss reasons are distinguished.
     const expired = await stageFailure({ code: 'record/not-found', details: { reason: 'download-expired' } })
     expect(expired.error?.getAttribute('data-error-reason')).toBe('download-expired')
@@ -1597,9 +1707,13 @@ describe('ManagePluginsTab download classification', () => {
     expect(unknown.reason?.textContent).toBe(zh.failureReasonDownloadUnknown)
     expect(unknown.reason?.textContent).not.toBe(expired.reason?.textContent)
 
-    // Pre-swap: retryable, nothing moved.
+    // The swap was not completed: retryable, and the copy must NOT claim the
+    // local sources and the record are untouched (the pre-swap teardown may
+    // already have removed the old checkout).
     const beforeSwap = await stageFailure({ code: 'install/io', details: { reason: 'commit-before-swap' } })
     expect(beforeSwap.reason?.textContent).toBe(zh.failureReasonCommitBeforeSwap)
+    expect(beforeSwap.reason?.textContent).toContain(zh.stageRetry)
+    expect(beforeSwap.reason?.textContent).not.toContain('未改动')
 
     // The repair pair: same code, opposite instructions — hand cleanup vs re-run.
     const noRecord = await stageFailure({

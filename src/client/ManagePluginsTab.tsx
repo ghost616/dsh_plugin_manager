@@ -18,6 +18,7 @@ import type {
   ManagedPluginList,
   ManagedPluginPhase,
   ManagedPluginView,
+  MarketDownloadFailureReason,
   MarketInstallNote,
   MarketStatus,
   PluginInstallReview,
@@ -202,6 +203,41 @@ export function isAnalysisFailureCode(code: string): boolean {
 }
 
 /**
+ * The `details.reason` values this build recognizes, pinned to the shared
+ * cross-face vocabulary.
+ *
+ * `satisfies readonly MarketDownloadFailureReason[]` is the load-bearing part:
+ * every literal must still be a member of the union `src/types.ts` publishes, so
+ * a host-side rename fails the compile gate here instead of silently degrading
+ * the stage row to "no reason guidance" at runtime.
+ *
+ * Exported so the spec can drive its reason cases from the SAME list the branch
+ * below uses — the two can then never drift apart.
+ */
+export const DOWNLOAD_FAILURE_REASONS = [
+  'download-expired',
+  'download-unknown',
+  'commit-before-swap',
+  'repair:checkout-committed-no-record',
+  'repair:checkout-committed-record-stale',
+] as const satisfies readonly MarketDownloadFailureReason[]
+
+/**
+ * Reason -> dictionary key, driven by {@link DOWNLOAD_FAILURE_REASONS}.
+ *
+ * Using the list as the `Record` key type makes this a total map: adding a
+ * member to the list (or removing one) is a compile error until the copy is
+ * brought in line, so the branch can never quietly lose a case.
+ */
+const REASON_COPY_KEYS = {
+  'download-expired': 'failureReasonDownloadExpired',
+  'download-unknown': 'failureReasonDownloadUnknown',
+  'commit-before-swap': 'failureReasonCommitBeforeSwap',
+  'repair:checkout-committed-no-record': 'failureReasonRepairNoRecord',
+  'repair:checkout-committed-record-stale': 'failureReasonRepairStale',
+} satisfies Record<(typeof DOWNLOAD_FAILURE_REASONS)[number], MarketManageLocaleKey>
+
+/**
  * Localized copy of a DOWNLOAD-stage failure: the primary line the stage row
  * shows, plus the optional secondary guidance the failure's `details.reason`
  * calls for.
@@ -234,6 +270,16 @@ function downloadFailureText(
       case 'gate/consent-required': return t('failureConsentRequired')
       case 'record/invalid': return t('failureRecordInvalid')
       case 'market/bad-request': return t('failureBadRequest')
+      // The rest of the download family. None of these may share a key with a
+      // neighbour: `record/io` is not the install-path I/O failure, and
+      // `github/bad-request` (a malformed slug) is not the market-side
+      // `market/bad-request` refusal — each needs its own actionable guidance.
+      case 'install/git-failed': return t('failureGitCloneFailed')
+      case 'github/bad-request': return t('failureGithubBadRequest')
+      case 'record/key-invalid': return t('failureRecordKeyInvalid')
+      case 'market/confirm-invalid': return t('failureConfirmInvalid')
+      case 'record/io': return t('failureRecordIo')
+      case 'record/corrupt': return t('failureRecordCorrupt')
       default: return failureText(failure, t)
     }
   })()
@@ -241,16 +287,18 @@ function downloadFailureText(
     switch (failureReason(failure)) {
       // The handle is gone: distinguish "swept after its TTL" (just start over)
       // from "this process never staged it" (unknown cause).
-      case 'download-expired': return t('failureReasonDownloadExpired')
-      case 'download-unknown': return t('failureReasonDownloadUnknown')
-      // Nothing moved before the swap: the same handle can be retried.
-      case 'commit-before-swap': return t('failureReasonCommitBeforeSwap')
+      case 'download-expired': return t(REASON_COPY_KEYS['download-expired'])
+      case 'download-unknown': return t(REASON_COPY_KEYS['download-unknown'])
+      // The swap was not completed: the stage row supports retrying it.
+      case 'commit-before-swap': return t(REASON_COPY_KEYS['commit-before-swap'])
       // The swap DID happen: no record describes the new checkout, so only a
       // human can clean it up.
-      case 'repair:checkout-committed-no-record': return t('failureReasonRepairNoRecord')
+      case 'repair:checkout-committed-no-record':
+        return t(REASON_COPY_KEYS['repair:checkout-committed-no-record'])
       // The swap happened while the old record is still in place: re-running the
       // download is an idempotent overwrite that re-syncs the record.
-      case 'repair:checkout-committed-record-stale': return t('failureReasonRepairStale')
+      case 'repair:checkout-committed-record-stale':
+        return t(REASON_COPY_KEYS['repair:checkout-committed-record-stale'])
       // Unknown or absent reason: no extra guidance, the primary line stands.
       default: return null
     }
@@ -605,8 +653,15 @@ function ManagedList({ snapshot, busyKeys, rowFailures, query, t, onQuery, onTog
  */
 type DownloadStageId = 'clone' | 'classify' | 'commit'
 
-/** Visual/state contract of one phase row. */
-type DownloadStageState = 'waiting' | 'running' | 'done' | 'failed'
+/**
+ * Visual/state contract of one phase row.
+ *
+ * Named `DownloadProgressState` — NOT `DownloadStageState` — so it can never be
+ * confused with the cross-face wire contract of that name in `src/types.ts`
+ * (`prepared` | `classified` | `committed`), which this page also compiles
+ * against.
+ */
+type DownloadProgressState = 'waiting' | 'running' | 'done' | 'failed'
 
 type InstallPhase =
   | { readonly phase: 'preview' }
@@ -618,7 +673,7 @@ type InstallPhase =
     readonly review: PluginInstallReview
     /** Download handle once phase 1 answered it; process-local, never persisted. */
     readonly token: string | null
-    readonly stages: Readonly<Record<DownloadStageId, DownloadStageState>>
+    readonly stages: Readonly<Record<DownloadStageId, DownloadProgressState>>
     readonly running: DownloadStageId
     /** Verdict of phase 2, absent while it has not answered yet. */
     readonly verdict?: DownloadClassification
@@ -628,7 +683,7 @@ type InstallPhase =
     readonly phase: 'failed'
     readonly review: PluginInstallReview
     readonly token: string | null
-    readonly stages: Readonly<Record<DownloadStageId, DownloadStageState>>
+    readonly stages: Readonly<Record<DownloadStageId, DownloadProgressState>>
     readonly failed: DownloadStageId
     /** Verdict of phase 2 when it already answered (kept for a commit retry). */
     readonly verdict?: DownloadClassification
@@ -641,8 +696,8 @@ function stageMap(
   running: DownloadStageId | null,
   done: readonly DownloadStageId[] = [],
   failed: DownloadStageId | null = null,
-): Record<DownloadStageId, DownloadStageState> {
-  const state = (id: DownloadStageId): DownloadStageState => {
+): Record<DownloadStageId, DownloadProgressState> {
+  const state = (id: DownloadStageId): DownloadProgressState => {
     if (failed === id) return 'failed'
     if (running === id) return 'running'
     if (done.includes(id)) return 'done'
@@ -658,13 +713,22 @@ const STAGE_LABEL_KEYS = {
   commit: 'stageCommit',
 } satisfies Record<DownloadStageId, MarketManageLocaleKey>
 
-/** Dictionary key of one stage's state text. */
+/**
+ * Dictionary key of one stage's state text.
+ *
+ * The state names are the page-local `DownloadProgressState` union, NOT the
+ * cross-face `DownloadStageState` exported by `src/types.ts` (the wire contract
+ * of the same name uses `prepared`/`classified`/`committed`). Keeping the two
+ * names apart is deliberate: only one of them may be imported from the shared
+ * face, and a collision would make it impossible to tell which vocabulary a
+ * site means.
+ */
 const STAGE_STATE_KEYS = {
   waiting: 'stageWaiting',
   running: 'stageRunning',
   done: 'stageDone',
   failed: 'stageFailed',
-} satisfies Record<DownloadStageState, MarketManageLocaleKey>
+} satisfies Record<DownloadProgressState, MarketManageLocaleKey>
 
 /** Localized classification tag of one review: the label the tag carries. */
 function reviewClassificationText(review: PluginInstallReview, t: Translate): string {

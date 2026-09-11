@@ -255,8 +255,20 @@ export const zh = {
   failureMarketIdle: '插件市场未激活：请先配置插件源仓库，再重新下载。',
   /** The download handle is gone (swept after its TTL, or unknown). */
   failureDownloadHandleLost: '下载句柄已失效：请重新发起下载（句柄只在当前进程有效，重启后失效）。',
-  /** Generic I/O failure inside the install path. */
+  /** Generic I/O failure inside the install path. Distinguish from `failureRecordIo`. */
   failureInstallIo: '下载写入失败：请按下方指引处理后重试。',
+  /** The records file could not be read or written (I/O). */
+  failureRecordIo: '插件记录读写失败：请检查记录文件与所在目录的读写权限，处理后重试。',
+  /** The records file is structurally broken, so it cannot be parsed or updated. */
+  failureRecordCorrupt: '插件记录文件已损坏（无法解析）：请修复或移除该记录文件后重试。',
+  /** The plugin key derived from the ref is not a valid stable key. */
+  failureRecordKeyInvalid: '该版本无法生成合法的插件记录标识：请返回详情页改选其他分支或标签后重试。',
+  /** The git clone itself failed (network/auth/remote), before any write. */
+  failureGitCloneFailed: '拉取源码失败（git clone 未成功）：请检查网络与仓库访问权限后重试。',
+  /** The repository slug is not a valid `owner/repo` GitHub slug. */
+  failureGithubBadRequest: '仓库地址无效，下载被拒绝：请返回列表重新选择仓库后重试。',
+  /** The download confirmation token is not usable for this request. */
+  failureConfirmInvalid: '确认信息无效：请重新确认后再下载。',
   /** An orphan checkout already occupies the download target. */
   failureDirExists: '目标检出目录已存在（可能是上次失败留下的孤儿检出）：请按下方路径处理后再重试。',
   /** The target directory is held by a live process. */
@@ -265,7 +277,7 @@ export const zh = {
   failureConsentRequired: '该操作需要先在信任门禁中确认授权。',
   /** The records file is invalid, so it cannot be updated. */
   failureRecordInvalid: '插件记录无效，无法写入：请修复记录文件后重试。',
-  /** The request was refused as malformed. */
+  /** A malformed MARKET request was refused. Distinguish from `failureGithubBadRequest`. */
   failureBadRequest: '请求参数无效，下载被拒绝：请返回详情页重新选择版本后重试。',
   /*
    * `details.reason` guidance (the soft branch). A missing or unknown reason
@@ -275,8 +287,15 @@ export const zh = {
   failureReasonDownloadExpired: '下载句柄已超时清理：请重新发起下载。',
   /** The handle is unknown to this process (cause unclear). */
   failureReasonDownloadUnknown: '未找到该下载句柄（原因不明）：请重新发起下载；若持续失败，请确认服务是否重启过。',
-  /** Pre-swap failure: nothing moved, so the same stage can be retried. */
-  failureReasonCommitBeforeSwap: '尚未开始换入，本地源码与记录都未改动：可直接使用「重试该阶段」。',
+  /**
+   * Pre-swap commit failure.
+   *
+   * The host's commit removes the previous checkout and then renames the staged
+   * one into place, so a failure BEFORE the swap may have already removed the
+   * old sources: the copy must NOT claim that nothing changed. It only states
+   * that the swap was not completed, and that retrying the stage is supported.
+   */
+  failureReasonCommitBeforeSwap: '本次未完成换入，目标目录可能处于中间状态：可直接使用「重试该阶段」。',
   /** Post-swap failure with no record: hand cleanup is the only way out. */
   failureReasonRepairNoRecord: '检出已换入但记录未写入：只能先按下方路径手工删除该检出，再重新下载。',
   /** Post-swap failure with a stale record: re-running is idempotent. */
@@ -436,6 +455,12 @@ export const en: Record<MarketManageLocaleKey, string> = {
   failureMarketIdle: 'The plugin market is not active: configure a plugin source repository, then start the download again.',
   failureDownloadHandleLost: 'The download handle is no longer usable: start the download again (handles live only in the current process and never survive a restart).',
   failureInstallIo: 'Writing the download failed: follow the guidance below and retry.',
+  failureRecordIo: 'Reading or writing the plugin records file failed: check the permissions of the records file and its directory, then retry.',
+  failureRecordCorrupt: 'The plugin records file is corrupt (it could not be parsed): repair or remove that records file, then retry.',
+  failureRecordKeyInvalid: 'No valid plugin record key can be derived from this version: go back to the detail view and pick another branch or tag, then retry.',
+  failureGitCloneFailed: 'Fetching the sources failed (git clone did not succeed): check the network and your access to the repository, then retry.',
+  failureGithubBadRequest: 'The repository address is invalid, so the download was refused: go back to the list and pick the repository again.',
+  failureConfirmInvalid: 'The download confirmation is not usable: confirm again before downloading.',
   failureDirExists: 'The target checkout directory already exists (likely an orphan from an earlier failure): handle it as shown below, then retry.',
   failureDirInUse: 'The target checkout directory is in use: stop or close the plugin process holding it, then retry.',
   failureConsentRequired: 'This action needs an explicit confirmation in the trust gate first.',
@@ -443,7 +468,7 @@ export const en: Record<MarketManageLocaleKey, string> = {
   failureBadRequest: 'The request was rejected as malformed: go back to the detail view, pick the ref again and retry.',
   failureReasonDownloadExpired: 'The staged handle was cleaned up after its time limit: start the download again.',
   failureReasonDownloadUnknown: 'This download handle is unknown to the process (cause unclear): start the download again; if it keeps failing, check whether the service restarted.',
-  failureReasonCommitBeforeSwap: 'The swap never started and neither the sources nor the record changed: use "Retry this stage".',
+  failureReasonCommitBeforeSwap: 'This swap was not completed and the target directory may be in an intermediate state: use "Retry this stage".',
   failureReasonRepairNoRecord: 'The checkout was swapped in but no record was written: remove that checkout by hand (path below) before downloading again.',
   failureReasonRepairStale: 'The checkout was swapped in while the record still describes the old one: just run the download again (idempotent overwrite that re-syncs the record).',
   failedWithCode: 'Operation failed ({code}).',

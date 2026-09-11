@@ -12,6 +12,7 @@
  *
  * 纯新增用例，不修改任何既有用例。
  */
+import type { Dirent } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -743,15 +744,73 @@ function compact(text: string): string {
 }
 
 /**
+ * Directory roots under `tests/` that the scan prunes on purpose: the shared
+ * scratch root holds per-suite temp trees only (`tests/support/tmpdir.ts`), never
+ * a repository spec file — the whole directory is git-ignored scratch
+ * (`.gitignore`: `tests/.tmp/`), so pruning it cannot drop a version-controlled
+ * spec from the guard. It removes the largest source of scan-time churn, but it is
+ * only a **supplement**: scratch trees are created and removed *inside* that root
+ * while the walk is in flight, and other suites (`control-loader-demo`,
+ * `control-composer`) write scratch data there too — so the `ENOENT` tolerance
+ * below is what makes the walk correct. Never let this list become the fix.
+ */
+const SPEC_SCAN_PRUNED_DIRS: readonly string[] = ['tests/.tmp']
+
+/**
+ * Is `error` the fs failure raised when a path **vanished while it was being
+ * scanned**? That is the only class of error the walkers below tolerate; every
+ * other code (`EACCES`, `EIO`, `ENOTDIR`, …) must still surface as a real failure.
+ */
+function isVanishedPathError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ENOENT'
+}
+
+/**
+ * `readdir` that tolerates a directory disappearing between the moment its parent
+ * listed it and the moment it is read — a parallel spec finishing and calling
+ * `removeTmp()` on its scratch tree. Only that race yields `[]`; any other failure
+ * is rethrown unchanged.
+ */
+async function readdirTolerant(dir: string): Promise<Dirent[]> {
+  try {
+    return await readdir(dir, { withFileTypes: true })
+  } catch (error) {
+    if (isVanishedPathError(error)) return []
+    throw error
+  }
+}
+
+/**
+ * `readFile` that tolerates a file disappearing after the scan listed it.
+ * `null` means "it is gone, skip it"; any other error is rethrown unchanged.
+ */
+async function readFileTolerant(file: string): Promise<string | null> {
+  try {
+    return await readFile(file, 'utf8')
+  } catch (error) {
+    if (isVanishedPathError(error)) return null
+    throw error
+  }
+}
+
+/**
  * 递归收集 `tests/` 下的全部 spec 文件（`.spec.ts` / `.spec.tsx`），返回相对
  * 仓库根的 POSIX 路径（稳定排序）—— 仓级守卫按此清单循环执行。
+ *
+ * **ENOENT 竞态容错**：一次遍历不是快照锁。并行 spec 的临时目录树
+ * （`tests/.tmp/<suite>-XXXX`，由 `tests/support/tmpdir.ts` 与
+ * `tests/control-loader-demo.spec.ts` / `tests/control-composer.spec.ts` 创建）
+ * 会在遍历期间被 `removeTmp()` 删除，使 `readdir` 或逐文件读取抛 ENOENT，
+ * 表现为「重跑即绿」的偶发失败。这类「路径在扫描期消失」不是缺陷，因此跳过并
+ * 继续；`SPEC_SCAN_PRUNED_DIRS` 只是减少竞态窗口的补充手段，任何其它错误码仍
+ * 照常抛出，绝不被吞掉。
  */
 async function collectSpecFiles(root: string): Promise<string[]> {
   const found: string[] = []
   const walk = async (dir: string): Promise<void> => {
-    const entries = await readdir(join(root, dir), { withFileTypes: true })
-    for (const entry of entries) {
+    for (const entry of await readdirTolerant(join(root, dir))) {
       const rel = `${dir}/${entry.name}`
+      if (SPEC_SCAN_PRUNED_DIRS.includes(rel)) continue
       if (entry.isDirectory()) await walk(rel)
       else if (/\.spec\.tsx?$/.test(entry.name)) found.push(rel)
     }
@@ -928,6 +987,8 @@ describe('[挑战] §5 契约检查', () => {
     //    条数必须与登记相符（按形态+条数而非行号，避免他方插入代码导致行号漂移
     //    误报 —— 见该常量的文档注释）。
     // 自查：本文件自身也在 tests/ 下，因此同一规则也约束本文本。
+    // 扫描期消失的路径（并行 spec 删除自己的临时树）被跳过而不是判失败 ——
+    // 见 {@link collectSpecFiles} / {@link readFileTolerant}；其余错误码仍抛出。
     const specs = await collectSpecFiles(root)
     expect(specs.length).toBeGreaterThan(0)
     expect(specs).toContain('tests/lizhu-fix-round-gate.spec.ts')
@@ -935,7 +996,8 @@ describe('[挑战] §5 契约检查', () => {
     let declarationCount = 0
     const files: { path: string; text: string }[] = []
     for (const spec of specs) {
-      const text = await readFile(join(root, spec), 'utf8')
+      const text = await readFileTolerant(join(root, spec))
+      if (text === null) continue
       declarationCount += itDeclarationStartLines(text).length
       files.push({ path: spec, text })
     }

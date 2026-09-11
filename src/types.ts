@@ -656,11 +656,17 @@ export interface RemoveOutcome {
  * These five strings are what the control layer puts on a failed
  * `prepareDownload` / `classifyDownload` / `commitDownload` handle or commit, so
  * a consumer can branch on *why* it failed. They are declared here as a
- * COMPILE-TIME vocabulary only:
+ * compile-time vocabulary, which means exactly this:
  *
- * - no runtime constant is exported - `src/types.ts` is imported by value by
- *   the browser half, and these values are produced exclusively by the host
- *   control layer (which keeps its own `DOWNLOAD_REASON_*` constants);
+ * - this file exports a TYPE for the vocabulary and no vocabulary constant
+ *   object that an outside caller could import; the strings themselves are
+ *   produced exclusively by the host control layer, which keeps its own
+ *   `DOWNLOAD_REASON_*` constants as the single runtime source of truth;
+ * - the strings do reach the client bundle all the same, written out as the
+ *   compared literals of the consumer's soft branches (the web half tests
+ *   `reason === 'commit-before-swap'`, and so on). That is intended: a literal
+ *   comparison is how a consumer names the vocabulary value it handles, it is
+ *   not a leaked runtime dependency on the producer;
  * - {@link MarketRemoteErrorDetails.reason} is NOT narrowed to this union: see
  *   the soft-branch contract there.
  *
