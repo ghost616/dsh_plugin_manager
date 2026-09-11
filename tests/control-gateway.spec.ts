@@ -363,6 +363,44 @@ describe('MarketControllerGateway host Remote surface', () => {
     })
   })
 
+  it('keeps the pre-swap sub-window fact off the wire and points at the missing checkout', async () => {
+    const { gateway, engines } = gatewayWith()
+    const review = await gateway.previewInstall('octocat/demo-plugin', null, null)
+    const prepared = await gateway.prepareDownload('octocat/demo-plugin', review.confirmToken, null, null)
+
+    // Harmless sub-window (`previousRemoved` false/absent): nothing was lost, so
+    // there is no directory to point at — only key/path/reason may travel.
+    engines.commitError = new MarketError('install/io', 'the records file is locked')
+    const harmless = remoteErrorOf(
+      await gateway.commitDownload(prepared.token, 'other').catch((error: unknown) => error),
+    )
+    expect(harmless).toMatchObject({
+      code: 'install/io',
+      details: { key: 'gh-octocat-demo-plugin', reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+    })
+    expect(Object.keys(harmless?.details ?? {}).sort()).toEqual(['key', 'reason'])
+    expect(harmless?.message).toContain('are unchanged')
+
+    // Destructive sub-window (`previousRemoved` true): the previous checkout is
+    // gone and its path is the actionable part of the failure.
+    engines.commitRemovedPrevious = true
+    const lost = remoteErrorOf(
+      await gateway.commitDownload(prepared.token, 'other').catch((error: unknown) => error),
+    )
+    expect(lost).toMatchObject({
+      code: 'install/io',
+      details: {
+        key: 'gh-octocat-demo-plugin',
+        reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
+        path: '/repo/gh-octocat-demo-plugin',
+      },
+    })
+    // The host's own `swapCompleted` / `previousRemoved` booleans never surface.
+    expect(Object.keys(lost?.details ?? {}).sort()).toEqual(['key', 'path', 'reason'])
+    expect(lost?.message).toContain('ALREADY been deleted')
+    expect(lost?.message).not.toContain('are unchanged')
+  })
+
   it('distinguishes a swept download handle from a never-prepared one', async () => {
     let nowMs = 1_000
     const { gateway, engines } = gatewayWith({ now: () => new Date(nowMs), downloadTtlMs: 60_000 })

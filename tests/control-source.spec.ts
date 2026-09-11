@@ -581,9 +581,17 @@ describe('MarketSourceOperations download channel (phased, double confirmation)'
 
     // Phase 3 failure: an unexpected commit failure surfaces as install/io.
     bed.engines.commitError = new MarketError('install/io', 'swap failed', { path: '/repo' })
-    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({ code: 'install/io' })
-    // ...and the handle is released, so the checkout is gone with it.
-    await expect(source.classifyDownload(prepared.token)).rejects.toMatchObject({ code: 'record/not-found' })
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({
+      code: 'install/io',
+      details: { reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+    })
+    // The host dropped ITS handle, but the caller's handle stays usable: the next
+    // phase re-stages from the recipe (a fresh clone) and answers normally.
+    bed.engines.commitError = undefined
+    await expect(source.classifyDownload(prepared.token)).resolves.toMatchObject({ outcome: 'failed' })
+    // The successful prepare plus the re-staging one (the failed clone never
+    // registered a handle).
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(2)
   })
 
   it('rejects an unknown download handle on classify/commit without touching the store', async () => {
@@ -720,6 +728,127 @@ describe('MarketSourceOperations download channel (phased, double confirmation)'
       details: { reason: DOWNLOAD_REASON_EXPIRED },
     })
     expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(2)
+  })
+
+  it('classifies a handle left retryable by a pre-swap failure by re-staging it once', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    bed.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({
+      details: { reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+    })
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(1)
+
+    // The caller handle stays usable for EVERY phase: classify re-stages from
+    // the recipe (the host dropped its own handle when the commit failed) and
+    // answers normally instead of failing on a dead handle.
+    bed.engines.commitError = undefined
+    const classification = await source.classifyDownload(prepared.token)
+    expect(classification.outcome).toBe('classified')
+    const prepares = bed.engines.stagedCalls.filter(call => call.kind === 'prepare')
+    expect(prepares).toHaveLength(2)
+    // ...and it classified the RE-STAGED host handle, not the caller's token.
+    const classified = bed.engines.stagedCalls.find(call => call.kind === 'classify')
+    expect(classified?.token).toBe(prepares[1]?.token)
+    expect(classified?.token).not.toBe(prepared.token)
+
+    // The follow-up commit reuses that adopted staging: no third clone.
+    const outcome = await source.commitDownload(prepared.token, classification.classification)
+    expect(outcome.key).toBe(key(GH_KEY))
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(2)
+  })
+
+  it('cancels the re-staged host handle, not the caller token', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    bed.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({
+      details: { reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+    })
+    bed.engines.commitError = undefined
+    await source.classifyDownload(prepared.token)
+    const restaged = bed.engines.stagedCalls.filter(call => call.kind === 'prepare')[1]?.token
+    expect(restaged).toBeDefined()
+
+    await expect(source.cancelDownload(prepared.token)).resolves.toBe(true)
+    expect(bed.engines.cancelledCalls).toEqual([restaged])
+    // Consumed for good: the caller token cannot be used again.
+    await expect(source.cancelDownload(prepared.token)).resolves.toBe(false)
+    await expect(source.classifyDownload(prepared.token)).rejects.toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_EXPIRED },
+    })
+  })
+
+  it('retires and cancels the re-staged host handle when the window expires lazily', async () => {
+    let nowMs = 1_000
+    const bed = testbed()
+    const source = ops(bed, { now: () => new Date(nowMs), downloadTtlMs: 60_000 })
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    bed.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    await expect(source.commitDownload(prepared.token, 'other')).rejects.toMatchObject({
+      details: { reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP },
+    })
+    bed.engines.commitError = undefined
+    await source.classifyDownload(prepared.token)
+    const restaged = bed.engines.stagedCalls.filter(call => call.kind === 'prepare')[1]?.token
+    expect(restaged).toBeDefined()
+
+    // No review happens here, so the phase call discovers the expiry itself — and
+    // it must clean up the staging the host actually holds (the re-staged one),
+    // not the caller token the host already dropped.
+    nowMs += 60_000
+    await expect(source.classifyDownload(prepared.token)).rejects.toMatchObject({
+      code: 'record/not-found',
+      details: { reason: DOWNLOAD_REASON_EXPIRED },
+    })
+    expect(bed.engines.cancelledCalls).toEqual([restaged])
+  })
+
+  it('splits the pre-swap window by the host previousRemoved fact and points at the missing checkout', async () => {
+    const bed = testbed()
+    const source = ops(bed)
+    const review = await source.previewInstall(SLUG)
+    const prepared = await source.prepareDownload(SLUG, review.confirmToken)
+
+    // Sub-window 1 (previousRemoved === false): nothing was lost.
+    bed.engines.commitError = new MarketError('install/io', 'the records file is locked')
+    const harmless = await source.commitDownload(prepared.token, 'other').catch((e: unknown) => e)
+    expect(harmless).toMatchObject({
+      code: 'install/io',
+      details: { reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP, key: GH_KEY },
+    })
+    expect((harmless as { details?: Record<string, unknown> }).details?.path).toBeUndefined()
+    expect((harmless as Error).message).toContain('are unchanged')
+
+    // Sub-window 2 (previousRemoved === true): the old checkout is gone.
+    bed.engines.commitRemovedPrevious = true
+    const lost = await source.commitDownload(prepared.token, 'other').catch((e: unknown) => e)
+    expect(lost).toMatchObject({
+      code: 'install/io',
+      details: {
+        reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
+        key: GH_KEY,
+        path: `/repo/${GH_KEY}`,
+      },
+    })
+    expect((lost as Error).message).toContain('ALREADY been deleted')
+    expect((lost as Error).message).not.toContain('are unchanged')
+
+    // Both sub-windows stay retryable with the same handle.
+    bed.engines.commitError = undefined
+    bed.engines.commitRemovedPrevious = false
+    await expect(source.commitDownload(prepared.token, 'other')).resolves.toMatchObject({ key: key(GH_KEY) })
+    // One clone per failed attempt that got as far as the commit, plus the retry.
+    expect(bed.engines.stagedCalls.filter(call => call.kind === 'prepare')).toHaveLength(3)
   })
 
   it('routes a post-swap failure to repair and names the two forms apart', async () => {

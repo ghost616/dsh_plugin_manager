@@ -247,6 +247,40 @@ export const zh = {
   confirmRequired: '缺少确认信息。',
   /** Protected-entry refusal. */
   protectedEntry: '该条目受保护，无法操作。',
+  /*
+   * Download-stage failure copy. Every one of these is the PRIMARY line of a
+   * failed phase row — the host's own message never becomes visible copy.
+   */
+  /** The market is not activated (no repository configured). */
+  failureMarketIdle: '插件市场未激活：请先配置插件源仓库，再重新下载。',
+  /** The download handle is gone (swept after its TTL, or unknown). */
+  failureDownloadHandleLost: '下载句柄已失效：请重新发起下载（句柄只在当前进程有效，重启后失效）。',
+  /** Generic I/O failure inside the install path. */
+  failureInstallIo: '下载写入失败：请按下方指引处理后重试。',
+  /** An orphan checkout already occupies the download target. */
+  failureDirExists: '目标检出目录已存在（可能是上次失败留下的孤儿检出）：请按下方路径处理后再重试。',
+  /** The target directory is held by a live process. */
+  failureDirInUse: '目标检出目录正被占用：请先停用或关闭占用它的插件进程，再重试。',
+  /** The trust gate requires an explicit consent first. */
+  failureConsentRequired: '该操作需要先在信任门禁中确认授权。',
+  /** The records file is invalid, so it cannot be updated. */
+  failureRecordInvalid: '插件记录无效，无法写入：请修复记录文件后重试。',
+  /** The request was refused as malformed. */
+  failureBadRequest: '请求参数无效，下载被拒绝：请返回详情页重新选择版本后重试。',
+  /*
+   * `details.reason` guidance (the soft branch). A missing or unknown reason
+   * renders none of these and keeps the primary line above.
+   */
+  /** The staged handle expired: start the download over. */
+  failureReasonDownloadExpired: '下载句柄已超时清理：请重新发起下载。',
+  /** The handle is unknown to this process (cause unclear). */
+  failureReasonDownloadUnknown: '未找到该下载句柄（原因不明）：请重新发起下载；若持续失败，请确认服务是否重启过。',
+  /** Pre-swap failure: nothing moved, so the same stage can be retried. */
+  failureReasonCommitBeforeSwap: '尚未开始换入，本地源码与记录都未改动：可直接使用「重试该阶段」。',
+  /** Post-swap failure with no record: hand cleanup is the only way out. */
+  failureReasonRepairNoRecord: '检出已换入但记录未写入：只能先按下方路径手工删除该检出，再重新下载。',
+  /** Post-swap failure with a stale record: re-running is idempotent. */
+  failureReasonRepairStale: '检出已换入而记录仍是旧的：直接重新下载即可（幂等覆盖，会同步记录）。',
   /** Generic failure with the wire code. */
   failedWithCode: '操作失败（{code}）。',
   /** Dismiss/close dialog action. */
@@ -399,6 +433,19 @@ export const en: Record<MarketManageLocaleKey, string> = {
   confirmExpired: 'The confirmation expired; please confirm again.',
   confirmRequired: 'Confirmation is required.',
   protectedEntry: 'This entry is protected and cannot be changed.',
+  failureMarketIdle: 'The plugin market is not active: configure a plugin source repository, then start the download again.',
+  failureDownloadHandleLost: 'The download handle is no longer usable: start the download again (handles live only in the current process and never survive a restart).',
+  failureInstallIo: 'Writing the download failed: follow the guidance below and retry.',
+  failureDirExists: 'The target checkout directory already exists (likely an orphan from an earlier failure): handle it as shown below, then retry.',
+  failureDirInUse: 'The target checkout directory is in use: stop or close the plugin process holding it, then retry.',
+  failureConsentRequired: 'This action needs an explicit confirmation in the trust gate first.',
+  failureRecordInvalid: 'The plugin records file is invalid, so it cannot be updated: repair it and retry.',
+  failureBadRequest: 'The request was rejected as malformed: go back to the detail view, pick the ref again and retry.',
+  failureReasonDownloadExpired: 'The staged handle was cleaned up after its time limit: start the download again.',
+  failureReasonDownloadUnknown: 'This download handle is unknown to the process (cause unclear): start the download again; if it keeps failing, check whether the service restarted.',
+  failureReasonCommitBeforeSwap: 'The swap never started and neither the sources nor the record changed: use "Retry this stage".',
+  failureReasonRepairNoRecord: 'The checkout was swapped in but no record was written: remove that checkout by hand (path below) before downloading again.',
+  failureReasonRepairStale: 'The checkout was swapped in while the record still describes the old one: just run the download again (idempotent overwrite that re-syncs the record).',
   failedWithCode: 'Operation failed ({code}).',
   closeButton: 'Close',
   doneButton: 'Done',

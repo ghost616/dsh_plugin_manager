@@ -650,16 +650,95 @@ export interface RemoveOutcome {
   readonly directory: string
 }
 
+/**
+ * Closed, cross-face vocabulary of the download/commit `details.reason` values.
+ *
+ * These five strings are what the control layer puts on a failed
+ * `prepareDownload` / `classifyDownload` / `commitDownload` handle or commit, so
+ * a consumer can branch on *why* it failed. They are declared here as a
+ * COMPILE-TIME vocabulary only:
+ *
+ * - no runtime constant is exported - `src/types.ts` is imported by value by
+ *   the browser half, and these values are produced exclusively by the host
+ *   control layer (which keeps its own `DOWNLOAD_REASON_*` constants);
+ * - {@link MarketRemoteErrorDetails.reason} is NOT narrowed to this union: see
+ *   the soft-branch contract there.
+ *
+ * The control layer is expected to keep
+ * `satisfies`-checking its constants against this union, which is what makes
+ * "the host produces exactly what the shared document promises" a compile-time
+ * fact instead of a convention.
+ */
+export type MarketDownloadFailureReason =
+  /** The handle was never staged (or is not one this instance knows): re-review and prepare. */
+  | 'download-unknown'
+  /** The staged handle was swept after its TTL: re-review and prepare again. */
+  | 'download-expired'
+  /** The commit failed BEFORE the swap: nothing moved, the same handle can retry. */
+  | 'commit-before-swap'
+  /** The commit failed AFTER the swap and no record exists for the new checkout. */
+  | 'repair:checkout-committed-no-record'
+  /** The commit failed AFTER the swap while the previous record is still in place. */
+  | 'repair:checkout-committed-record-stale'
+
+/**
+ * Every value `details.reason` may carry on a market wire failure.
+ *
+ * {@link MarketDownloadFailureReason} is the closed download/commit family; the
+ * open tail covers values that are *not* a closed cross-face vocabulary - the
+ * `market/not-loadable` discriminators (`'classification'` / `'entry'`) and the
+ * smart-install analyzer's own rationale text, both produced by the host and
+ * both intentionally open. An unrecognized string is the normal case for a
+ * consumer of an older or newer host, which is why the field stays optional.
+ */
+export type MarketRemoteReason = MarketDownloadFailureReason | (string & {})
+
 /** Structured payload carried by every market wire failure (opt-in fields). */
 export interface MarketRemoteErrorDetails {
   readonly key?: string
   readonly path?: string
   /**
    * Machine-readable sub-reason of a failure, when the code alone is not
-   * specific enough (`market/not-loadable` carries `'classification'` or
-   * `'entry'`; smart-install failures carry the analyzer rationale).
+   * specific enough. **Optional soft-branch evidence**, never a closed union:
+   * a consumer branches on the values it knows and falls back to a generic
+   * presentation for anything else (including a missing field). Unknown values
+   * are expected - the payload may come from a different version.
+   *
+   * Values in use:
+   *
+   * - {@link MarketDownloadFailureReason} - the download/commit family, e.g. a
+   *   `market/not-found` on a download/commit handle carries `'download-expired'`
+   *   versus `'download-unknown'` (swept by TTL vs never staged), and an
+   *   `install/io` commit failure carries `'commit-before-swap'` (nothing moved;
+   *   retry the same handle) or a `repair:` value (the swap DID complete and only
+   *   the record write failed - see below);
+   * - `'classification'` / `'entry'` - which half of the enable gate refused a
+   *   `market/not-loadable` record;
+   * - the smart-install analyzer's rationale on `market/llm-*` /
+   *   `market/unsupported-*` failures (its `MarketAnalysisErrorDetails` channel
+   *   is the primary home; this field mirrors it where the code also carries
+   *   these details).
+   *
+   * ## The `repair:` pair (why the reason matters more than the code)
+   *
+   * Both repair values arrive as code `install/io`, the same code a pre-swap
+   * commit failure uses, so the reason is the ONLY discriminator:
+   *
+   * - `repair:checkout-committed-no-record` - the new checkout is in place and
+   *   nothing describes it; a human must remove it before a clean retry;
+   * - `repair:checkout-committed-record-stale` - the new checkout is in place
+   *   while the previous record still describes the old one; re-downloading is
+   *   an idempotent overwrite that re-syncs the record, so no hand cleanup is
+   *   needed.
+   *
+   * On both, the swapped checkout directory travels as {@link path}.
+   *
+   * Note the reverse edge: the host also attaches `swapCompleted` /
+   * `checkoutDir` to its own error details, but `path` is where `checkoutDir`
+   * lands on the wire and `swapCompleted` is NOT forwarded - a consumer never
+   * gets a boolean swap flag, which is exactly why the repair reasons exist.
    */
-  readonly reason?: string
+  readonly reason?: MarketRemoteReason
 }
 
 /**

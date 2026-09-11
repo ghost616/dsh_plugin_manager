@@ -846,6 +846,25 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+/* Secondary guidance of a failed stage (a `details.reason` soft branch) and the
+   blocking checkout path (`details.path`). Both wrap onto their own line under
+   the primary error: the line above says WHAT failed, these say what to DO. */
+.stageReason {
+  flex-basis: 100%;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.stagePath {
+  flex-basis: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
 /* Verdict line of the classification phase and of the finished download. */
 .verdictNotice {
   margin: 0;

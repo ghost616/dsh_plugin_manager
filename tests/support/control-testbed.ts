@@ -358,13 +358,19 @@ export class FakeEngines {
         this.classifications.push(input.classification)
         // Mirror the host's commit failure contract: the handle is dropped on
         // EVERY failure, the staged checkout is discarded only when the swap had
-        // not happened, and the thrown error carries the swap fact
-        // (`details.swapCompleted` + `details.checkoutDir`).
+        // not happened, and the thrown error carries the swap facts
+        // (`details.swapCompleted` + `details.previousRemoved` +
+        // `details.checkoutDir`).
         if (this.commitError !== undefined) {
           const swapCompleted = this.commitFailsAfterSwap === true
           handles.delete(input.token)
           this.commitFailures += 1
-          throw withSwapFact(this.commitError, swapCompleted, this.checkoutDirOf(handle.request))
+          throw withSwapFact(
+            this.commitError,
+            swapCompleted,
+            swapCompleted ? false : this.commitRemovedPrevious === true,
+            this.checkoutDirOf(handle.request),
+          )
         }
         const { request } = handle
         // Mirror the host staging rule (entry probe wins): a checkout carrying a
@@ -443,7 +449,8 @@ export class FakeEngines {
   classifyError: unknown = undefined
   /**
    * Injected commit failure. The fake mirrors the host: it drops the handle,
-   * attaches `details.swapCompleted` (see {@link commitFailsAfterSwap}) and
+   * attaches `details.swapCompleted` (see {@link commitFailsAfterSwap}),
+   * `details.previousRemoved` (see {@link commitRemovedPrevious}) and
    * `details.checkoutDir`, and discards the staged checkout only when the swap
    * had not happened.
    */
@@ -453,6 +460,13 @@ export class FakeEngines {
    * is already in place, only the record write failed) instead of before it.
    */
   commitFailsAfterSwap = false
+  /**
+   * Pre-swap sub-window of {@link commitError}: `true` models the host having
+   * already deleted the previous checkout to make room before failing, so that
+   * checkout is gone while its record still points at it. Ignored when
+   * {@link commitFailsAfterSwap} is set (the flag says nothing after the swap).
+   */
+  commitRemovedPrevious = false
   /** One failed commit call recorded for assertions. */
   commitFailures: number = 0
 
@@ -479,14 +493,21 @@ export class FakeEngines {
 }
 
 /**
- * Attach the host's swap fact to a fake commit failure, exactly as
+ * Attach the host's swap facts to a fake commit failure, exactly as
  * `src/host/market/install.ts` does: `details.swapCompleted` says whether the
- * rename already happened and `details.checkoutDir` names the checkout.
+ * rename already happened, `details.previousRemoved` whether the previous
+ * checkout had already been deleted to make room (only meaningful before the
+ * swap), and `details.checkoutDir` names the checkout the commit worked on.
  */
-function withSwapFact(error: unknown, swapCompleted: boolean, checkoutDir: string): unknown {
+function withSwapFact(
+  error: unknown,
+  swapCompleted: boolean,
+  previousRemoved: boolean,
+  checkoutDir: string,
+): unknown {
   if (error instanceof MarketError) {
     const next = new MarketError(error.code, error.message, {
-      details: { ...error.details, swapCompleted, checkoutDir },
+      details: { ...error.details, swapCompleted, previousRemoved, checkoutDir },
     })
     next.cause = error
     return next

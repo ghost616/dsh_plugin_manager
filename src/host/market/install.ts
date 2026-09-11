@@ -54,6 +54,9 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type {
+  DownloadClassification as DownloadClassificationResult,
+  DownloadClassifyOutcome,
+  DownloadStageState,
   GithubRefKind,
   PluginMarketClassification,
   PluginMarketKey,
@@ -210,18 +213,41 @@ export interface InstalledPlugin {
 }
 
 /**
- * Attach the swap fact to a commit failure so callers can tell the two failure
+ * Attach the swap facts to a commit failure so callers can tell the failure
  * windows apart (see {@link PluginInstaller.commitDownload}):
- * `details.swapCompleted = false` means the checkout never moved (staging was
- * cleaned, the previous checkout/record are intact), `true` means the new
- * checkout is already in place and only the record write failed — the checkout
- * is kept for manual repair and the record still holds its previous value.
+ *
+ * - `details.swapCompleted = false` → the checkout never moved. The pre-swap
+ *   window is itself split by `details.previousRemoved`:
+ *   · `false` — the previous checkout (if any) is still in place and the record
+ *     is unchanged: nothing to repair, just retry.
+ *   · `true` — the previous checkout was already deleted to make room, so that
+ *     checkout is **gone** and its record still points at a path that no longer
+ *     exists; the user may need to re-download (the data is not recoverable from
+ *     this process).
+ * - `details.swapCompleted = true` → the new checkout is already in place and
+ *   only the record write failed; the checkout is kept for manual repair and the
+ *   record still holds its previous value.
+ *
+ * `details.checkoutDir` always carries the target the commit was working on.
  */
-function withSwapFact(error: MarketError, swapCompleted: boolean, checkoutDir: string): MarketError {
-  const details = { ...error.details, swapCompleted, checkoutDir }
+function withSwapFact(
+  error: MarketError,
+  swapCompleted: boolean,
+  previousRemoved: boolean,
+  checkoutDir: string,
+): MarketError {
+  const details: Record<string, string | number | boolean | null> = {
+    ...error.details,
+    swapCompleted,
+    previousRemoved,
+    checkoutDir,
+  }
   const note = swapCompleted
-    ? ' The new checkout is already in place; the record could not be updated, so it still holds its previous value — repair the record or re-commit.'
-    : ' The staged checkout was removed; the previous checkout and record (if any) are unchanged.'
+      ? ' The new checkout is already in place; the record could not be updated, so it still holds its previous value — repair the record or re-commit.'
+      : previousRemoved
+        // Do not soften this: the old checkout is really gone.
+        ? ' The previous checkout was already deleted before the failure and the new one has not been swapped in, so that checkout is now missing (its record still references it) — re-download or repair the repository by hand.'
+        : ' The previous checkout and record (if any) are unchanged; nothing was swapped in.'
   const next = new MarketError(error.code, `${error.message}${note}`, { details })
   next.cause = error
   return next
@@ -280,14 +306,14 @@ export function isDownloadToken(value: unknown): value is DownloadToken {
   return typeof value === 'string' && /^dl-[0-9a-f]{32}$/.test(value)
 }
 
-/** Lifecycle state of one staged download. */
-export type StagedDownloadState =
-  /** Cloned and awaiting classification/commit; cancellation is allowed. */
-  | 'prepared'
-  /** Classified (the label is not stored on the host — the caller keeps it). */
-  | 'classified'
-  /** Swap + record write finished; the handle is consumed. */
-  | 'committed'
+/**
+ * Lifecycle state of one staged download.
+ *
+ * **Re-exported alias of the cross-face `DownloadStageState`** (`src/types.ts`):
+ * there is exactly one declaration of this union in `src/**`, so the host phase
+ * states and the channel names cannot drift apart.
+ */
+export type StagedDownloadState = DownloadStageState
 
 /**
  * The handle returned by {@link PluginInstaller.prepareDownload}: everything the
@@ -326,14 +352,13 @@ export interface StagedDownload {
   readonly state: StagedDownloadState
 }
 
-/** How one download attempt finished, for UI progress/notes. */
-export type DownloadClassificationOutcome =
-  /** The model classified the checkout. */
-  | 'classified'
-  /** The model was unavailable (no endpoint / no backend) — filed as `other`. */
-  | 'unclassified'
-  /** The model call itself failed — filed as `other`, retryable. */
-  | 'failed'
+/**
+ * How one download attempt finished, for UI progress/notes.
+ *
+ * **Re-exported alias of the cross-face `DownloadClassifyOutcome`**
+ * (`src/types.ts`) — single declaration in `src/**`.
+ */
+export type DownloadClassificationOutcome = DownloadClassifyOutcome
 
 /**
  * Result of {@link PluginInstaller.classifyDownload}. **This phase never
@@ -341,25 +366,14 @@ export type DownloadClassificationOutcome =
  * `outcome: 'unclassified' | 'failed'` with `classification: 'other'` and a
  * human-readable `reason`, so the download keeps its checkout and the user can
  * correct the label later.
+ *
+ * **This is the shared wire type itself**, re-exported under the host's
+ * historical name (it used to be mirrored here; the mirror is gone). The
+ * concrete `classifyDownload` returns are annotated with the canonical
+ * `DownloadClassificationResult`, so any member/optionality change in
+ * `src/types.ts` fails the host build instead of silently drifting.
  */
-export interface DownloadClassification {
-  readonly outcome: DownloadClassificationOutcome
-  /** Label to commit: the model's answer, or the conservative `'other'`. */
-  readonly classification: PluginMarketClassification
-  /** User-facing rationale (model reason, or why no classification happened). */
-  readonly reason: string
-  /** True when the model could not classify (either `unclassified` or `failed`). */
-  readonly unclassified: boolean
-  /**
-   * Mechanical hint only (never the classifier): whether the resolved entry
-   * exists in the checkout. `null` when the checkout has no usable manifest.
-   */
-  readonly entryPresent: boolean | null
-  /** Entry the mechanical probe resolved (checkout-relative), or null. */
-  readonly entryHint: string | null
-  /** Stable error code of a failed model call (`market/llm-*`, `market/io`). */
-  readonly errorCode?: string
-}
+export type DownloadClassification = DownloadClassificationResult
 
 /** Input of {@link PluginInstaller.commitDownload}. */
 export interface CommitDownloadInput {
@@ -610,13 +624,13 @@ export class PluginInstaller {
   async classifyDownload(
     token: DownloadToken,
     options: ClassifyDownloadOptions = {},
-  ): Promise<DownloadClassification> {
+  ): Promise<DownloadClassificationResult> {
     const staged = this.requireStaged(token)
     const snapshot = await this.snapshotForClassification(staged.stagedDir)
     const mechanical = snapshot.entryPresent
     const complete = options.complete
     if (complete === undefined) {
-      return {
+      const unavailable: DownloadClassificationResult = {
         outcome: 'unclassified',
         // Skills/capability packs carry an index.js often enough that the old
         // mechanical probe filed them as plugins; without a model verdict the
@@ -627,6 +641,7 @@ export class PluginInstaller {
         entryPresent: mechanical,
         entryHint: snapshot.entryHint,
       }
+      return unavailable
     }
     try {
       const raw = await this.runCompletion(complete, options, snapshot.snapshot)
@@ -636,7 +651,7 @@ export class PluginInstaller {
       )
       const distribution = resolveAnalysisDistribution(raw, entryPresent === undefined ? {} : { entryPresent })
       this.staging.mark(token, 'classified')
-      return {
+      const classified: DownloadClassificationResult = {
         outcome: 'classified',
         classification: distribution.classification,
         reason: distribution.reason,
@@ -644,11 +659,12 @@ export class PluginInstaller {
         entryPresent: entryPresent ?? snapshot.entryPresent,
         entryHint: distribution.entryHint ?? snapshot.entryHint,
       }
+      return classified
     } catch (error) {
       const code = error instanceof MarketError ? error.code : 'market/llm-failed'
       const message = error instanceof Error ? error.message : String(error)
       const unavailable = code === 'market/llm-unconfigured'
-      return {
+      const degraded: DownloadClassificationResult = {
         outcome: unavailable ? 'unclassified' : 'failed',
         classification: 'other',
         reason: unavailable
@@ -659,6 +675,7 @@ export class PluginInstaller {
         entryHint: snapshot.entryHint,
         errorCode: code,
       }
+      return degraded
     }
   }
 
@@ -666,20 +683,25 @@ export class PluginInstaller {
    * Phase 3 — atomically move the staged checkout to its final location and
    * register the record (TrustGate `trusted`, `enabled: false`).
    *
-   * **Failure semantics (the swap fact is observable).** The commit has two
-   * windows and they are NOT equivalent:
+   * **Failure semantics (the swap facts are observable).** The commit has two
+   * windows (and the pre-swap window has a sub-window), and they are NOT
+   * equivalent — every failure carries `details.swapCompleted` and
+   * `details.previousRemoved` (plus `details.checkoutDir`):
    *
    * - **before the swap** (`swapCompleted === false`): the rename has not run,
-   *   so the staging directory is still there and is removed — zero residue —
-   *   and any previous checkout/record for the same key is untouched.
+   *   so the staging directory is still there and is removed — zero residue.
+   *   · `previousRemoved === false` — an existing checkout for the same key was
+   *     never touched: nothing is lost.
+   *   · `previousRemoved === true` — the previous checkout had already been
+   *     removed to make room when the failure hit, so that checkout is GONE
+   *     while its record still references it: recovery means re-downloading or
+   *     repairing the repository by hand. The error says exactly that.
    * - **after the swap** (`swapCompleted === true`): the rename already moved the
    *   checkout to its final location, so the staging directory no longer exists
    *   and is NOT cleaned; the new checkout is deliberately **kept in place** so
-   *   the failure can be repaired by hand (the caller sees this through
-   *   `error.details['swapCompleted']`, which `MarketError` also copies onto the
-   *   instance for direct reading). The record still holds its previous value in
-   *   that case — the checkout is newer than the record, and the error says so
-   *   instead of pretending the two agree.
+   *   the failure can be repaired by hand. The record still holds its previous
+   *   value in that case — the checkout is newer than the record, and the error
+   *   says so instead of pretending the two agree.
    *
    * @throws {MarketError} `record/not-found` for an unknown/expired token,
    * `record/invalid` for an invalid entry path, and `install/io` for swap or
@@ -696,11 +718,18 @@ export class PluginInstaller {
     if (entry !== null && !isCheckoutEntryPath(entry)) {
       throw new MarketError('record/invalid', `entry "${entry}" is not a valid checkout-relative entry path.`)
     }
-    // Local marker of the swap window: set exactly once the rename succeeded.
+    // Local markers of the commit windows, set as the work progresses:
+    // `previousRemoved` once the old checkout was actually deleted (only a
+    // pre-swap sub-window, and the destructive part of it), `swapCompleted`
+    // once the rename succeeded.
+    let previousRemoved = false
     let swapCompleted = false
     try {
       await this.fs.mkdirp(dirname(staged.checkoutDir))
-      if ((await this.fs.lstat(staged.checkoutDir)) !== null) await this.fs.rmrf(staged.checkoutDir)
+      if ((await this.fs.lstat(staged.checkoutDir)) !== null) {
+        await this.fs.rmrf(staged.checkoutDir)
+        previousRemoved = true
+      }
       await this.fs.rename(staged.stagedDir, staged.checkoutDir)
       swapCompleted = true
       const record = await store.register({
@@ -735,10 +764,11 @@ export class PluginInstaller {
         // Pre-swap failure: the staged clone is still on disk and is garbage.
         await this.fs.rmrf(staged.stagedDir).catch(() => undefined)
       }
-      if (error instanceof MarketError) throw withSwapFact(error, swapCompleted, staged.checkoutDir)
+      if (error instanceof MarketError) throw withSwapFact(error, swapCompleted, previousRemoved, staged.checkoutDir)
       throw withSwapFact(
         new MarketError('install/io', 'Committing the downloaded checkout failed.', { path: staged.checkoutDir, cause: error }),
         swapCompleted,
+        previousRemoved,
         staged.checkoutDir,
       )
     }

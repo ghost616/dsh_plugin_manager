@@ -106,10 +106,19 @@ export type ManagePluginsTabProps =
 
 type Translate = ManagePluginsTabProps['t']
 
-/** One normalized UI failure (code always present; no instanceof branching). */
+/**
+ * One normalized UI failure (code always present; no instanceof branching).
+ *
+ * `details` is KEPT from the wire: the stage rows need the structured facts a
+ * failure carries (`path` = the swapped/blocking checkout directory, `reason` =
+ * the machine-readable sub-reason) to guide the user. The host-authored
+ * `message` stays on this object as diagnostics and is **never** rendered as
+ * user-visible copy — every visible line goes through the dictionary.
+ */
 export interface ManageUiFailure {
   readonly code: string
   readonly message: string
+  readonly details: Readonly<Record<string, unknown>>
 }
 
 type ViewState =
@@ -134,15 +143,37 @@ const PHASE_KEYS = {
 /** Normalize any thrown value into the stable UI failure shape. */
 function toUiFailure(error: unknown): ManageUiFailure {
   if (error !== null && typeof error === 'object') {
-    const candidate = error as { code?: unknown; message?: unknown }
+    const candidate = error as { code?: unknown; message?: unknown; details?: unknown }
     if (typeof candidate.code === 'string' && typeof candidate.message === 'string') {
-      return { code: candidate.code, message: candidate.message }
+      const details = candidate.details
+      return {
+        code: candidate.code,
+        message: candidate.message,
+        // The wire payload is untrusted shape-wise: only a non-null object is
+        // adopted, anything else degrades to "no structured details".
+        details: details !== null && typeof details === 'object' && !Array.isArray(details)
+          ? details as Readonly<Record<string, unknown>>
+          : {},
+      }
     }
   }
   return {
     code: 'market/unreachable',
     message: error instanceof Error ? error.message : String(error),
+    details: {},
   }
+}
+
+/** The `details.path` of a wire failure, when it carries a usable one. */
+export function failurePath(failure: ManageUiFailure): string | null {
+  const path = failure.details.path
+  return typeof path === 'string' && path.length > 0 ? path : null
+}
+
+/** The `details.reason` of a wire failure, when it carries a usable one. */
+export function failureReason(failure: ManageUiFailure): string | null {
+  const reason = failure.details.reason
+  return typeof reason === 'string' && reason.length > 0 ? reason : null
 }
 
 /** Localized copy for the stable failure families; others show the code. */
@@ -168,6 +199,63 @@ export function isAnalysisFailureCode(code: string): boolean {
   return code === 'market/llm-unconfigured'
     || code === 'market/llm-failed'
     || code === 'market/llm-bad-output'
+}
+
+/**
+ * Localized copy of a DOWNLOAD-stage failure: the primary line the stage row
+ * shows, plus the optional secondary guidance the failure's `details.reason`
+ * calls for.
+ *
+ * Design rules (all three are load-bearing):
+ *
+ * 1. **The primary line always comes from this tab's dictionary** — the host's
+ *    own `message` is diagnostics and never becomes user-visible copy.
+ * 2. **`reason` is a SOFT branch**: it is optional, may be a value this build
+ *    does not know, and may be missing entirely. Every one of those cases falls
+ *    back to the code-based line (and finally to `failedWithCode`), so a
+ *    foreign or older host degrades to a generic-but-informative failure
+ *    instead of an empty row or a thrown error.
+ * 3. **The repair pair is the reason this exists at all**: both repair values
+ *    arrive as `install/io` — the same code a pre-swap failure uses — so the
+ *    reason is the only discriminator between "retry the same handle" and "a
+ *    human must remove the checkout first".
+ */
+function downloadFailureText(
+  failure: ManageUiFailure,
+  t: Translate,
+): { readonly primary: string; readonly reason: string | null } {
+  const primary = ((): string => {
+    switch (failure.code) {
+      case 'market/idle': return t('failureMarketIdle')
+      case 'record/not-found': return t('failureDownloadHandleLost')
+      case 'install/io': return t('failureInstallIo')
+      case 'install/dir-exists': return t('failureDirExists')
+      case 'install/dir-in-use': return t('failureDirInUse')
+      case 'gate/consent-required': return t('failureConsentRequired')
+      case 'record/invalid': return t('failureRecordInvalid')
+      case 'market/bad-request': return t('failureBadRequest')
+      default: return failureText(failure, t)
+    }
+  })()
+  const reason = ((): string | null => {
+    switch (failureReason(failure)) {
+      // The handle is gone: distinguish "swept after its TTL" (just start over)
+      // from "this process never staged it" (unknown cause).
+      case 'download-expired': return t('failureReasonDownloadExpired')
+      case 'download-unknown': return t('failureReasonDownloadUnknown')
+      // Nothing moved before the swap: the same handle can be retried.
+      case 'commit-before-swap': return t('failureReasonCommitBeforeSwap')
+      // The swap DID happen: no record describes the new checkout, so only a
+      // human can clean it up.
+      case 'repair:checkout-committed-no-record': return t('failureReasonRepairNoRecord')
+      // The swap happened while the old record is still in place: re-running the
+      // download is an idempotent overwrite that re-syncs the record.
+      case 'repair:checkout-committed-record-stale': return t('failureReasonRepairStale')
+      // Unknown or absent reason: no extra guidance, the primary line stands.
+      default: return null
+    }
+  })()
+  return { primary, reason }
 }
 
 /** Focusable controls of one modal dialog (Tab-trap candidates). */
@@ -951,29 +1039,45 @@ function InstallDialog({
         */}
         {stages === undefined ? null : (
           <ul className={css.stageList} data-download-stages aria-busy={inFlight}>
-            {(Object.keys(STAGE_LABEL_KEYS) as DownloadStageId[]).map(stageId => (
-              <li
-                key={stageId}
-                className={css.stageRow}
-                data-download-stage={stageId}
-                data-stage-state={stages[stageId]}
-              >
-                <span className={css.stageDot} aria-hidden="true" />
-                <span className={css.stageName}>{t(STAGE_LABEL_KEYS[stageId])}</span>
-                <span className={css.stageState} data-stage-state-text>
-                  {t(STAGE_STATE_KEYS[stages[stageId]])}
-                </span>
-                {phase.phase === 'failed' && phase.failed === stageId ? (
-                  <span
-                    className={css.stageError}
-                    data-stage-error
-                    data-error-code={phase.failure.code}
-                  >
-                    {failureText(phase.failure, t)}
+            {(Object.keys(STAGE_LABEL_KEYS) as DownloadStageId[]).map(stageId => {
+              // One lookup per row: the failure copy (primary + soft-branched
+              // reason guidance) is dictionary-driven, never the host's prose.
+              const failed = phase.phase === 'failed' && phase.failed === stageId
+              const failureCopy = failed ? downloadFailureText(phase.failure, t) : null
+              const failurePathValue = failed ? failurePath(phase.failure) : null
+              return (
+                <li
+                  key={stageId}
+                  className={css.stageRow}
+                  data-download-stage={stageId}
+                  data-stage-state={stages[stageId]}
+                >
+                  <span className={css.stageDot} aria-hidden="true" />
+                  <span className={css.stageName}>{t(STAGE_LABEL_KEYS[stageId])}</span>
+                  <span className={css.stageState} data-stage-state-text>
+                    {t(STAGE_STATE_KEYS[stages[stageId]])}
                   </span>
-                ) : null}
-              </li>
-            ))}
+                  {failureCopy === null ? null : (
+                    <span
+                      className={css.stageError}
+                      data-stage-error
+                      data-error-code={failed ? phase.failure.code : undefined}
+                      data-error-reason={failed ? failureReason(phase.failure) ?? undefined : undefined}
+                      // Diagnostics only: the host's own prose is never visible copy.
+                      title={failed ? phase.failure.message : undefined}
+                    >
+                      {failureCopy.primary}
+                    </span>
+                  )}
+                  {failureCopy?.reason === null || failureCopy?.reason === undefined ? null : (
+                    <span className={css.stageReason} data-stage-reason>{failureCopy.reason}</span>
+                  )}
+                  {failurePathValue === null ? null : (
+                    <code className={css.stagePath} data-stage-path>{failurePathValue}</code>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         )}
 

@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 import type { GitHubSearchPage, PluginInstallReview } from '../src/types.ts'
 import { zh } from '../src/client/locales.ts'
-import { MarketCallFailure } from '../src/client/channel.ts'
+import { MarketCallFailure, type MarketClientWireCode } from '../src/client/channel.ts'
 import { ManagePluginsTab, type ManagePluginsTabInjected, type ManagePluginsTabProps } from '../src/client/ManagePluginsTab.tsx'
 import {
   makeCommit,
@@ -1513,6 +1513,127 @@ describe('ManagePluginsTab download classification', () => {
     expect(note).toContain(zh.entryMissingNote)
     expect(note).toContain(zh.expectedEntryNote.replace('{entry}', 'dist/index.js'))
     expect(installDialog.querySelector('[data-classification-detail]')).toBeNull()
+  })
+
+  /** Fail the clone phase with one wire failure and return the stage row copy. */
+  async function stageFailure(
+    failure: { code: MarketClientWireCode; message?: string; details?: Record<string, unknown> },
+  ): Promise<{ host: HTMLElement; error: HTMLElement | null; reason: HTMLElement | null; path: HTMLElement | null }> {
+    const previewInstall = vi.fn(async (repository: string, version: string | null = null) =>
+      makeInstallReview({ repository, ...(typeof version === 'string' ? { version } : {}) }))
+    const prepareDownload = vi.fn(async () => {
+      throw new MarketCallFailure({
+        code: failure.code,
+        // A recognizable host prose: the UI must NOT show it as visible copy.
+        message: failure.message ?? 'HOST PROSE MUST NOT BE RENDERED',
+        details: failure.details ?? {},
+      })
+    })
+    const { props } = managePageHarness({
+      previewInstall,
+      prepareDownload,
+      // The dialog is opened from the GitHub detail view, so the search page and
+      // the repository detail have to answer first.
+      search: vi.fn(async () => makeSearchPage([{ repository: 'acme/helper', name: 'helper' }])),
+      repositoryDetail: vi.fn(async (repository: string) => makeRepositoryDetail({
+        repository,
+        branches: ['main'],
+        tags: [],
+      })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const dialog = await openInstallDialog(host)
+    await click(dialog.querySelector('[data-install-confirm]'))
+    await flush()
+    return {
+      host,
+      error: dialog.querySelector('[data-stage-error]'),
+      reason: dialog.querySelector('[data-stage-reason]'),
+      path: dialog.querySelector('[data-stage-path]'),
+    }
+  }
+
+  it('localizes every download-family failure code the UI can actually receive', async () => {
+    // One test, several codes: the primary line of a failed stage always comes
+    // from this tab's dictionary, never from the host's message.
+    const codes: Array<[MarketClientWireCode, string]> = [
+      ['market/idle', zh.failureMarketIdle],
+      ['record/not-found', zh.failureDownloadHandleLost],
+      ['install/io', zh.failureInstallIo],
+      ['install/dir-exists', zh.failureDirExists],
+      ['install/dir-in-use', zh.failureDirInUse],
+      ['gate/consent-required', zh.failureConsentRequired],
+      ['record/invalid', zh.failureRecordInvalid],
+      ['market/bad-request', zh.failureBadRequest],
+    ]
+    for (const [code, expected] of codes) {
+      const { host, error } = await stageFailure({ code })
+      expect(error?.getAttribute('data-error-code')).toBe(code)
+      expect(error?.textContent).toBe(expected)
+      // The host's prose never reaches the visible line (carried as title only).
+      expect(error?.textContent).not.toContain('HOST PROSE')
+      expect(host.querySelector('[data-dialog="install"]')).not.toBeNull()
+      await act(async () => { host.remove() })
+    }
+  })
+
+  it('falls back gracefully when a failure carries no details at all', async () => {
+    const { error, reason, path } = await stageFailure({ code: 'install/io' })
+    // No details ⇒ generic but informative copy: no blank row, no throw.
+    expect(error?.textContent).toBe(zh.failureInstallIo)
+    expect(error?.getAttribute('data-error-reason')).toBeNull()
+    expect(reason).toBeNull()
+    expect(path).toBeNull()
+  })
+
+  it('soft-branches on details.reason and degrades on an unknown value', async () => {
+    // The two handle-loss reasons are distinguished.
+    const expired = await stageFailure({ code: 'record/not-found', details: { reason: 'download-expired' } })
+    expect(expired.error?.getAttribute('data-error-reason')).toBe('download-expired')
+    expect(expired.reason?.textContent).toBe(zh.failureReasonDownloadExpired)
+
+    const unknown = await stageFailure({ code: 'record/not-found', details: { reason: 'download-unknown' } })
+    expect(unknown.reason?.textContent).toBe(zh.failureReasonDownloadUnknown)
+    expect(unknown.reason?.textContent).not.toBe(expired.reason?.textContent)
+
+    // Pre-swap: retryable, nothing moved.
+    const beforeSwap = await stageFailure({ code: 'install/io', details: { reason: 'commit-before-swap' } })
+    expect(beforeSwap.reason?.textContent).toBe(zh.failureReasonCommitBeforeSwap)
+
+    // The repair pair: same code, opposite instructions — hand cleanup vs re-run.
+    const noRecord = await stageFailure({
+      code: 'install/io',
+      details: { reason: 'repair:checkout-committed-no-record', path: '/repo/gh-acme-helper' },
+    })
+    expect(noRecord.reason?.textContent).toBe(zh.failureReasonRepairNoRecord)
+    expect(noRecord.error?.textContent).toBe(zh.failureInstallIo)
+    // `path` is the swapped checkout directory on the wire.
+    expect(noRecord.path?.textContent).toBe('/repo/gh-acme-helper')
+
+    const stale = await stageFailure({
+      code: 'install/io',
+      details: { reason: 'repair:checkout-committed-record-stale', path: '/repo/gh-acme-helper' },
+    })
+    expect(stale.reason?.textContent).toBe(zh.failureReasonRepairStale)
+    expect(stale.reason?.textContent).not.toBe(noRecord.reason?.textContent)
+
+    // A reason this build does not know (future/foreign host): generic copy only.
+    const foreign = await stageFailure({ code: 'install/io', details: { reason: 'some-future-reason' } })
+    expect(foreign.error?.textContent).toBe(zh.failureInstallIo)
+    expect(foreign.reason).toBeNull()
+  })
+
+  it('shows the blocking path of an orphan checkout that refuses the download', async () => {
+    // install/dir-exists carries only a path (no reason): the row must still
+    // tell the user which directory blocks the retry.
+    const { error, reason, path } = await stageFailure({
+      code: 'install/dir-exists',
+      details: { path: '/repo/gh-acme-helper' },
+    })
+    expect(error?.textContent).toBe(zh.failureDirExists)
+    expect(reason).toBeNull()
+    expect(path?.textContent).toBe('/repo/gh-acme-helper')
   })
 
   it('renders no note line for a review the host did not annotate', async () => {

@@ -951,6 +951,48 @@ describe('market control web channel (M1 source ops round trip)', () => {
     dispose()
   })
 
+  it('re-stages a retryable handle for classify and reports the lost previous checkout over HTTP', async () => {
+    const { router, engines, dispose } = routeFor()
+    await serve(router)
+
+    const review = await call(router, 'previewInstall', { repository: 'octocat/demo-plugin' })
+    const token = (review as { ok: true; value: { confirmToken: string } }).value.confirmToken
+    const prepared = await call(router, 'prepareDownload', { repository: 'octocat/demo-plugin', confirmToken: token })
+    const handle = (prepared as { ok: true; value: { token: string } }).value.token
+
+    // The destructive pre-swap sub-window (`previousRemoved`): the previous
+    // checkout was already deleted, so the failure has to say so and must point
+    // at the directory that no longer exists. The host booleans stay off the wire.
+    engines.commitError = new MarketError('install/io', 'the records file is locked')
+    engines.commitRemovedPrevious = true
+    const lost = await call(router, 'commitDownload', { token: handle, classification: 'other' })
+    expect(lost.ok).toBe(false)
+    if (!lost.ok) {
+      expect(lost.error.code).toBe('install/io')
+      expect(lost.error.details).toEqual({
+        key: 'gh-octocat-demo-plugin',
+        reason: DOWNLOAD_REASON_COMMIT_BEFORE_SWAP,
+        path: '/repo/gh-octocat-demo-plugin',
+      })
+      expect(lost.error.message).toContain('ALREADY been deleted')
+      expect(lost.error.message).not.toContain('are unchanged')
+    }
+
+    // The caller handle stays usable for the OTHER phase too: classify re-stages
+    // from the recipe instead of failing on the host handle the commit dropped.
+    engines.commitError = undefined
+    engines.commitRemovedPrevious = false
+    const classified = await call(router, 'classifyDownload', { token: handle })
+    expect(classified.ok).toBe(true)
+    expect(engines.stagedCalls.filter(entry => entry.kind === 'prepare')).toHaveLength(2)
+
+    // ...and the commit that follows reuses that staging: still two clones.
+    const committed = await call(router, 'commitDownload', { token: handle, classification: 'other' })
+    expect(committed.ok).toBe(true)
+    expect(engines.stagedCalls.filter(entry => entry.kind === 'prepare')).toHaveLength(2)
+    dispose()
+  })
+
   it('keeps a staged download alive past its review window (independent TTLs)', async () => {
     let nowMs = 1_000
     const { router, engines, dispose } = routeFor({ now: () => new Date(nowMs), downloadTtlMs: 600_000 })

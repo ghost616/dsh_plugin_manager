@@ -464,8 +464,11 @@ describe('three-phase download: commitDownload + cancelDownload', () => {
 
     expect(error.code).toBe('install/io')
     expect(error.details?.['swapCompleted']).toBe(false)
+    // Sub-window fact: nothing had been deleted yet, so nothing is lost.
+    expect(error.details?.['previousRemoved']).toBe(false)
     expect(error.details?.['checkoutDir']).toBe(handle.checkoutDir)
-    expect(error.message).toContain('The staged checkout was removed')
+    expect(error.message).toContain('The previous checkout and record (if any) are unchanged')
+    expect(error.message).not.toContain('is now missing')
     // Pre-swap: staging cleaned, nothing at the final path, no record.
     expect((await readdir(root)).filter((name) => name.startsWith('.staged-'))).toEqual([])
     expect(await readdir(root)).not.toContain('gh-owner-sample-plugin')
@@ -473,6 +476,40 @@ describe('three-phase download: commitDownload + cancelDownload', () => {
     // Handle consumed: a second commit is refused.
     await expect(installer.commitDownload({ token: handle.token, classification: 'plugin' }))
       .rejects.toMatchObject({ code: 'record/not-found' })
+  })
+
+  it('reports previousRemoved=true when the old checkout was already deleted before the failure', async () => {
+    const root = join(tmp, 'commit-previous-removed')
+    await mkdir(root, { recursive: true })
+    // First download establishes a live checkout + record for the same key.
+    const first = new PluginInstaller({ run: runner({ manifest: { main: 'a.js' }, files: ['a.js'] }).run })
+    const firstHandle = await first.prepareDownload({ repositoryRoot: root, ...prepareBase })
+    await first.commitDownload({ token: firstHandle.token, classification: 'plugin' })
+    expect(await readdir(join(root, 'gh-owner-sample-plugin'))).toContain('a.js')
+
+    // Overwrite: the old checkout is removed, then the rename fails.
+    let failRenames = false
+    const failingFs: FsLike = {
+      ...NodeFs,
+      rename: async (from: string, to: string) => {
+        if (failRenames) throw errno('EIO', 'rename denied')
+        return NodeFs.rename(from, to)
+      },
+    }
+    const second = new PluginInstaller({ fs: failingFs, run: runner({ manifest: { main: 'b.js' }, files: ['b.js'] }).run })
+    const secondHandle = await second.prepareDownload({ repositoryRoot: root, ...prepareBase })
+    failRenames = true
+    const error = await rejection(second.commitDownload({ token: secondHandle.token, classification: 'plugin' }))
+
+    expect(error.code).toBe('install/io')
+    expect(error.details?.['swapCompleted']).toBe(false)
+    // The destructive sub-window: the old checkout is really gone.
+    expect(error.details?.['previousRemoved']).toBe(true)
+    expect(error.message).toContain('is now missing')
+    expect(await readdir(root)).not.toContain('gh-owner-sample-plugin')
+    // The record still references the deleted checkout — no pretending.
+    const record = await new PluginRecordStore(repositoryRecordsPath(root)).get(prepareBase.key)
+    expect(record?.entry).toBe('a.js')
   })
 
   it('reports swapCompleted=true, keeps the new checkout, and leaves the old record when the record write fails', async () => {
