@@ -5,6 +5,9 @@
  * - the 10-minute TTL cache of all five read-only requests (search, repository
  *   metadata, branches, tags, README), the explicit `refresh` bypass and
  *   `clearCache()`;
+ * - the generation guard around that cache: a read that is still in flight
+ *   across a `clearCache()` (the token save/clear path) returns its answer but
+ *   never writes it back, so the emptied table stays empty;
  * - the single backoff retry of a throttled response (wait <= 5 s), its refusal
  *   above that window, and the `retryAfterMs` / `resetAt` details every
  *   surfaced rate-limit failure carries.
@@ -33,6 +36,36 @@ interface RequestStub {
 
 const SLUG = 'owner/sample-plugin'
 
+/** A response whose arrival the test controls, so a read can be held in flight. */
+interface HeldResponse {
+  readonly promise: Promise<FetchResponse>
+  /** Hand the response to the waiting fetch. */
+  readonly settle: (stub: RequestStub) => void
+}
+
+/** One scripted stub as the {@link FetchResponse} shape the client consumes. */
+function stubResponse(stub: RequestStub): FetchResponse {
+  return {
+    status: stub.status,
+    ok: stub.status >= 200 && stub.status < 300,
+    headers: { get: (name: string) => stub.headers?.[name.toLowerCase()] ?? null },
+    text: async () => stub.rawText ?? JSON.stringify(stub.body ?? {}),
+  } satisfies FetchResponse
+}
+
+/** Build one {@link HeldResponse} around a scripted stub. */
+function heldResponse(): HeldResponse {
+  let release: (stub: RequestStub) => void = () => {
+    throw new Error('the held response was not wired up')
+  }
+  const promise = new Promise<FetchResponse>((resolve) => {
+    release = (stub: RequestStub): void => {
+      resolve(stubResponse(stub))
+    }
+  })
+  return { promise, settle: release }
+}
+
 /** Build an injectable fetch serving scripted routes and counting every call. */
 function stubGitHub(
   handler: (url: string, init?: FetchInit) => RequestStub,
@@ -40,13 +73,7 @@ function stubGitHub(
   const urls: string[] = []
   const fetchImpl: FetchLike = async (url, init) => {
     urls.push(url)
-    const stub = handler(url, init)
-    return {
-      status: stub.status,
-      ok: stub.status >= 200 && stub.status < 300,
-      headers: { get: (name: string) => stub.headers?.[name.toLowerCase()] ?? null },
-      text: async () => stub.rawText ?? JSON.stringify(stub.body ?? {}),
-    } satisfies FetchResponse
+    return stubResponse(handler(url, init))
   }
   return { fetchImpl, urls }
 }
@@ -94,6 +121,18 @@ async function withMockedClock(body: (advanceBy: (ms: number) => void) => Promis
   } finally {
     vi.useRealTimers()
   }
+}
+
+/**
+ * Let one read actually leave the process. A read is not dispatched by the time
+ * its call returns: `loadCached` awaits `fetchValue`, which awaits
+ * `resolveToken`, which awaits the token provider — so the injectable fetch is
+ * reached a few microtasks later. Anything that races a `clearCache()` against
+ * an in-flight read must await this before asserting that the request went out,
+ * otherwise it would be racing an abandoned call.
+ */
+async function flushDispatch(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
 }
 
 describe('GitHubMarket read-only TTL cache', () => {
@@ -317,6 +356,141 @@ describe('GitHubMarket read-only TTL cache', () => {
       expect((await market.repositoryMeta(SLUG)).name).toBe('second')
       expect(urls).toHaveLength(2)
     })
+  })
+})
+
+describe('GitHubMarket cache generation guard against clearCache', () => {
+  it('drops the write-back of a read that was in flight across clearCache, so the next call really refetches', async () => {
+    const held = heldResponse()
+    const urls: string[] = []
+    let calls = 0
+    const fetchImpl: FetchLike = async (url) => {
+      urls.push(url)
+      calls += 1
+      if (calls === 1) return held.promise
+      return stubResponse({ status: 200, body: metaBody('after-clear') })
+    }
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    const pending = market.repositoryMeta(SLUG)
+    await flushDispatch()
+    expect(urls).toHaveLength(1)
+    // The token save/clear path: the table is emptied while the read is out.
+    expect(market.clearCache()).toBe(0)
+    held.settle({ status: 200, body: metaBody('stale') })
+    // The in-flight caller keeps the answer it legitimately obtained...
+    expect((await pending).name).toBe('stale')
+    // ...but nothing was written back, so the next call is a real request.
+    expect((await market.repositoryMeta(SLUG)).name).toBe('after-clear')
+    expect(urls).toHaveLength(2)
+  })
+
+  it('still writes back a read that completes without a clearCache, so later calls hit the cache', async () => {
+    let calls = 0
+    const { fetchImpl, urls } = stubGitHub(() => {
+      calls += 1
+      return { status: 200, body: searchBody(`marker-${calls}`) }
+    })
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    expect((await market.search({ keywords: 'cool' })).items[0]?.name).toBe('marker-1')
+    // The guard must not have disabled the cache: the same query is served from
+    // the entry the first read filled.
+    expect((await market.search({ keywords: 'cool' })).items[0]?.name).toBe('marker-1')
+    expect(urls).toHaveLength(1)
+    expect(market.clearCache()).toBe(1)
+    expect(market.clearCache()).toBe(0)
+  })
+
+  it('lets no in-flight answer of concurrent same-key reads pollute the cache after clearCache', async () => {
+    const held = heldResponse()
+    const urls: string[] = []
+    let calls = 0
+    const fetchImpl: FetchLike = async (url) => {
+      urls.push(url)
+      calls += 1
+      if (calls === 1 || calls === 2) return held.promise
+      return stubResponse({ status: 200, body: searchBody('fresh-search') })
+    }
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    // Two reads of one key leave before anything is cached, so both are out.
+    const first = market.search({ keywords: 'cool' })
+    const second = market.search({ keywords: 'cool' })
+    await flushDispatch()
+    expect(urls).toHaveLength(2)
+    market.clearCache()
+    held.settle({ status: 200, body: searchBody('stale') })
+    expect((await first).items[0]?.name).toBe('stale')
+    expect((await second).items[0]?.name).toBe('stale')
+    // Neither racing answer was allowed to land: the next query goes to GitHub.
+    expect((await market.search({ keywords: 'cool' })).items[0]?.name).toBe('fresh-search')
+    expect(urls).toHaveLength(3)
+    expect(market.clearCache()).toBe(1)
+  })
+
+  it('drops the write-back of a refresh read that was in flight across clearCache', async () => {
+    const held = heldResponse()
+    const { fetchImpl, urls } = stubGitHub(() => ({ status: 200, body: searchBody('placeholder') }))
+    let calls = 0
+    const racing: FetchLike = async (url, init) => {
+      calls += 1
+      if (calls === 1) {
+        urls.push(url)
+        return held.promise
+      }
+      return fetchImpl(url, init)
+    }
+    const market = new GitHubMarket({ fetchImpl: racing, tokenProvider: () => null })
+    const pending = market.search({ keywords: 'cool', refresh: true })
+    await flushDispatch()
+    expect(urls).toHaveLength(1)
+    market.clearCache()
+    held.settle({ status: 200, body: searchBody('refreshed') })
+    expect((await pending).items[0]?.name).toBe('refreshed')
+    // The explicit bypass itself is unchanged — the read did reach GitHub — and
+    // it left no entry behind for the ordinary call that follows it.
+    expect((await market.search({ keywords: 'cool' })).items[0]?.name).toBe('placeholder')
+    expect(urls).toHaveLength(2)
+    // clearCache reported nothing dropped, yet it still bumped the generation.
+    expect(market.clearCache()).toBe(1)
+  })
+
+  it('returns the in-flight value untouched and never invents an error, for every read-only call', async () => {
+    const helds = [heldResponse(), heldResponse(), heldResponse(), heldResponse(), heldResponse()]
+    const urls: string[] = []
+    let calls = 0
+    const fetchImpl: FetchLike = async (url) => {
+      urls.push(url)
+      const held = helds[calls]
+      calls += 1
+      // Requests after the five suspended reads are the re-fetches this test
+      // asserts on, so they get a fresh answer rather than a sentinel failure.
+      if (held === undefined) return stubResponse({ status: 200, body: searchBody('after-clear') })
+      return held.promise
+    }
+    const market = new GitHubMarket({ fetchImpl, tokenProvider: () => null })
+    const searchPending = market.search({ keywords: 'cool' })
+    const metaPending = market.repositoryMeta(SLUG)
+    const branchesPending = market.branches(SLUG)
+    const tagsPending = market.tags(SLUG)
+    const readmePending = market.readme(SLUG)
+    await flushDispatch()
+    expect(urls).toHaveLength(5)
+    market.clearCache()
+    helds[0]?.settle({ status: 200, body: searchBody('late-search') })
+    helds[1]?.settle({ status: 200, body: metaBody('late-meta') })
+    helds[2]?.settle({ status: 200, body: refList(2, 'b-') })
+    helds[3]?.settle({ status: 200, body: refList(2, 't-') })
+    // The README answer of the token era may be a 200 or the endpoint's 404;
+    // the 404 stays a real null answer rather than becoming a github/not-found.
+    helds[4]?.settle({ status: 404, rawText: '404: Not Found' })
+    expect((await searchPending).items[0]?.name).toBe('late-search')
+    expect((await metaPending).name).toBe('late-meta')
+    expect(await branchesPending).toEqual(['b-0', 'b-1'])
+    expect(await tagsPending).toEqual(['t-0', 't-1'])
+    expect(await readmePending).toBeNull()
+    // All five suspended their write-back, so re-reading the very key that was
+    // in flight reaches GitHub again instead of being served a late answer.
+    expect((await market.search({ keywords: 'cool' })).items[0]?.name).toBe('after-clear')
+    expect(urls).toHaveLength(6)
   })
 })
 

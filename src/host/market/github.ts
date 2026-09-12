@@ -14,7 +14,11 @@
  * 1. every read-only call (search, repository metadata, branches, tags,
  *    README) is served from a fixed {@link GITHUB_CACHE_TTL_MS} in-process TTL
  *    cache; nothing is persisted, so a process restart empties it naturally,
- *    and a caller opts out per call with the explicit `refresh` option;
+ *    and a caller opts out per call with the explicit `refresh` option. A read
+ *    that was already in flight when `clearCache()` ran (a token save or clear
+ *    invalidates the whole table) never writes its answer back: its value is
+ *    still returned to the caller that issued it, but the emptied cache stays
+ *    empty;
  * 2. a throttled response (429, or 403 judged as a rate limit) is retried
  *    exactly once when GitHub reports a wait of at most
  *    {@link GITHUB_RATE_LIMIT_MAX_BACKOFF_MS}; the failure that finally
@@ -444,7 +448,9 @@ export interface GitHubRepoMeta {
  * The class also owns the process-local TTL cache of read-only answers ({@link
  * GITHUB_CACHE_TTL_MS}) and the rate-limit backoff policy ({@link
  * GITHUB_RATE_LIMIT_MAX_BACKOFF_MS}); both sit here, at the method layer, so
- * the {@link githubFetch} primitives keep their exact semantics.
+ * the {@link githubFetch} primitives keep their exact semantics. The cache is
+ * generation guarded against {@link clearCache}: an in-flight read that spans a
+ * token save/clear returns its answer but does not write it back.
  */
 export class GitHubMarket {
   private readonly fetchImpl: FetchLike
@@ -455,6 +461,15 @@ export class GitHubMarket {
    * a restart empties it, and {@link clearCache} empties it on demand.
    */
   private readonly cache = new Map<string, { readonly expiresAt: number; readonly value: unknown }>()
+  /**
+   * Cache generation, bumped by every {@link clearCache}. A fill path records
+   * the generation before it goes to the network and writes back only while the
+   * generation is unchanged, so a read that was in flight across a token
+   * save/clear (which must invalidate the whole table) can never resurrect an
+   * answer that was authorized under the previous credential. Purely in-process
+   * bookkeeping; it is never exposed and never reaches the wire.
+   */
+  private cacheGeneration = 0
 
   constructor(options: GitHubMarketOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? defaultFetchLike
@@ -576,11 +591,18 @@ export class GitHubMarket {
    * to GitHub again. Called after a token save/clear (a different credential
    * means different authorization, and rate-limit state changes with it) and
    * available to a caller that wants a hard refresh of everything.
+   *
+   * The generation bump is what makes the invalidation hold for reads that are
+   * still in flight: each of them will see a changed generation when its answer
+   * arrives and skip the write-back, so an answer fetched under the previous
+   * credential cannot land in the emptied cache. Those calls still resolve with
+   * the answer they legitimately obtained, and no error is invented for them.
    * @returns how many entries were dropped.
    */
   clearCache(): number {
     const dropped = this.cache.size
     this.cache.clear()
+    this.cacheGeneration += 1
     return dropped
   }
 
@@ -595,6 +617,13 @@ export class GitHubMarket {
    * Serve one read-only call from the TTL cache, else run `fetchValue` and fill
    * the cache with its result. `signal` rides on the fetch itself, so a cache
    * hit never touches it.
+   *
+   * The write-back is generation guarded: the generation is recorded before the
+   * fetch leaves, and the fresh answer is cached only while it still matches. A
+   * {@link clearCache} during the read (a token save or clear) therefore leaves
+   * the cache empty instead of being silently undone by this read's stale
+   * write-back — while `value` is still returned, because the call was issued
+   * legitimately before the credential changed and must not fail retroactively.
    */
   private async loadCached<T>(
     key: string,
@@ -608,10 +637,15 @@ export class GitHubMarket {
       // resurrect a stale answer.
       if (cached !== undefined) this.cache.delete(key)
     }
+    const generation = this.cacheGeneration
     const value = await fetchValue()
     // Only a successful read fills the cache: a failure stays a failure, and a
     // concurrent reader that lost the race simply overwrote with fresh data.
-    this.cache.set(key, { expiresAt: Date.now() + GITHUB_CACHE_TTL_MS, value })
+    // A generation change means the table was emptied while this read was in
+    // flight, so the answer is handed back without being written anywhere.
+    if (this.cacheGeneration === generation) {
+      this.cache.set(key, { expiresAt: Date.now() + GITHUB_CACHE_TTL_MS, value })
+    }
     return value
   }
 
