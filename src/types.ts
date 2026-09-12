@@ -447,8 +447,10 @@ export interface GitHubTokenStatus {
    * character of the value surviving at all — nothing a reader could spell back
    * out of a mask is a mask:
    *
-   * - a value of eight characters or fewer, whose kept characters would already
-   *   cover it;
+   * - a value of eight characters or fewer. This length rule stands on its own
+   *   and is not conditioned on whether the kept characters would cover the
+   *   value: such a value would give most of itself away whichever runs of it
+   *   were kept, so the dots come back regardless;
    * - a value whose prefix plus its kept four trailing characters already cover
    *   the whole value. This second condition is NECESSARY and not a restatement
    *   of the first: the first underscore may be the value's LAST character, so
