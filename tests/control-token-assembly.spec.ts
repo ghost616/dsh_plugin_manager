@@ -63,6 +63,12 @@ class SeamStore {
   readonly store = new Map<string, string>()
   readonly setCalls: { ref: string; value: string }[] = []
   readonly unsetCalls: string[] = []
+  /**
+   * Injected `resolve` failure: the request-side read fails while `describe`
+   * keeps answering, which is how the mask's degraded path is exercised (the
+   * status must keep succeeding without a mask).
+   */
+  resolveError: Error | undefined
 
   /** Effective value of one reference name. */
   valueOf(ref: string): string | undefined {
@@ -79,6 +85,7 @@ class SeamStore {
    * spec would otherwise miss.
    */
   async resolve(ref: CredentialRef): Promise<{ value: string; source: string } | undefined> {
+    if (this.resolveError !== undefined) throw this.resolveError
     const name = ref as unknown as string
     const env = this.env.get(name)
     if (env !== undefined && env.length > 0) return { value: env, source: 'env' }
@@ -112,6 +119,15 @@ function seamOf(store: SeamStore): CredentialProvider {
 }
 
 /** Gateway surface as this spec consumes it. */
+interface TokenStatus {
+  configured: boolean
+  source?: string
+  writable: boolean
+  ref: string
+  /** Redacted display mask; absent whenever there is no mask to show. */
+  maskedHint?: string
+}
+
 interface TokenSurface {
   status(): Promise<{ configured: boolean; repositoryPath: string | null }>
   search(
@@ -121,15 +137,9 @@ interface TokenSurface {
     options?: { refresh?: boolean },
   ): Promise<{ totalCount: number }>
   repositoryDetail(repository: string, options?: { refresh?: boolean }): Promise<{ name: string }>
-  tokenStatus(): Promise<{ configured: boolean; source?: string; writable: boolean; ref: string }>
-  saveGitHubToken(value: string | null): Promise<{
-    status: { configured: boolean; source?: string; writable: boolean; ref: string }
-    cacheCleared: boolean
-  }>
-  clearGitHubToken(): Promise<{
-    status: { configured: boolean; source?: string; writable: boolean; ref: string }
-    cacheCleared: boolean
-  }>
+  tokenStatus(): Promise<TokenStatus>
+  saveGitHubToken(value: string | null): Promise<{ status: TokenStatus; cacheCleared: boolean }>
+  clearGitHubToken(): Promise<{ status: TokenStatus; cacheCleared: boolean }>
 }
 
 const contexts: Context[] = []
@@ -227,6 +237,9 @@ describe('market control production assembly: credential-backed GitHub token', (
       source: 'file',
       writable: true,
       ref: HEAD_REF,
+      // Real end-to-end mask: the production port read the value through the
+      // seam and derived the redacted hint (prefix + 8 dots + last 4).
+      maskedHint: 'ghp_••••••••mbly',
     })
 
     await surface.search('demo', null, null)
@@ -260,14 +273,20 @@ describe('market control production assembly: credential-backed GitHub token', (
     const { hops, calls } = stubGitHub()
     const { surface } = await activate(seam)
 
-    const saved = await surface.saveGitHubToken('ghp_fresh')
-    expect(saved.status).toEqual({ configured: true, source: 'file', writable: true, ref: HEAD_REF })
+    const saved = await surface.saveGitHubToken('ghp_fresh_value')
+    expect(saved.status).toEqual({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: HEAD_REF,
+      maskedHint: 'ghp_••••••••alue',
+    })
     // Nothing had been memoized yet, so there was nothing to drop.
     expect(saved.cacheCleared).toBe(false)
-    expect(seam.setCalls).toEqual([{ ref: HEAD_REF, value: 'ghp_fresh' }])
+    expect(seam.setCalls).toEqual([{ ref: HEAD_REF, value: 'ghp_fresh_value' }])
 
     await surface.search('demo', null, null)
-    expect(hops.at(-1)?.authorization).toBe('Bearer ghp_fresh')
+    expect(hops.at(-1)?.authorization).toBe('Bearer ghp_fresh_value')
     expect(calls()).toBe(1)
 
     // Cached within the TTL: the same query serves zero network hops.
@@ -284,6 +303,8 @@ describe('market control production assembly: credential-backed GitHub token', (
     expect(calls()).toBe(2)
     const cleared = await surface.clearGitHubToken()
     expect(cleared.status).toEqual({ configured: false, writable: true, ref: HEAD_REF })
+    // The mask is gone with the value — an absent field, never a placeholder.
+    expect('maskedHint' in cleared.status).toBe(false)
     expect(cleared.cacheCleared).toBe(true)
     expect(seam.unsetCalls).toEqual([HEAD_REF])
 
@@ -324,6 +345,8 @@ describe('market control production assembly: credential-backed GitHub token', (
       source: 'env',
       writable: false,
       ref: HEAD_REF,
+      // A read-only launch-environment value is masked like any other.
+      maskedHint: '••••••••oken',
     })
 
     const save = await surface.saveGitHubToken('ignored').catch((error: unknown) => error)
@@ -356,6 +379,39 @@ describe('market control production assembly: credential-backed GitHub token', (
     expect(hops.at(-1)?.authorization).toBeNull()
   })
 
+  it('never lets the plaintext reach the status, a diagnostic or an error', async () => {
+    // End-to-end leak check through the REAL credential bridge: the status
+    // carries the derived mask, and the plaintext exists only inside the port's
+    // read. A seam that answers `describe` but fails `resolve` is the sharpest
+    // probe — the status must degrade to "no mask" without echoing anything.
+    const seam = new SeamStore()
+    const plaintext = 'ghp_ASSEMBLY_CANARY_0123456789_wxyz'
+    seam.store.set(HEAD_REF, plaintext)
+    seam.resolveError = new Error('credential read failed')
+    const { surface } = await activate(seam)
+
+    const withFailedRead = await surface.tokenStatus()
+    expect(withFailedRead).toMatchObject({ configured: true, source: 'file' })
+    expect('maskedHint' in withFailedRead).toBe(false)
+    expect(JSON.stringify(withFailedRead)).not.toContain(plaintext)
+
+    // The same probe on a save path: the write itself still works (only the
+    // display read failed), and neither the answer nor the error text repeats
+    // the value.
+    const saved = await surface.saveGitHubToken('ghp_second_value')
+    expect(JSON.stringify(saved)).not.toContain(plaintext)
+    expect(seam.setCalls.at(-1)).toEqual({ ref: HEAD_REF, value: 'ghp_second_value' })
+
+    // With the read healthy again, the mask appears and the plaintext still does
+    // not: the status is the only consumer of the value, and it only ever
+    // derives a mask from it. (The effective value is the one the save above
+    // committed — the write really landed.)
+    seam.resolveError = undefined
+    const healthy = await surface.tokenStatus()
+    expect(healthy.maskedHint).toBe('ghp_••••••••alue')
+    expect(JSON.stringify(healthy)).not.toContain(plaintext)
+  })
+
   it('reports a write through the fallback reference when only it is configured', async () => {
     const seam = new SeamStore()
     seam.store.set(FALLBACK_REF, 'stored-fallback')
@@ -366,12 +422,15 @@ describe('market control production assembly: credential-backed GitHub token', (
       source: 'file',
       writable: true,
       ref: FALLBACK_REF,
+      // 'stored-fallback' has no underscore → dots plus its last four characters.
+      maskedHint: '••••••••back',
     })
     // A clear removes the EFFECTIVE reference (the one the market resolves),
     // and the report afterwards names the head again — the reference a save
     // would target, since nothing supplies a value any more.
     const cleared = await surface.clearGitHubToken()
     expect(cleared.status).toEqual({ configured: false, writable: true, ref: HEAD_REF })
+    expect('maskedHint' in cleared.status).toBe(false)
     expect(seam.unsetCalls).toEqual([FALLBACK_REF])
   })
 })

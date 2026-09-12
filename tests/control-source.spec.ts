@@ -12,7 +12,7 @@ import {
   DOWNLOAD_REASON_UNKNOWN,
 } from '../src/host/control/source.ts'
 import type { DownloadCommit, MarketSourceOperations } from '../src/host/control/source.ts'
-import { buildCredentialTokenPort, type GitHubTokenPort } from '../src/host/control/token.ts'
+import { buildCredentialTokenPort, maskOf, type GitHubTokenPort } from '../src/host/control/token.ts'
 import {
   FakeCredentialStore,
   FakeTokenPort,
@@ -1107,6 +1107,9 @@ describe('MarketSourceOperations GitHub token surface', () => {
       source: 'file',
       writable: true,
       ref: GITHUB_TOKEN_REF_NAME,
+      // 'stored-token' has no underscore, so there is no prefix: the mask is the
+      // eight dots plus its last four characters.
+      maskedHint: '••••••••oken',
     })
   })
 
@@ -1119,6 +1122,9 @@ describe('MarketSourceOperations GitHub token surface', () => {
       source: 'env',
       writable: false,
       ref: GITHUB_TOKEN_REF_NAME,
+      // 'env-head' is exactly eight characters: the short-value protection
+      // applies, so the mask keeps no character of it.
+      maskedHint: '••••••••',
     })
 
     const onlyFallback = new FakeCredentialStore()
@@ -1128,8 +1134,9 @@ describe('MarketSourceOperations GitHub token surface', () => {
       source: 'file',
       writable: true,
       ref: GITHUB_TOKEN_FALLBACK_REF_NAME,
-    })
-  })
+      // 'stored-fallback' has no underscore → dots plus its last four characters.
+      maskedHint: '••••••••back',
+    })  })
 
   it('saves to the preferred head reference and answers the status re-read', async () => {
     const seam = new FakeCredentialStore()
@@ -1141,6 +1148,7 @@ describe('MarketSourceOperations GitHub token surface', () => {
       source: 'file',
       writable: true,
       ref: GITHUB_TOKEN_REF_NAME,
+      maskedHint: '••••••••oken',
     })
   })
 
@@ -1251,6 +1259,8 @@ describe('credential token port (real seam bridge)', () => {
       source: 'file',
       writable: true,
       ref: GITHUB_TOKEN_REF_NAME,
+      // 'ghp_head' is eight characters → short-value protection: dots only.
+      maskedHint: '••••••••',
     })
     expect(saved.writeRefName).toBe(GITHUB_TOKEN_REF_NAME)
   })
@@ -1298,5 +1308,204 @@ describe('credential token port (real seam bridge)', () => {
     await expect(unavailable.status()).rejects.toMatchObject({ code: 'github/token-unavailable' })
     await expect(unavailable.save('ghp_any')).rejects.toMatchObject({ code: 'github/token-unavailable' })
     await expect(unavailable.clear()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+  })
+})
+
+describe('credential token port masked hint', () => {
+  /** A minimal Context double answering the inject-free credentials lookup. */
+  function ctxWith(store: object): Context {
+    return { get: (name: string) => (name === 'credentials' ? store : undefined) } as unknown as Context
+  }
+
+  /** A store whose resolve throws (the seam answers describe but not resolve). */
+  class UnresolvableStore extends FakeCredentialStore {
+    override async resolve(): Promise<undefined> {
+      throw new Error('credential read failed')
+    }
+  }
+
+  const LONG_TOKEN = 'ghp_FAKEPLAINTEXT9abcdefghijklmnop4XYZ'
+  const LONG_MASK = 'ghp_••••••••4XYZ'
+
+  it('masks a value as prefix + eight dots + last four characters', async () => {
+    const store = new FakeCredentialStore()
+    store.store.set(GITHUB_TOKEN_REF_NAME, LONG_TOKEN)
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    expect(status.status.maskedHint).toBe(LONG_MASK)
+    expect(status.status.maskedHint?.length).toBe(LONG_MASK.length)
+  })
+
+  it('keeps the dot run at exactly eight whatever the value length is', async () => {
+    const shortish = new FakeCredentialStore()
+    shortish.store.set(GITHUB_TOKEN_REF_NAME, 'ghp_abc1234wxyz')
+    const long = new FakeCredentialStore()
+    long.store.set(GITHUB_TOKEN_REF_NAME, `ghp_${'a'.repeat(400)}wxyz`)
+    expect((await buildCredentialTokenPort(ctxWith(shortish)).status()).status.maskedHint)
+      .toBe('ghp_••••••••wxyz')
+    expect((await buildCredentialTokenPort(ctxWith(long)).status()).status.maskedHint)
+      .toBe('ghp_••••••••wxyz')
+  })
+
+  it('shows no prefix for a value without an underscore', async () => {
+    const store = new FakeCredentialStore()
+    store.store.set(GITHUB_TOKEN_REF_NAME, 'abcdefgh12345678wxyz')
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    expect(status.status.maskedHint).toBe('••••••••wxyz')
+  })
+
+  it('caps a long prefix at twelve characters including its underscore', async () => {
+    const store = new FakeCredentialStore()
+    store.store.set(GITHUB_TOKEN_REF_NAME, 'abcdefghijklmnop_qrstuvwxyz')
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    // 'abcdefghijklm' (13 chars through the underscore) truncates to 12.
+    expect(status.status.maskedHint).toBe('abcdefghijkl••••••••wxyz')
+    expect(status.status.maskedHint).not.toContain('m_')
+  })
+
+  it('returns dots alone for a short value, with no character of it', async () => {
+    const store = new FakeCredentialStore()
+    store.store.set(GITHUB_TOKEN_REF_NAME, 'ghp_1234')
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    expect(status.status.maskedHint).toBe('••••••••')
+    expect(status.status.maskedHint).not.toContain('ghp')
+    expect(status.status.maskedHint).not.toContain('1')
+  })
+
+  it('uses the shared mask rule at its boundaries', () => {
+    // Unit-level pin of the rule itself (the port assertions above prove it is
+    // what the seam-driven status uses).
+    expect(maskOf('abcdefgh')).toBe('••••••••')
+    expect(maskOf('abcdefghi')).toBe('••••••••fghi')
+    expect(maskOf('ghp_abcdefghijklmnop')).toBe('ghp_••••••••mnop')
+    expect(maskOf('under_score_here')).toBe('under_••••••••here')
+    expect(maskOf('no_underscore_at_all')).toBe('no_••••••••_all')
+  })
+
+  it('masks an environment-supplied (read-only) value as well', async () => {
+    const store = new FakeCredentialStore()
+    store.env.set(GITHUB_TOKEN_REF_NAME, LONG_TOKEN)
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    expect(status.status).toMatchObject({ configured: true, source: 'env', writable: false })
+    expect(status.status.maskedHint).toBe(LONG_MASK)
+  })
+
+  it('omits the field entirely while unconfigured', async () => {
+    const store = new FakeCredentialStore()
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    expect(status.status.configured).toBe(false)
+    expect('maskedHint' in status.status).toBe(false)
+    expect(JSON.stringify(status.status)).not.toContain('maskedHint')
+  })
+
+  it('omits the field, without failing the read, when the value cannot be resolved', async () => {
+    const store = new UnresolvableStore()
+    store.store.set(GITHUB_TOKEN_REF_NAME, LONG_TOKEN)
+    const status = await buildCredentialTokenPort(ctxWith(store)).status()
+    // The three state facts still answer; only the mask is withheld.
+    expect(status.status).toMatchObject({ configured: true, source: 'file', writable: true })
+    expect('maskedHint' in status.status).toBe(false)
+  })
+
+  it('never leaks the plaintext through the status, a diagnostic or an error', async () => {
+    const warns: string[] = []
+    const errors: string[] = []
+    const store = new FakeCredentialStore()
+    store.store.set(GITHUB_TOKEN_REF_NAME, LONG_TOKEN)
+    const port = buildCredentialTokenPort(ctxWith(store), {
+      logger: { warn: (message) => { warns.push(message) }, error: (message) => { errors.push(message) } },
+    })
+    const status = await port.status()
+    expect(JSON.stringify(status)).not.toContain(LONG_TOKEN)
+    expect(status.status.maskedHint).toBe(LONG_MASK)
+
+    // A failing resolve after a successful describe must not surface the value
+    // either (the store answers describe, then fails the read).
+    const failing = new UnresolvableStore()
+    failing.store.set(GITHUB_TOKEN_REF_NAME, LONG_TOKEN)
+    const failingPort = buildCredentialTokenPort(ctxWith(failing), {
+      logger: { warn: (message) => { warns.push(message) }, error: (message) => { errors.push(message) } },
+    })
+    const degraded = await failingPort.status()
+    expect(JSON.stringify(degraded)).not.toContain(LONG_TOKEN)
+    expect([...warns, ...errors].join('\n')).not.toContain(LONG_TOKEN)
+    expect([...warns, ...errors]).toEqual([])
+
+    // The write paths keep their own semantics and leak nothing either.
+    await expect(failingPort.save('')).rejects.toMatchObject({ code: 'github/bad-request' })
+    await expect(port.clear()).resolves.toMatchObject({ status: { configured: false } })
+    expect([...warns, ...errors].join('\n')).not.toContain(LONG_TOKEN)
+  })
+
+  it('shows the mask after a save and drops it after a clear', async () => {
+    const store = new FakeCredentialStore()
+    const port = buildCredentialTokenPort(ctxWith(store))
+    expect('maskedHint' in (await port.status()).status).toBe(false)
+
+    const saved = await port.save(LONG_TOKEN)
+    expect(saved.status.maskedHint).toBe(LONG_MASK)
+
+    const cleared = await port.clear()
+    expect(cleared.status.configured).toBe(false)
+    expect('maskedHint' in cleared.status).toBe(false)
+  })
+
+  it('never lets the mask change the write gates', async () => {
+    // Read-only (environment) deployment: the mask is present, and both writes
+    // are still refused exactly as before.
+    const store = new FakeCredentialStore()
+    store.env.set(GITHUB_TOKEN_REF_NAME, LONG_TOKEN)
+    const port = buildCredentialTokenPort(ctxWith(store))
+    expect((await port.status()).status.maskedHint).toBe(LONG_MASK)
+    await expect(port.save('ghp_other')).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    await expect(port.clear()).rejects.toMatchObject({ code: 'github/token-unavailable' })
+    expect(store.setCalls).toEqual([])
+    expect(store.unsetCalls).toEqual([])
+  })
+
+  it('degrades to dots when the kept characters would cover the whole value', async () => {
+    // Security pin (tester-reported denial): the first underscore may be the
+    // value's LAST character, which makes the prefix identical to the whole
+    // value — `secretok_••••••••tok_` would echo every character on the wire.
+    // Any mask whose prefix + suffix covers the value degrades to the dots.
+    const trailingUnderscore: readonly [string, number][] = [
+      ['aaaaaaaa_', 9],
+      ['aaaaaaaaa_', 10],
+      ['aaaaaaaaaa_', 11],
+      ['aaaaaaaaaaa_', 12],
+    ]
+    for (const [value, length] of trailingUnderscore) {
+      expect(value.length).toBe(length)
+      expect(maskOf(value)).toBe('••••••••')
+      expect(maskOf(value)).not.toContain(value)
+      expect(maskOf(value)).not.toContain('a')
+    }
+
+    // The equivalence class behind it: when the prefix and the suffix together
+    // still cover the value, those degrade too.
+    for (const value of ['abcd_efgh', 'abcdefghi_', 'abcdefghijkl_']) {
+      expect(maskOf(value)).toBe('••••••••')
+      expect(maskOf(value)).not.toContain(value)
+    }
+    // Values that leave a gap between prefix and suffix keep their shape: the
+    // mask is then not reconstructible (the underscore's position is not in it).
+    expect(maskOf('abc_defgh')).toBe('abc_••••••••efgh')
+    expect(maskOf('a_bcdefgh')).toBe('a_••••••••efgh')
+    // Seventeen characters is the first length where prefix + suffix stays
+    // strictly inside the value (12 + 4 < 17).
+    expect(maskOf('abcdefghijkl_mnop')).toBe('abcdefghijkl••••••••mnop')
+    expect(maskOf('abcdefghijkl_mno')).toBe('••••••••')
+  })
+
+  it('degrades the trailing-underscore shape on the status as well', async () => {
+    const store = new FakeCredentialStore()
+    // A nine-character value whose only underscore is its last character: the
+    // host must not echo it, so the status carries the dots alone and nothing
+    // else derived from the value.
+    store.store.set(GITHUB_TOKEN_REF_NAME, 'secretok_')
+    const port = buildCredentialTokenPort(ctxWith(store))
+    const status = await port.status()
+    expect(status.status.maskedHint).toBe('••••••••')
+    expect(JSON.stringify(status)).not.toContain('secretok_')
+    expect(JSON.stringify(status)).not.toContain('ok_')
   })
 })

@@ -103,6 +103,15 @@ export interface MarketTokenStatus {
   readonly writable: boolean
   /** Effective reference name (`DSH_GITHUB_TOKEN` preferred, then the raw one). */
   readonly ref: string
+  /**
+   * Redacted, display-only mask of the effective value as the HOST built it
+   * (prefix + a fixed dot run + the last characters, or the dot run alone for a
+   * value too short to keep any of it). Absent means "nothing to show" — the
+   * host omits the field rather than sending an empty or placeholder string —
+   * so a consumer renders it VERBATIM and never re-derives, re-masks or trims
+   * it. It is the only value-derived string that ever crosses the wire.
+   */
+  readonly maskedHint?: string
 }
 
 /** Wire envelope as parsed from the HTTP body (typed locally, asserted below). */

@@ -669,6 +669,12 @@ export interface TokenStatusSeed {
   writable?: boolean
   /** Effective reference name (the wire carries the plain string). */
   ref?: string
+  /**
+   * Redacted mask the host derived from the value. Omitting it models the host's
+   * "nothing to show": the field is absent, never an empty or placeholder
+   * string. Whatever text lands here is what a consumer renders verbatim.
+   */
+  maskedHint?: string
 }
 
 /**
@@ -689,6 +695,7 @@ export function makeTokenStatus(seed: TokenStatusSeed = {}): GitHubTokenStatus {
     // written); the read-only launch environment is the explicit `false`.
     writable: seed.writable ?? true,
     ref: (seed.ref ?? 'DSH_GITHUB_TOKEN') as GitHubTokenStatus['ref'],
+    ...(seed.maskedHint === undefined ? {} : { maskedHint: seed.maskedHint }),
   }
 }
 

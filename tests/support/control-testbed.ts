@@ -49,7 +49,7 @@ import {
   GITHUB_TOKEN_FALLBACK_REF,
   GITHUB_TOKEN_REF,
 } from '../../src/host/market/token.ts'
-import { unavailableTokenPort, type GitHubTokenPort, type TokenStatusReport } from '../../src/host/control/token.ts'
+import { unavailableTokenPort, maskOf, type GitHubTokenPort, type TokenStatusReport } from '../../src/host/control/token.ts'
 import type { CredentialInfo, CredentialRef } from '@deepseek-ai/dsh-credentials'
 
 /** Scripted loader adapter with real create/update/remove/rollback shape. */
@@ -785,6 +785,19 @@ export class FakeCredentialStore {
     return stored !== undefined && stored.length > 0 ? stored : undefined
   }
 
+  /**
+   * The request-side read (`CredentialProvider.resolve`): the same precedence
+   * {@link valueOf} models, answered as the seam's value+source pair. It is also
+   * the read the token status uses to build its redacted mask, so a double
+   * without it would silently produce "no mask" and hide the whole feature.
+   */
+  async resolve(ref: string): Promise<{ value: string; source: string } | undefined> {
+    const env = this.env.get(ref)
+    if (env !== undefined && env.length > 0) return { value: env, source: 'env' }
+    const stored = this.store.get(ref)
+    return stored !== undefined && stored.length > 0 ? { value: stored, source: 'file' } : undefined
+  }
+
   async describe(ref: string): Promise<CredentialInfo> {
     this.described.push(ref)
     const env = this.env.get(ref)
@@ -874,10 +887,15 @@ export class FakeTokenPort implements GitHubTokenPort {
     const effectiveName = refs.find(name => this.seam.valueOf(name) !== undefined)
     const ref = (effectiveName ?? refs[0] ?? GITHUB_TOKEN_REF_NAME) as unknown as CredentialRef
     const info = await this.seam.describe(ref as unknown as string)
+    // The mask is derived by the PRODUCTION helper, so this double cannot drift
+    // from the real masking rule (the shape it feeds the channel/gateway specs).
+    const value = effectiveName === undefined ? undefined : this.seam.valueOf(effectiveName)
+    const maskedHint = value === undefined || value.length === 0 ? undefined : maskOf(value)
     const status = {
       ...(info.configured ? { configured: true, source: info.source } : { configured: false }),
       writable: info.writable,
       ref,
+      ...(maskedHint === undefined ? {} : { maskedHint }),
     }
     return {
       status: status as unknown as TokenStatusReport['status'],

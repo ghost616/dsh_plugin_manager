@@ -24,7 +24,7 @@
  * for a classified plugin with a readable manifest), so the spec never depends
  * on a package manager being installed in the test environment.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
@@ -36,6 +36,13 @@ import { MarketRepositoryService } from '../src/host/market/service.ts'
 import type { MarketRepository } from '../src/host/market/index.ts'
 import { parsePluginKey } from '../src/host/market/keys.ts'
 import { marketControlPlugin } from '../lib/types/host/control/index.js'
+
+// This spec runs REAL `git init/clone` and real on-disk writes (tests/.tmp, an
+// exFAT volume) through `execFileSync`, so a loaded machine can push a single
+// case past vitest's 5 s default — an intermittent false red of the plain
+// `npx vitest run` gate (observed once at 2 timed-out cases, green in isolation
+// and on the next full run). The budget matches control-webchannel.spec.ts.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
 
 const SLUG = 'octocat/demo-plugin'
 const PLUGIN_KEY = 'gh-octocat-demo-plugin'

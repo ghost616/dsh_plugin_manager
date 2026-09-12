@@ -29,6 +29,15 @@
  *   `GitHubMarket` re-resolves per request too. The only memoized GitHub answer
  *   the market keeps is its read-only TTL cache, and the assembly drops that
  *   cache after every committed write.
+ * - **The plaintext never leaves the host.** The status reports a redacted,
+ *   display-only mask of the effective value (`GitHubTokenStatus.maskedHint`,
+ *   built by {@link maskOf} from a read through the seam this call already
+ *   resolved). The mask is the ONLY string derived from the value that may leave
+ *   this module: the value lives in one local scope, is never logged, never
+ *   attached to an error, never persisted, and never influences authorization,
+ *   reference precedence or a write decision — it is presentation, nothing more.
+ *   A value that cannot be read simply yields no mask (an absent field, never a
+ *   placeholder), and that read failure never fails the status itself.
  *
  * Read-only rejections use one stable code (`github/token-unavailable`, the
  * same code the missing-seam case uses) so a client branches once: "this
@@ -90,7 +99,12 @@ export interface TokenStatusReport {
  * cache and never holds a value (only the seam does).
  */
 export interface GitHubTokenPort {
-  /** Read-only status (no secret slot, safe to cross the wire). */
+  /**
+   * Read-only status (no secret slot, safe to cross the wire). A configured
+   * deployment also carries the redacted `maskedHint` mask of the effective
+   * value; an unconfigured one, or one whose value could not be read, omits the
+   * field entirely.
+   */
   status(): Promise<TokenStatusReport>
   /**
    * Store one non-empty token in the seam's writable layer. An empty value is
@@ -286,15 +300,47 @@ class CredentialTokenPort implements GitHubTokenPort {
     } catch (error) {
       throw unavailableDueTo('read', error, this.options.logger)
     }
+    // Display-only mask of the value, built from a read through the seam this
+    // call ALREADY resolved (no second service lookup, no caching of the service
+    // or the value). SECURITY: the plaintext lives in this local scope only —
+    // the status carries the derived mask, never the value, and no diagnostic on
+    // any path of this function may include it.
+    const maskedHint = await this.maskOf(resolution, effective.ref)
     return {
       status: {
         configured: true,
         ...(source === undefined ? {} : { source }),
         writable: effective.info.writable,
         ref: effective.ref,
+        ...(maskedHint === undefined ? {} : { maskedHint }),
       },
       writeRefName: gitHubTokenRefName(headRef()),
     }
+  }
+
+  /**
+   * The redacted display mask of one configured reference, or undefined when the
+   * value cannot be read.
+   *
+   * A read failure here is DELIBERATELY silent and local: the status must keep
+   * succeeding (a surface that cannot show a mask still shows the three state
+   * facts), the failure introduces no new error code, and it never changes what
+   * `status` reports about configured/source/writable — the mask is presentation
+   * and has no say in any decision. The plaintext never leaves this method: only
+   * {@link maskOf} derives a string from it, and no branch logs the value.
+   */
+  private async maskOf(resolution: SeamResolution, ref: CredentialRef): Promise<string | undefined> {
+    let value: string | undefined
+    try {
+      value = (await resolution.info.resolve(ref))?.value
+    } catch {
+      // Diagnostic-free on purpose: the seam's own failure text is the provider's
+      // business, and echoing it risks carrying provider-side detail this module
+      // does not need. "No mask" is the whole answer.
+      return undefined
+    }
+    if (value === undefined || value.length === 0) return undefined
+    return maskOf(value)
   }
 
   /** Refuse a write the seam cannot make effective (read-only shadow). */
@@ -330,6 +376,61 @@ function headRef(): CredentialRef {
   const head = CREDENTIALS_GITHUB_TOKEN_REFS[0]
   if (head === undefined) throw tokenUnavailable('The GitHub token reference list is empty.')
   return head
+}
+
+/** The fixed run of dots a mask always carries, independent of the value's length. */
+const MASK_DOTS = '•'.repeat(8)
+
+/** Longest prefix a mask may keep, in characters (underscore included). */
+const MASK_PREFIX_MAX = 12
+
+/** How many trailing characters a mask keeps of a long-enough value. */
+const MASK_SUFFIX_LENGTH = 4
+
+/**
+ * Values this long or shorter carry no mask characters at all.
+ *
+ * The bound is what makes the mask non-invertible for the shortest values: at
+ * exactly nine characters a "prefix + 8 dots + last 4" mask would cover the
+ * whole value and simply re-print it, so anything at or below this length yields
+ * the dots alone.
+ */
+const MASK_SHORT_VALUE_MAX = 8
+
+/**
+ * Redacted, display-only mask of one token value — the ONLY string ever derived
+ * from the plaintext, and the only thing about it that may leave this module.
+ *
+ * The rule, applied in order:
+ *
+ * 1. a value of {@link MASK_SHORT_VALUE_MAX} characters or fewer yields the dots
+ *    alone — no character of the value survives;
+ * 2. the prefix is the value's opening up to and INCLUDING its first underscore,
+ *    capped at {@link MASK_PREFIX_MAX} characters; a value without an underscore
+ *    contributes no prefix at all;
+ * 3. the kept characters must not cover the whole value: when they do, the mask
+ *    degrades to the dots alone, exactly like a short value. This is a
+ *    NECESSARY second guard, not a restatement of (1) — the first underscore
+ *    may be the value's LAST character, which makes the prefix the entire value
+ *    (`secretok_` → `secretok_••••••••tok_` would echo every character), and
+ *    below roughly seventeen characters the prefix and suffix together can
+ *    still spell the value out;
+ * 4. always exactly {@link MASK_DOTS} dots, so the run never reveals the length;
+ * 5. the value's last {@link MASK_SUFFIX_LENGTH} characters.
+ *
+ * `undefined` is never returned for a real value: the caller omits the field
+ * instead, so "no mask" is an absent field rather than a placeholder string.
+ */
+export function maskOf(value: string): string {
+  if (value.length <= MASK_SHORT_VALUE_MAX) return MASK_DOTS
+  const underscore = value.indexOf('_')
+  const prefix = underscore === -1 ? '' : value.slice(0, underscore + 1).slice(0, MASK_PREFIX_MAX)
+  const suffix = value.slice(-MASK_SUFFIX_LENGTH)
+  // Never let the kept characters cover the value: a fully reconstructible mask
+  // is not a mask. Fall back to the dots alone (the same shape a short value
+  // gets), so no shape of value can be read back out of its mask.
+  if (prefix.length + suffix.length >= value.length) return MASK_DOTS
+  return `${prefix}${MASK_DOTS}${suffix}`
 }
 
 /** Whether a caller actually supplied a token value (blank counts as absent). */

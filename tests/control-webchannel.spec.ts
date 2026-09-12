@@ -1094,25 +1094,39 @@ describe('market control web channel (M1 source ops round trip)', () => {
     const { router, cacheClears, dispose } = routeFor({ token: new FakeTokenPort(seam) })
     await serve(router)
 
-    // Unconfigured: the surface names the reference a write would target.
+    // Unconfigured: the surface names the reference a write would target, and
+    // carries no mask field at all (never a placeholder string).
     const initial = await call(router, 'tokenStatus', {})
     expect(initial).toEqual({
       ok: true,
       value: { configured: false, writable: true, ref: GITHUB_TOKEN_REF_NAME },
     })
+    expect(JSON.stringify(initial)).not.toContain('maskedHint')
 
-    const saved = await call(router, 'saveGitHubToken', { value: 'ghp_fresh' })
+    const saved = await call(router, 'saveGitHubToken', { value: 'ghp_fresh_token' })
     expect(saved).toEqual({
       ok: true,
       value: {
-        status: { configured: true, source: 'file', writable: true, ref: GITHUB_TOKEN_REF_NAME },
+        status: {
+          configured: true,
+          source: 'file',
+          writable: true,
+          ref: GITHUB_TOKEN_REF_NAME,
+          // The redacted mask crosses the wire with the status; the plaintext
+          // does not (asserted below on the whole envelope).
+          maskedHint: 'ghp_••••••••oken',
+        },
         cacheCleared: true,
       },
     })
-    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_fresh' }])
+    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_fresh_token' }])
+    expect(JSON.stringify(saved)).not.toContain('ghp_fresh_token')
 
     const statusAfterSave = await call(router, 'tokenStatus', {})
-    expect(statusAfterSave).toMatchObject({ ok: true, value: { configured: true, source: 'file' } })
+    expect(statusAfterSave).toMatchObject({
+      ok: true,
+      value: { configured: true, source: 'file', maskedHint: 'ghp_••••••••oken' },
+    })
 
     const cleared = await call(router, 'clearGitHubToken', {})
     expect(cleared).toEqual({
@@ -1122,6 +1136,7 @@ describe('market control web channel (M1 source ops round trip)', () => {
         cacheCleared: true,
       },
     })
+    expect(JSON.stringify(cleared)).not.toContain('maskedHint')
     expect(seam.unsetCalls).toEqual([GITHUB_TOKEN_REF_NAME])
     // Both committed writes dropped the read-only cache.
     expect(cacheClears).toEqual([true, true])
@@ -1159,6 +1174,35 @@ describe('market control web channel (M1 source ops round trip)', () => {
     expect(readOnly.unsetCalls).toEqual([])
     expect(second.cacheClears).toEqual([])
     second.dispose()
+  })
+
+  it('never lets the plaintext token cross the HTTP envelope', async () => {
+    // The mask is the ONLY value-derived string the wire may carry: every
+    // response of the token surface is checked for the plaintext, on the happy
+    // path and on the refusal paths alike.
+    const plaintext = 'ghp_WIRELEAKCANARY0123456789wxyz'
+    const seam = new FakeCredentialStore()
+    const { router, dispose } = routeFor({ token: new FakeTokenPort(seam) })
+    await serve(router)
+
+    const saved = await post(router, { method: 'saveGitHubToken', args: { value: plaintext } })
+    expect(saved.body.ok).toBe(true)
+    expect(JSON.stringify(saved.body)).not.toContain(plaintext)
+    expect(JSON.stringify(saved.body)).toContain('ghp_••••••••wxyz')
+
+    const status = await post(router, { method: 'tokenStatus', args: {} })
+    expect(JSON.stringify(status.body)).not.toContain(plaintext)
+
+    // A refusal (empty value) must not echo the stored value either.
+    const refused = await post(router, { method: 'saveGitHubToken', args: { value: '' } })
+    expect(refused.body.ok).toBe(false)
+    expect(JSON.stringify(refused.body)).not.toContain(plaintext)
+
+    // A transport-level refusal (bad argument type) likewise.
+    const badType = await post(router, { method: 'saveGitHubToken', args: { value: 42 } }, 200)
+    expect(badType.body.ok).toBe(false)
+    expect(JSON.stringify(badType.body)).not.toContain(plaintext)
+    dispose()
   })
 
   it('never coerces a null or non-string token argument into a stored token', async () => {

@@ -296,6 +296,32 @@ describe('plugin-market browser half assembly', () => {
     })
   })
 
+  it('carries the host-built token mask through to the injected face', async () => {
+    const { slots } = await bench()
+    const masked = makeTokenStatus({
+      configured: true,
+      source: 'file',
+      writable: true,
+      maskedHint: 'ghp_••••••••WXYZ',
+    })
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true, value: masked }))
+    stubChannel(fetchMock)
+    declareSection(slots)
+    const face = faceOf(sectionEntry(slots))
+
+    // The mask is one more FIELD of the status the channel already relays: the
+    // face hands the decoded object through untouched, so the component can
+    // render the host's string verbatim (no channel-side re-derivation).
+    await expect(face.tokenStatus()).resolves.toMatchObject({
+      configured: true,
+      source: 'file',
+      maskedHint: 'ghp_••••••••WXYZ',
+    })
+    const [, init] = fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ method: 'tokenStatus', args: {} })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('forwards the token write value verbatim, including an empty one', async () => {
     const { slots } = await bench()
     const fetchMock = vi.fn(async () => jsonResponse({

@@ -310,7 +310,16 @@ describe('LIZHU probe A: production token port over a real credential seam', () 
     // The write landed on the HEAD: a fallback-only store would otherwise look
     // saved while an environment DSH_GITHUB_TOKEN kept shadowing it.
     expect(seam.setCalls).toEqual([{ ref: HEAD, value: 'ghp_new' }])
-    expect(saved.status).toEqual({ configured: true, source: 'file', writable: true, ref: HEAD })
+    // 'ghp_new' is seven characters, so the mask rule's short-value protection
+    // yields the dots alone (the field is new as of the mask round; the rest of
+    // the status shape is unchanged).
+    expect(saved.status).toEqual({
+      configured: true,
+      source: 'file',
+      writable: true,
+      ref: HEAD,
+      maskedHint: '••••••••',
+    })
 
     // And it is effective immediately, without a second explicit read.
     await expect(port.status()).resolves.toMatchObject({ status: { configured: true, ref: HEAD } })
@@ -589,7 +598,15 @@ describe('LIZHU probe C: token writes through the real HTTP channel', () => {
     const saved = envelope(await callChannel(url, 'saveGitHubToken', { value: 'ghp_http' }))
     expect(saved.ok).toBe(true)
     expect(saved.value).toEqual({
-      status: { configured: true, source: 'file', writable: true, ref: HEAD },
+      // 'ghp_http' is eight characters → short-value protection: dots alone (the
+      // maskedHint field is new as of the mask round; the rest is unchanged).
+      status: {
+        configured: true,
+        source: 'file',
+        writable: true,
+        ref: HEAD,
+        maskedHint: '••••••••',
+      },
       cacheCleared: false,
     })
     expect(seam.setCalls).toEqual([{ ref: HEAD, value: 'ghp_http' }])

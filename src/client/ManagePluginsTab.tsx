@@ -1590,6 +1590,27 @@ export function tokenFailureText(failure: ManageUiFailure, t: Translate): string
 }
 
 /**
+ * The mask the status line may append, or null when the panel shows none.
+ *
+ * Two independent conditions, both required:
+ *
+ * 1. the deployment is CONFIGURED — an unconfigured status never has anything to
+ *    mask, and rendering a stale hint next to "not configured" would be a lie;
+ * 2. the host actually supplied a non-empty hint. The host omits the field
+ *    entirely when it has no mask to give (including a value it could not read),
+ *    and it never sends an empty or placeholder string, so the emptiness check
+ *    only hardens the boundary against a foreign producer.
+ *
+ * The returned string is rendered VERBATIM: this build never re-derives,
+ * re-masks or trims it — the rule that produced it belongs to the host.
+ */
+export function tokenMaskText(token: MarketTokenStatus): string | null {
+  if (!token.configured) return null
+  const hint = token.maskedHint
+  return typeof hint === 'string' && hint.length > 0 ? hint : null
+}
+
+/**
  * The access-token tab: a status line naming the effective reference plus the
  * three-way state, a password input, and the save/clear pair.
  *
@@ -1662,6 +1683,7 @@ function AccessTokenPanel({ t, tokenStatus, saveToken, clearToken }: {
   const locked = ready !== undefined && !ready.writable
   const canSave = ready !== undefined && ready.writable && !busy
   const canClear = canSave && ready.configured
+  const maskText = ready === undefined ? null : tokenMaskText(ready)
 
   return (
     <div className={css.tokenPanel} style={PANEL_FILL_STYLE} data-market-token-panel>
@@ -1683,6 +1705,17 @@ function AccessTokenPanel({ t, tokenStatus, saveToken, clearToken }: {
               source: tokenSourceText(ready.source, t),
               state: ready.configured ? t('tokenConfigured') : t('tokenUnconfigured'),
             })}
+            {/*
+              The mask is an IDENTIFIER, not copy: it rides as its own trailing
+              segment instead of being spliced into the sentence above, so the
+              dictionary keeps its zh/en key sets independent of the mask's
+              shape. The separator lives INSIDE the segment, so the whole thing
+              (delimiter included) disappears when there is no mask — nothing
+              here can leave a dangling delimiter behind.
+            */}
+            {maskText === null ? null : (
+              <span data-token-mask>{` · ${maskText}`}</span>
+            )}
           </p>
           <p className={css.hint} data-token-hint data-token-readonly={locked ? 'true' : undefined}>
             {locked ? t('tokenEnvHint', { ref: ready.ref }) : t('tokenSourceHint', { ref: ready.ref })}

@@ -621,15 +621,25 @@ describe('ManagePluginsTab access-token tab', () => {
 
   /** The expected status line of one status seed (zh dictionary templates). */
   function statusLine(
-    seed: { configured?: boolean; source?: keyof typeof KNOWN_SOURCES; ref?: string },
+    seed: {
+      configured?: boolean
+      source?: keyof typeof KNOWN_SOURCES
+      ref?: string
+      /** Mask the host supplied; omitted = the line carries no mask segment. */
+      maskedHint?: string
+    },
   ): string {
     const configured = seed.configured ?? false
     const sourceKey = seed.source === undefined ? undefined : KNOWN_SOURCES[seed.source]
     const source = sourceKey === undefined ? zh.tokenSourceOther : zh[sourceKey]
-    return zh.tokenStatusLine
+    const line = zh.tokenStatusLine
       .replace('{ref}', seed.ref ?? 'DSH_GITHUB_TOKEN')
       .replace('{source}', source)
       .replace('{state}', configured ? zh.tokenConfigured : zh.tokenUnconfigured)
+    if (!configured || seed.maskedHint === undefined) return line
+    // The mask rides as a LABEL-FREE trailing segment: just the separator and the
+    // host's string, so the line reads "… · 已配置 · ghp_••••••••WXYZ".
+    return `${line} · ${seed.maskedHint}`
   }
 
   it('mounts the panel lazily and reads the token status only once it is selected', async () => {
@@ -693,6 +703,7 @@ describe('ManagePluginsTab access-token tab', () => {
       source: 'file',
       writable: true,
       ref: 'GITHUB_TOKEN',
+      maskedHint: 'ghp_••••••••WXYZ',
     }))
     const { props } = managePageHarness({ tokenStatus })
     const host = await renderInto(<ManagePluginsTab {...props} />)
@@ -702,8 +713,16 @@ describe('ManagePluginsTab access-token tab', () => {
     const status = panel.querySelector<HTMLElement>('[data-token-status]')!
     // Only the second name resolves here: the line must name THAT reference
     // rather than the preferred head, otherwise a live token reads as missing.
-    expect(status.textContent).toBe(statusLine({ configured: true, source: 'file', ref: 'GITHUB_TOKEN' }))
+    expect(status.textContent).toBe(statusLine({
+      configured: true,
+      source: 'file',
+      ref: 'GITHUB_TOKEN',
+      maskedHint: 'ghp_••••••••WXYZ',
+    }))
     expect(status.textContent).toContain('GITHUB_TOKEN')
+    // The mask the HOST built rides the line verbatim, as its own label-free
+    // segment: the separator and the string, nothing between them.
+    expect(panel.querySelector('[data-token-mask]')?.textContent).toBe(' · ghp_••••••••WXYZ')
     expect(status.getAttribute('data-token-configured')).toBe('true')
     expect(panel.querySelector<HTMLInputElement>('[data-token-input]')!.disabled).toBe(false)
     expect(panel.querySelector<HTMLButtonElement>('[data-token-clear]')!.disabled).toBe(false)
@@ -871,5 +890,160 @@ describe('ManagePluginsTab access-token tab', () => {
     await flush()
     expect(host.textContent).toBe('')
     host.remove()
+  })
+})
+
+describe('ManagePluginsTab token mask on the status line', () => {
+  /** Open the page's third tab (lazily mounted, like the GitHub one). */
+  async function openTokenTab(host: HTMLElement): Promise<HTMLElement> {
+    await click(host.querySelector('[data-market-tab="token"]'))
+    await flush()
+    return host.querySelector<HTMLElement>('[data-market-token-panel]')!
+  }
+
+  it('renders the host-built mask as its own trailing segment of the status line', async () => {
+    const maskedHint = 'ghp_••••••••WXYZ'
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'file',
+        writable: true,
+        maskedHint,
+      })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    const mask = status.querySelector<HTMLElement>('[data-token-mask]')!
+    // The mask is a SEGMENT, not a sentence: the dictionary copy is untouched and
+    // the host's string is rendered verbatim (8 dots and the last four
+    // characters exactly as it arrived), with no label of its own.
+    expect(status.textContent).toBe(`${zh.tokenStatusLine
+      .replace('{ref}', 'DSH_GITHUB_TOKEN')
+      .replace('{source}', zh.tokenSourceFile)
+      .replace('{state}', zh.tokenConfigured)} · ${maskedHint}`)
+    expect(mask.textContent).toBe(` · ${maskedHint}`)
+    expect(mask.textContent).toContain(maskedHint)
+    // Hard red line: the plaintext value never reaches the DOM at all.
+    expect(host.textContent).not.toContain('ghp_1234567890abcdefWXYZ')
+  })
+
+  it('renders a short token as the dot run alone and never as its characters', async () => {
+    const maskedHint = '••••••••'
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'file',
+        writable: true,
+        maskedHint,
+      })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const mask = panel.querySelector<HTMLElement>('[data-token-status] [data-token-mask]')!
+    expect(mask.textContent).toBe(` · ${maskedHint}`)
+    // Nothing of the stored value may appear: a short value contributes no
+    // character to its mask.
+    expect(host.textContent).not.toContain('ghp_123')
+    expect(host.textContent).not.toContain('1234')
+  })
+
+  it('omits the mask segment entirely while unconfigured (no dangling separator)', async () => {
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({ configured: false, writable: true })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    expect(status.querySelector('[data-token-mask]')).toBeNull()
+    const line = status.textContent!
+    expect(line).toBe(zh.tokenStatusLine
+      .replace('{ref}', 'DSH_GITHUB_TOKEN')
+      .replace('{source}', zh.tokenSourceOther)
+      .replace('{state}', zh.tokenUnconfigured))
+    // No separator, no space, no placeholder left behind by the absent segment.
+    expect(line.endsWith(zh.tokenUnconfigured)).toBe(true)
+    expect(line.endsWith('·')).toBe(false)
+    expect(line.endsWith(' ')).toBe(false)
+  })
+
+  it('never renders the segment for a hint the host did not really supply', async () => {
+    // A foreign producer sending an empty string rather than omitting the field
+    // must not produce a bare separator with nothing after it.
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'file',
+        writable: true,
+        maskedHint: '',
+      })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+    expect(panel.querySelector('[data-token-mask]')).toBeNull()
+    const line = panel.querySelector<HTMLElement>('[data-token-status]')!.textContent!
+    // The unconfigured/label-free line, untouched: no separator, no space.
+    expect(line.endsWith(zh.tokenConfigured)).toBe(true)
+    expect(line.endsWith('·')).toBe(false)
+    expect(line.endsWith(' ')).toBe(false)
+  })
+
+  it('shows the mask for the read-only launch environment exactly like the stored layer', async () => {
+    const maskedHint = 'ghp_••••••••WXYZ'
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'env',
+        writable: false,
+        maskedHint,
+      })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+
+    // The read-only layer changes which ACTIONS exist, never whether the mask is
+    // shown: the user still needs to see which token the launch environment set.
+    expect(panel.querySelector<HTMLElement>('[data-token-status] [data-token-mask]')?.textContent)
+      .toBe(` · ${maskedHint}`)
+    expect(panel.querySelector<HTMLInputElement>('[data-token-input]')!.disabled).toBe(true)
+  })
+
+  it('follows the mask of a saved value and drops it again after a clear', async () => {
+    const savedMask = 'ghp_••••••••WXYZ'
+    const { props } = managePageHarness({
+      tokenStatus: vi.fn(async () => makeTokenStatus({ configured: false, writable: true })),
+      saveToken: vi.fn(async () => makeTokenUpdate({
+        configured: true,
+        source: 'file',
+        maskedHint: savedMask,
+      })),
+      clearToken: vi.fn(async () => makeTokenUpdate({ configured: false })),
+    })
+    const host = await renderInto(<ManagePluginsTab {...props} />)
+    await flush()
+    const panel = await openTokenTab(host)
+    expect(panel.querySelector('[data-token-mask]')).toBeNull()
+
+    await typeInto(panel.querySelector<HTMLInputElement>('[data-token-input]')!, 'ghp_1234567890abcdefWXYZ')
+    await click(panel.querySelector('[data-token-save]'))
+    await flush()
+    // The mask comes from the write ANSWER's status, not from a second read and
+    // not from anything the component derived itself.
+    expect(panel.querySelector<HTMLElement>('[data-token-status] [data-token-mask]')?.textContent)
+      .toBe(` · ${savedMask}`)
+
+    await click(panel.querySelector('[data-token-clear]'))
+    await flush()
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    expect(status.querySelector('[data-token-mask]')).toBeNull()
+    expect(status.textContent!.endsWith(zh.tokenUnconfigured)).toBe(true)
   })
 })

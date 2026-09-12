@@ -482,13 +482,22 @@ describe('MarketControllerGateway host Remote surface', () => {
   it('saves a token, clears the read-only cache and reports the post-write status', async () => {
     const seam = new FakeCredentialStore()
     const { gateway, cacheClears } = gatewayWith({ token: new FakeTokenPort(seam) })
-    const result = await gateway.saveGitHubToken('ghp_fresh')
-    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_fresh' }])
+    const result = await gateway.saveGitHubToken('ghp_fresh_value')
+    expect(seam.setCalls).toEqual([{ ref: GITHUB_TOKEN_REF_NAME, value: 'ghp_fresh_value' }])
     expect(result).toEqual({
-      status: { configured: true, source: 'file', writable: true, ref: GITHUB_TOKEN_REF_NAME },
+      status: {
+        configured: true,
+        source: 'file',
+        writable: true,
+        ref: GITHUB_TOKEN_REF_NAME,
+        // The redacted display mask travels with the status (underscore prefix
+        // + eight dots + last four characters), never the value itself.
+        maskedHint: 'ghp_••••••••alue',
+      },
       cacheCleared: true,
     })
     expect(cacheClears).toEqual([true])
+    expect(JSON.stringify(result)).not.toContain('ghp_fresh_value')
   })
 
   it('reports cacheCleared false when the engine had nothing memoized', async () => {
@@ -503,14 +512,20 @@ describe('MarketControllerGateway host Remote surface', () => {
 
   it('clears a token, drops the cache and returns the unconfigured status', async () => {
     const seam = new FakeCredentialStore()
-    seam.store.set(GITHUB_TOKEN_REF_NAME, 'ghp_stored')
+    seam.store.set(GITHUB_TOKEN_REF_NAME, 'ghp_stored_value')
     const { gateway, cacheClears } = gatewayWith({ token: new FakeTokenPort(seam) })
+    // While configured, the status carries the mask; after the clear the field
+    // is gone (never a placeholder) and no plaintext ever crossed the call.
+    await expect(gateway.tokenStatus()).resolves.toMatchObject({ maskedHint: 'ghp_••••••••alue' })
+
     const result = await gateway.clearGitHubToken()
     expect(seam.unsetCalls).toEqual([GITHUB_TOKEN_REF_NAME])
     expect(result).toEqual({
       status: { configured: false, writable: true, ref: GITHUB_TOKEN_REF_NAME },
       cacheCleared: true,
     })
+    expect('maskedHint' in result.status).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('ghp_stored_value')
     expect(cacheClears).toEqual([true])
   })
 

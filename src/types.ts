@@ -377,7 +377,9 @@ export type GitHubTokenSource = 'env' | 'file' | 'project-env' | 'user-env' | (s
 /**
  * Read-only status of the GitHub access token this deployment sends with its
  * API requests — safe for a settings surface and for the wire, because it has
- * no slot a secret could ride in.
+ * no slot a secret could ride in: the only value-derived field it carries is a
+ * redacted display mask the host builds (see {@link GitHubTokenStatus.maskedHint}),
+ * and the plaintext never leaves the host.
  *
  * The three state facts mirror the credential seam (`ctx.credentials.describe`)
  * instead of being re-derived here, so a provider change reaches the surface
@@ -411,6 +413,54 @@ export interface GitHubTokenStatus {
    * renders next to the state ("configured, from DSH_GITHUB_TOKEN").
    */
   readonly ref: CredentialRef
+  /**
+   * Redacted, display-only hint of the resolved token — a mask the HOST builds
+   * from the value, never the value itself. The field is optional, and its
+   * absence is the whole signal: it is omitted whenever there is no mask to show
+   * (the reference is unconfigured, or the value could not be read), so there is
+   * never a placeholder string or an empty-string stand-in for "unknown".
+   *
+   * Three properties define this field:
+   *
+   * - **It is a deliberate deviation from the credential seam's own habit.** dsh
+   *   keeps every credential surface boolean-only: `ctx.credentials.describe`
+   *   answers configured/source/writable, and no wire method of the seam ever
+   *   returns a value. This single, narrow value-derived string is the exception
+   *   a settings surface needs in order to show *which* token is in effect
+   *   beyond a bare "yes".
+   * - **It carries the mask and nothing else.** The plaintext token never
+   *   travels through this field, through any other field of this shape, or
+   *   through any other wire field: the producer reads the value host-side
+   *   (through the seam) and only the derived string ever leaves the host.
+   * - **Its dot run is fixed at eight**, independent of the real token's length,
+   *   so the mask cannot leak how long the value is. The prefix and the four
+   *   trailing characters described below are the only characters ever taken
+   *   from it.
+   *
+   * Mask rule (computed by the control layer; stated here so a consumer knows
+   * exactly what it is rendering): the value's opening up to and including its
+   * first underscore — capped at 12 characters, and omitted entirely when the
+   * value has no underscore — then exactly eight dots, then the last four
+   * characters.
+   *
+   * Two self-protection conditions return the eight dots ALONE instead, with no
+   * character of the value surviving at all — nothing a reader could spell back
+   * out of a mask is a mask:
+   *
+   * - a value of eight characters or fewer, whose kept characters would already
+   *   cover it;
+   * - a value whose prefix plus its kept four trailing characters already cover
+   *   the whole value. This second condition is NECESSARY and not a restatement
+   *   of the first: the first underscore may be the value's LAST character, so
+   *   the prefix alone can be the entire value (`secretok_` would otherwise
+   *   render as `secretok_••••••••tok_`, echoing every character it has), and
+   *   whenever the kept runs together spell the value out the result is a fully
+   *   reversible pseudo-mask rather than a mask.
+   *
+   * A consumer renders the string verbatim and never re-derives, recomputes or
+   * trims it.
+   */
+  readonly maskedHint?: string
 }
 
 /**

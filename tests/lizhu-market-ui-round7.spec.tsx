@@ -24,9 +24,11 @@ import {
   SEARCH_PAGE_SIZE,
   rateLimitWaitLine,
   rateLimitWaitText,
+  tokenMaskText,
   tokenSourceText,
   type ManageUiFailure,
 } from '../src/client/ManagePluginsTab.tsx'
+import type { MarketTokenStatus } from '../src/client/channel.ts'
 import {
   makeRepositoryDetail,
   makeSearchPage,
@@ -613,5 +615,121 @@ describe('[离朱] 令牌读取失败不阻塞其它标签页', () => {
     await flush()
     expect(host.querySelector('[data-market-status="configured"]')).not.toBeNull()
     expect(host.querySelector('[data-manage-tab]')).not.toBeNull()
+  })
+})
+
+describe('[离朱] 状态行末尾的脱密掩码（round 8：宿主算好的串，客户端原样渲染）', () => {
+  it('已配置时把掩码作为独立片段追加，且状态行正文（可翻译句）保持不变', async () => {
+    const maskedHint = 'ghp_••••••••WXYZ'
+    const host = await openTab({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'file',
+        writable: true,
+        maskedHint,
+      })),
+    }, 'token')
+    const panel = host.querySelector<HTMLElement>('[data-market-token-panel]')!
+
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    // 掩码是独立片段：正文（前缀句）与插值句一字不改，掩码无标签地直接挂在末尾。
+    expect(status.textContent).toBe(statusLine({
+      configured: true,
+      source: zh.tokenSourceFile,
+      ref: 'DSH_GITHUB_TOKEN',
+    }) + ` · ${maskedHint}`)
+    const segment = status.querySelector<HTMLElement>('[data-token-mask]')
+    expect(segment).not.toBeNull()
+    expect(segment!.textContent).toBe(` · ${maskedHint}`)
+    // 宿主串逐字渲染：8 个圆点与末 4 位一个不少、一个不多。
+    expect(segment!.textContent!.split('•')).toHaveLength(9)
+    expect(segment!.textContent).toContain('WXYZ')
+    // 硬红线：完整明文永不出现在 DOM。
+    expect(host.textContent).not.toContain('ghp_1234567890abcdefWXYZ')
+  })
+
+  it('短令牌渲染为纯圆点，且不retain原值任何字符', async () => {
+    const host = await openTab({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'file',
+        writable: true,
+        maskedHint: '••••••••',
+      })),
+    }, 'token')
+    const panel = host.querySelector<HTMLElement>('[data-market-token-panel]')!
+    const segment = panel.querySelector<HTMLElement>('[data-token-status] [data-token-mask]')!
+    expect(segment.textContent).toBe(' · ••••••••')
+    expect(segment.textContent).not.toMatch(/[0-9A-Za-z]/)
+  })
+
+  it('未配置时不渲染掩码段，也不留下多余分隔符或空格', async () => {
+    const host = await openTab({
+      tokenStatus: vi.fn(async () => makeTokenStatus({ configured: false, writable: true })),
+    }, 'token')
+    const panel = host.querySelector<HTMLElement>('[data-market-token-panel]')!
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    expect(status.querySelector('[data-token-mask]')).toBeNull()
+    const line = status.textContent!
+    expect(line).toBe(statusLine({ configured: false, source: zh.tokenSourceOther, ref: 'DSH_GITHUB_TOKEN' }))
+    expect(line.endsWith(zh.tokenUnconfigured)).toBe(true)
+    expect(line.endsWith('·')).toBe(false)
+    expect(line.endsWith(' ')).toBe(false)
+  })
+
+  it('环境变量只读态与存储文件态一样显示掩码', async () => {
+    const maskedHint = 'ghp_••••••••WXYZ'
+    const host = await openTab({
+      tokenStatus: vi.fn(async () => makeTokenStatus({
+        configured: true,
+        source: 'env',
+        writable: false,
+        maskedHint,
+      })),
+    }, 'token')
+    const panel = host.querySelector<HTMLElement>('[data-market-token-panel]')!
+    expect(panel.querySelector<HTMLElement>('[data-token-status] [data-token-mask]')!.textContent)
+      .toBe(` · ${maskedHint}`)
+    expect(panel.querySelector<HTMLInputElement>('[data-token-input]')!.disabled).toBe(true)
+  })
+
+  it('保留成功后掩码随新状态出现、清除后随之消失', async () => {
+    const savedMask = '••••••••bcde'
+    const host = await openTab({
+      tokenStatus: vi.fn(async () => makeTokenStatus({ configured: false, writable: true })),
+      saveToken: vi.fn(async () => makeTokenUpdate({ configured: true, source: 'file', maskedHint: savedMask })),
+      clearToken: vi.fn(async () => makeTokenUpdate({ configured: false })),
+    }, 'token')
+    const panel = host.querySelector<HTMLElement>('[data-market-token-panel]')!
+    expect(panel.querySelector('[data-token-mask]')).toBeNull()
+
+    await typeInto(panel.querySelector<HTMLInputElement>('[data-token-input]')!, 'ghp_1234567890abcdefbcde')
+    await click(panel.querySelector('[data-token-save]'))
+    await flush()
+    expect(panel.querySelector<HTMLElement>('[data-token-status] [data-token-mask]')!.textContent)
+      .toBe(` · ${savedMask}`)
+
+    await click(panel.querySelector('[data-token-clear]'))
+    await flush()
+    const status = panel.querySelector<HTMLElement>('[data-token-status]')!
+    expect(status.querySelector('[data-token-mask]')).toBeNull()
+    expect(status.textContent!.endsWith(zh.tokenUnconfigured)).toBe(true)
+  })
+
+  it('tokenMaskText 的取值规则：未配置一律无掩码，空串/缺省/非字符串一律无掩码', () => {
+    expect(tokenMaskText({ configured: true, writable: true, ref: 'DSH_GITHUB_TOKEN', maskedHint: 'ghp_••••••••WXYZ' }))
+      .toBe('ghp_••••••••WXYZ')
+    expect(tokenMaskText({ configured: false, writable: true, ref: 'DSH_GITHUB_TOKEN', maskedHint: 'ghp_••••••••WXYZ' }))
+      .toBeNull()
+    expect(tokenMaskText({ configured: true, writable: true, ref: 'DSH_GITHUB_TOKEN' })).toBeNull()
+    expect(tokenMaskText({ configured: true, writable: true, ref: 'DSH_GITHUB_TOKEN', maskedHint: '' })).toBeNull()
+    // 异构生产方传来的怪形状同样降级为「无掩码」，不抛错、不渲染空标签。
+    const foreign = {
+      configured: true,
+      writable: true,
+      ref: 'DSH_GITHUB_TOKEN',
+      maskedHint: 7,
+    } as unknown as MarketTokenStatus
+    expect(tokenMaskText(foreign)).toBeNull()
   })
 })
